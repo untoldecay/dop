@@ -1,0 +1,7 @@
+# Compiled binary
+/dop
+
+# Go build artifacts
+*.test
+*.out
+coverage.txt
