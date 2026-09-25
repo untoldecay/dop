@@ -19,6 +19,7 @@ import (
 	"github.com/fray/dop/internal/execchild"
 	"github.com/fray/dop/internal/initcmd"
 	"github.com/fray/dop/internal/resolve"
+	"github.com/fray/dop/internal/tokenio"
 	"github.com/fray/dop/internal/vault"
 	"github.com/fray/dop/internal/vaultgit"
 	"github.com/fray/dop/internal/vaultsync"
@@ -38,6 +39,9 @@ usage:
   dop env    [--vault PATH]
   dop pull                                       git pull the vault clone
   dop push                                       stage/commit/push logs + vault changes
+  dop token issue --grants g1,g2 [--name X] [--expires D] [--note T]  mint a new auth token
+  dop token list [--vault PATH]                  show active tokens (never prints bearer values)
+  dop token revoke <name-or-prefix>              remove a token from the vault
   dop merge-driver <base> <ours> <theirs>        internal: git merge driver (see .gitattributes)
   dop help
 
@@ -79,6 +83,8 @@ func main() {
 		os.Exit(runPull(os.Args[2:]))
 	case "push":
 		os.Exit(runPush(os.Args[2:]))
+	case "token":
+		os.Exit(runToken(os.Args[2:]))
 	case "merge-driver":
 		os.Exit(runMergeDriver(os.Args[2:]))
 	case "help", "-h", "--help":
@@ -221,6 +227,226 @@ func runPull(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// runToken dispatches `dop token <issue|list|revoke>`.
+func runToken(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: dop token <issue|list|revoke> ...")
+		return 2
+	}
+	switch args[0] {
+	case "issue":
+		return runTokenIssue(args[1:])
+	case "list":
+		return runTokenList(args[1:])
+	case "revoke":
+		return runTokenRevoke(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "dop token: unknown subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func runTokenIssue(args []string) int {
+	fs := flag.NewFlagSet("token issue", flag.ExitOnError)
+	vaultPath := fs.String("vault", envOr("DOP_VAULT", defaultVaultPath()), "path to vault YAML")
+	grantsCSV := fs.String("grants", "", "comma-separated grant IDs (required)")
+	name := fs.String("name", "", "human-readable label for this token")
+	expires := fs.String("expires", "", "expiry date (YYYY-MM-DD) — optional")
+	note := fs.String("note", "", "free-text note")
+	yes := fs.Bool("yes", false, "skip confirmation for sensitive grants (scripting)")
+	_ = fs.Parse(args)
+
+	if *vaultPath == "" {
+		fmt.Fprintln(os.Stderr, "dop token issue: no vault path (--vault or $DOP_VAULT)")
+		return 1
+	}
+	if strings.TrimSpace(*grantsCSV) == "" {
+		fmt.Fprintln(os.Stderr, "dop token issue: --grants is required")
+		return 2
+	}
+	grants := splitCSV(*grantsCSV)
+
+	plain, err := tokenio.LoadPlain(*vaultPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+		return 1
+	}
+	root, err := tokenio.ParseTree(plain)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+		return 1
+	}
+
+	known := tokenio.KnownGrants(root)
+	for _, g := range grants {
+		if !known[g] {
+			fmt.Fprintf(os.Stderr, "dop token issue: unknown grant %q\n", g)
+			return 1
+		}
+	}
+
+	// Confirmation gate for sensitive scopes. Best-effort friction (documented
+	// in ARCHITECTURE.md), not a security boundary.
+	sensitive := tokenio.SensitiveGrants(root, grants)
+	if len(sensitive) > 0 && !*yes {
+		fmt.Fprintf(os.Stderr, "dop token issue: this token will unlock sensitive grants: %v\n", sensitive)
+		fmt.Fprint(os.Stderr, "  type YES to continue: ")
+		var answer string
+		fmt.Fscanln(os.Stdin, &answer)
+		if strings.TrimSpace(answer) != "YES" {
+			fmt.Fprintln(os.Stderr, "dop token issue: aborted")
+			return 1
+		}
+	}
+
+	bearer, err := tokenio.TokenBearer()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+		return 1
+	}
+	rec := tokenio.TokenRecord{
+		Name:      *name,
+		Grants:    grants,
+		ExpiresAt: *expires,
+		Note:      *note,
+	}
+	if rec.Name == "" {
+		rec.Name = "token-" + bearer[4:12]
+	}
+	if err := tokenio.AddAuthToken(root, bearer, rec, currentActor()); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+		return 1
+	}
+	out, err := tokenio.EmitTree(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+		return 1
+	}
+	if err := tokenio.SavePlain(*vaultPath, out); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+		return 1
+	}
+
+	// The bearer is the secret — print it once on stdout, keep audit metadata on stderr.
+	fmt.Fprintf(os.Stderr, "dop token issue: issued %q (grants: %v)\n", rec.Name, grants)
+	fmt.Fprintln(os.Stderr, "  keep the bearer below safe — it is printed ONCE:")
+	fmt.Println(bearer)
+	return 0
+}
+
+func runTokenList(args []string) int {
+	fs := flag.NewFlagSet("token list", flag.ExitOnError)
+	vaultPath := fs.String("vault", envOr("DOP_VAULT", defaultVaultPath()), "path to vault YAML")
+	_ = fs.Parse(args)
+	if *vaultPath == "" {
+		fmt.Fprintln(os.Stderr, "dop token list: no vault path")
+		return 1
+	}
+	plain, err := tokenio.LoadPlain(*vaultPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token list: %v\n", err)
+		return 1
+	}
+	root, err := tokenio.ParseTree(plain)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token list: %v\n", err)
+		return 1
+	}
+	recs := tokenio.ListTokens(root)
+	if len(recs) == 0 {
+		fmt.Println("(no tokens)")
+		return 0
+	}
+	for _, r := range recs {
+		exp := r.ExpiresAt
+		if exp == "" {
+			exp = "-"
+		}
+		fmt.Printf("- %s  grants=%v  created=%s  expires=%s\n", r.Name, r.Grants, r.CreatedAt, exp)
+		if r.Note != "" {
+			fmt.Printf("    note: %s\n", r.Note)
+		}
+	}
+	return 0
+}
+
+func runTokenRevoke(args []string) int {
+	fs := flag.NewFlagSet("token revoke", flag.ExitOnError)
+	vaultPath := fs.String("vault", envOr("DOP_VAULT", defaultVaultPath()), "path to vault YAML")
+	_ = fs.Parse(args)
+
+	rest := fs.Args()
+	if len(rest) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: dop token revoke <name-or-prefix>")
+		return 2
+	}
+	query := rest[0]
+
+	if *vaultPath == "" {
+		fmt.Fprintln(os.Stderr, "dop token revoke: no vault path")
+		return 1
+	}
+	plain, err := tokenio.LoadPlain(*vaultPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token revoke: %v\n", err)
+		return 1
+	}
+	root, err := tokenio.ParseTree(plain)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token revoke: %v\n", err)
+		return 1
+	}
+	hits := tokenio.FindByName(root, query)
+	switch len(hits) {
+	case 0:
+		fmt.Fprintf(os.Stderr, "dop token revoke: no token matches %q\n", query)
+		return 1
+	case 1:
+		if !tokenio.RemoveAuthToken(root, hits[0]) {
+			fmt.Fprintln(os.Stderr, "dop token revoke: internal error (found but not removed)")
+			return 1
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "dop token revoke: ambiguous query %q — %d matches; be more specific\n", query, len(hits))
+		return 1
+	}
+	out, err := tokenio.EmitTree(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token revoke: %v\n", err)
+		return 1
+	}
+	if err := tokenio.SavePlain(*vaultPath, out); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token revoke: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "dop token revoke: removed %q\n", query)
+	return 0
+}
+
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// currentActor is a best-effort audit-line identity used in `created_by`.
+// Prefers $DOP_ACTOR, then $USER. Never fails.
+func currentActor() string {
+	if v := os.Getenv("DOP_ACTOR"); v != "" {
+		return v
+	}
+	if v := os.Getenv("USER"); v != "" {
+		return v
+	}
+	return ""
 }
 
 func runPush(args []string) int {
