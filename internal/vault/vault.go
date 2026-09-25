@@ -31,6 +31,17 @@ type Vault struct {
 	Grants        map[string]Grant       `yaml:"grants"`
 	AuthTokens    map[string]AuthToken   `yaml:"auth_tokens"`
 	AgentPubkeys  map[string]AgentPubkey `yaml:"agent_pubkeys,omitempty"`
+	TeamMembers   map[string]TeamMember  `yaml:"team_members,omitempty"`
+}
+
+// TeamMember records a human vault-holder (age recipient). Adding an entry
+// registers them as a SOPS recipient in .sops.yaml; removing an entry
+// requires rotating every upstream token they may have decrypted historically.
+type TeamMember struct {
+	PubkeyAge string `yaml:"pubkey_age"`
+	AddedAt   string `yaml:"added_at,omitempty"`
+	AddedBy   string `yaml:"added_by,omitempty"`
+	Note      string `yaml:"note,omitempty"`
 }
 
 // AgentPubkey records a cryptographic-identity agent. Auth proceeds by

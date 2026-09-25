@@ -23,6 +23,7 @@ import (
 	"github.com/fray/dop/internal/execchild"
 	"github.com/fray/dop/internal/initcmd"
 	"github.com/fray/dop/internal/resolve"
+	"github.com/fray/dop/internal/teamops"
 	"github.com/fray/dop/internal/tokenio"
 	"github.com/fray/dop/internal/vault"
 	"github.com/fray/dop/internal/vaultgit"
@@ -46,6 +47,9 @@ usage:
   dop token issue --grants g1,g2 [--name X] [--expires D] [--note T]  mint a new auth token
   dop token list [--vault PATH]                  show active tokens (never prints bearer values)
   dop token revoke <name-or-prefix>              remove a token from the vault
+  dop team add-key --name W --pubkey age1...     add teammate as SOPS recipient
+  dop team remove --name W                       remove teammate; prints rotation checklist
+  dop team list                                  list team members
   dop log tail [--n N]                           print recent audit log lines
   dop log grep KEY=VAL [KEY=VAL...]              filter audit log by JSON field equality
   dop merge-driver <base> <ours> <theirs>        internal: git merge driver (see .gitattributes)
@@ -91,6 +95,8 @@ func main() {
 		os.Exit(runPush(os.Args[2:]))
 	case "token":
 		os.Exit(runToken(os.Args[2:]))
+	case "team":
+		os.Exit(runTeam(os.Args[2:]))
 	case "log":
 		os.Exit(runLog(os.Args[2:]))
 	case "merge-driver":
@@ -529,6 +535,197 @@ func runTokenRevoke(args []string) int {
 		AgentName: query,
 		Outcome:   "ok",
 	})
+	return 0
+}
+
+// runTeam dispatches `dop team <add-key|remove|list>`.
+func runTeam(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: dop team <add-key|remove|list> ...")
+		return 2
+	}
+	switch args[0] {
+	case "add-key":
+		return runTeamAddKey(args[1:])
+	case "remove":
+		return runTeamRemove(args[1:])
+	case "list":
+		return runTeamList(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "dop team: unknown subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func runTeamAddKey(args []string) int {
+	fs := flag.NewFlagSet("team add-key", flag.ExitOnError)
+	name := fs.String("name", "", "human-facing member name (required)")
+	pubkey := fs.String("pubkey", "", "age recipient string (age1..., required)")
+	note := fs.String("note", "", "free-text note")
+	vaultPath := fs.String("vault", envOr("DOP_VAULT", defaultVaultPath()), "path to vault YAML")
+	_ = fs.Parse(args)
+
+	if *name == "" || *pubkey == "" {
+		fmt.Fprintln(os.Stderr, "dop team add-key: --name and --pubkey are required")
+		return 2
+	}
+	if !strings.HasPrefix(*pubkey, "age1") {
+		fmt.Fprintln(os.Stderr, "dop team add-key: --pubkey must be an age recipient (age1...)")
+		return 2
+	}
+	if *vaultPath == "" {
+		fmt.Fprintln(os.Stderr, "dop team add-key: no vault path")
+		return 1
+	}
+
+	vaultDir := filepath.Dir(*vaultPath)
+
+	// 1. Add to team_members section of the vault
+	plain, err := tokenio.LoadPlain(*vaultPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team add-key: %v\n", err)
+		return 1
+	}
+	root, err := tokenio.ParseTree(plain)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team add-key: %v\n", err)
+		return 1
+	}
+	teamops.EnsureTeamMember(root, *name, *pubkey, *note, currentActor())
+	out, err := tokenio.EmitTree(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team add-key: %v\n", err)
+		return 1
+	}
+	if err := tokenio.SavePlain(*vaultPath, out); err != nil {
+		fmt.Fprintf(os.Stderr, "dop team add-key: %v\n", err)
+		return 1
+	}
+
+	// 2. Add to .sops.yaml recipients
+	cfg, err := teamops.ReadSopsConfig(vaultDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team add-key: %v\n", err)
+		return 1
+	}
+	if teamops.AddRecipient(cfg, *pubkey) {
+		if err := teamops.WriteSopsConfig(vaultDir, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "dop team add-key: %v\n", err)
+			return 1
+		}
+	}
+
+	// 3. sops updatekeys — re-encrypt vault so the new recipient can decrypt
+	if err := teamops.SopsUpdatekeys(*vaultPath, os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "dop team add-key: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(os.Stderr, "dop team add-key: %s added (pubkey %s)\n", *name, *pubkey)
+	return 0
+}
+
+func runTeamRemove(args []string) int {
+	fs := flag.NewFlagSet("team remove", flag.ExitOnError)
+	name := fs.String("name", "", "member name to remove (required)")
+	vaultPath := fs.String("vault", envOr("DOP_VAULT", defaultVaultPath()), "path to vault YAML")
+	force := fs.Bool("force", false, "actually remove (default is dry-run: print checklist and stop)")
+	_ = fs.Parse(args)
+
+	if *name == "" {
+		fmt.Fprintln(os.Stderr, "dop team remove: --name is required")
+		return 2
+	}
+	if *vaultPath == "" {
+		fmt.Fprintln(os.Stderr, "dop team remove: no vault path")
+		return 1
+	}
+	vaultDir := filepath.Dir(*vaultPath)
+
+	plain, err := tokenio.LoadPlain(*vaultPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team remove: %v\n", err)
+		return 1
+	}
+	root, err := tokenio.ParseTree(plain)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team remove: %v\n", err)
+		return 1
+	}
+
+	// Always print the rotation checklist first — this is the whole point.
+	teamops.BuildChecklist(root, *name).Print(os.Stderr)
+
+	if !*force {
+		fmt.Fprintln(os.Stderr, "dop team remove: dry run. Re-run with --force AFTER you've rotated tokens.")
+		return 0
+	}
+
+	// Force path: actually remove the entry.
+	pubkey := teamops.RemoveTeamMember(root, *name)
+	if pubkey == "" {
+		fmt.Fprintf(os.Stderr, "dop team remove: no team_members entry named %q\n", *name)
+		return 1
+	}
+	out, err := tokenio.EmitTree(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team remove: %v\n", err)
+		return 1
+	}
+	if err := tokenio.SavePlain(*vaultPath, out); err != nil {
+		fmt.Fprintf(os.Stderr, "dop team remove: %v\n", err)
+		return 1
+	}
+
+	cfg, err := teamops.ReadSopsConfig(vaultDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team remove: %v\n", err)
+		return 1
+	}
+	if teamops.RemoveRecipient(cfg, pubkey) {
+		if err := teamops.WriteSopsConfig(vaultDir, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "dop team remove: %v\n", err)
+			return 1
+		}
+	}
+	if err := teamops.SopsUpdatekeys(*vaultPath, os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "dop team remove: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "dop team remove: %s removed (pubkey %s)\n", *name, pubkey)
+	return 0
+}
+
+func runTeamList(args []string) int {
+	fs := flag.NewFlagSet("team list", flag.ExitOnError)
+	vaultPath := fs.String("vault", envOr("DOP_VAULT", defaultVaultPath()), "path to vault YAML")
+	_ = fs.Parse(args)
+	if *vaultPath == "" {
+		fmt.Fprintln(os.Stderr, "dop team list: no vault path")
+		return 1
+	}
+	v, err := vault.Load(*vaultPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team list: %v\n", err)
+		return 1
+	}
+	if len(v.TeamMembers) == 0 {
+		fmt.Println("(no team members)")
+		return 0
+	}
+	names := make([]string, 0, len(v.TeamMembers))
+	for k := range v.TeamMembers {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		m := v.TeamMembers[n]
+		note := m.Note
+		if note == "" {
+			note = "-"
+		}
+		fmt.Printf("- %s  pubkey=%s  added=%s  note=%s\n", n, m.PubkeyAge, m.AddedAt, note)
+	}
 	return 0
 }
 
