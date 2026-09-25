@@ -9,7 +9,7 @@ Design docs: `../../_rules/_projects/DOP/`
 
 ## Status
 
-**P1.a shipped.** Encrypted vault via SOPS+age, `dop init`, `dop init --vault` (bootstraps local bare repo per option 3), `dop encrypt`, all commands transparent over plaintext and encrypted vaults. Merge driver is a loud-fail stub — P1.b implements the real three-way SOPS merge.
+**P0–P5 shipped.** Encrypted vault, git-synced with a real SOPS-aware three-way merge driver, `dop token issue/list/revoke` with a confirmation gate for sensitive grants, signed-challenge auth for crypto agents (`--sign-with`), JSONL audit log with `dop log tail/grep`, and a Claude Code skill + docs recipes.
 
 ## Runtime dependencies
 
@@ -74,6 +74,10 @@ dop exec [--clean-env] -- CMD ...   run CMD with scoped env from DOP_TOKEN
 dop whoami                          show what DOP_TOKEN resolves to
 dop env                             print `export KEY=VAL` lines (for `eval "$(dop env)"`)
 ```
+
+## Recipes
+
+See [`docs/RECIPES.md`](docs/RECIPES.md) for shell/cron, Claude Code, and Buzz cryptographic-agent patterns.
 
 ## Layout
 
