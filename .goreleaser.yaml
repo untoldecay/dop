@@ -1,0 +1,63 @@
+# goreleaser config for the `dop` CLI.
+#
+# Runtime deps NOT bundled: `sops` and `git`. Install scripts must surface
+# these clearly.
+version: 2
+
+project_name: dop
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: dop
+    main: ./cmd/dop
+    binary: dop
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: dop
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - docs/*
+      - skills/claude-code/*
+
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+snapshot:
+  version_template: '{{ .Tag }}-next'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^chore:'
+      - '^style:'
+      - '^ci:'
+
+release:
+  github:
+    owner: untoldecay
+    name: dop
+  prerelease: auto
