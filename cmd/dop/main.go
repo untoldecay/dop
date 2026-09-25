@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"os"
@@ -12,12 +13,16 @@ import (
 	"sort"
 	"strings"
 
+	"time"
+
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/execchild"
 	"github.com/fray/dop/internal/initcmd"
 	"github.com/fray/dop/internal/resolve"
 	"github.com/fray/dop/internal/vault"
 	"github.com/fray/dop/internal/vaultgit"
+	"github.com/fray/dop/internal/vaultsync"
+	"github.com/fray/dop/internal/yamlmerge"
 
 	"filippo.io/age"
 )
@@ -28,15 +33,18 @@ usage:
   dop init                                       first-run setup (generate age key)
   dop init --vault <path-or-url>                 attach a vault repo (option 3: local path OK)
   dop encrypt <plaintext.yaml> <encrypted.yaml>  encrypt a plaintext vault with your age key
-  dop exec   [--vault PATH] [--agent-name NAME] [--clean-env] -- CMD [ARGS...]
+  dop exec   [--vault PATH] [--agent-name NAME] [--clean-env] [--no-pull] -- CMD [ARGS...]
   dop whoami [--vault PATH]
   dop env    [--vault PATH]
+  dop pull                                       git pull the vault clone
+  dop push                                       stage/commit/push logs + vault changes
   dop merge-driver <base> <ours> <theirs>        internal: git merge driver (see .gitattributes)
   dop help
 
 env:
   DOP_TOKEN         bearer auth token (required for exec/whoami/env)
   DOP_VAULT         default --vault path (overridable per-call)
+  DOP_AUTO_PULL     max staleness before dop exec auto-pulls (Go duration, default 5m)
   SOPS_AGE_KEY_FILE overrides DOP's own age key path (advanced)
 `
 
@@ -67,6 +75,10 @@ func main() {
 		os.Exit(runWhoami(os.Args[2:]))
 	case "env":
 		os.Exit(runEnv(os.Args[2:]))
+	case "pull":
+		os.Exit(runPull(os.Args[2:]))
+	case "push":
+		os.Exit(runPush(os.Args[2:]))
 	case "merge-driver":
 		os.Exit(runMergeDriver(os.Args[2:]))
 	case "help", "-h", "--help":
@@ -142,12 +154,17 @@ func runExec(args []string) int {
 	vaultPath := fs.String("vault", envOr("DOP_VAULT", defaultVaultPath()), "path to vault YAML")
 	agentName := fs.String("agent-name", "", "self-reported agent identifier (audit only)")
 	cleanEnv := fs.Bool("clean-env", false, "strip inherited env, keep only PATH/HOME/USER + injected")
+	noPull := fs.Bool("no-pull", false, "skip the auto-pull freshness check")
 	_ = fs.Parse(args)
 
 	child := fs.Args()
 	if len(child) == 0 {
 		fmt.Fprintln(os.Stderr, "dop exec: missing command after --")
 		return 2
+	}
+
+	if !*noPull {
+		freshnessCheck(*vaultPath)
 	}
 
 	res, err := loadAndResolve(*vaultPath)
@@ -161,6 +178,61 @@ func runExec(args []string) int {
 	)
 	if err := execchild.Run(child, res.Env, *cleanEnv); err != nil {
 		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// freshnessCheck runs an auto-pull on the vault clone if the last pull was
+// older than DOP_AUTO_PULL (default 5m). Never blocks — network errors are
+// downgraded to warnings on stderr.
+func freshnessCheck(vaultPath string) {
+	if vaultPath == "" {
+		return
+	}
+	// Auto-pull is only meaningful when the vault lives under a `dop init --vault`
+	// clone (i.e. inside config.Paths.Vault). External vault paths are left alone.
+	paths, err := config.Resolve()
+	if err != nil {
+		return
+	}
+	if !strings.HasPrefix(vaultPath, paths.Vault) {
+		return
+	}
+	maxAge := 5 * time.Minute
+	if v, ok := os.LookupEnv("DOP_AUTO_PULL"); ok && v != "" {
+		if parsed, err := time.ParseDuration(v); err == nil {
+			maxAge = parsed
+		}
+	}
+	vaultsync.EnsureFresh(paths.Vault, maxAge, os.Stderr)
+}
+
+func runPull(args []string) int {
+	fs := flag.NewFlagSet("pull", flag.ExitOnError)
+	_ = fs.Parse(args)
+	paths, err := config.Resolve()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop pull: %v\n", err)
+		return 1
+	}
+	if err := vaultsync.Pull(paths.Vault, os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "dop pull: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runPush(args []string) int {
+	fs := flag.NewFlagSet("push", flag.ExitOnError)
+	_ = fs.Parse(args)
+	paths, err := config.Resolve()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop push: %v\n", err)
+		return 1
+	}
+	if err := vaultsync.Push(paths.Vault, os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "dop push: %v\n", err)
 		return 1
 	}
 	return 0
@@ -203,15 +275,123 @@ func runEnv(args []string) int {
 	return 0
 }
 
-// runMergeDriver is the git merge driver hook. P1.a stub: prints a loud
-// error and exits non-zero so an actual merge conflict fails visibly rather
-// than silently corrupting encrypted YAML. Full three-way SOPS-aware merge
-// lands in P1.b.
+// runMergeDriver is the git merge driver hook (P1.b).
+//
+// git invokes:  dop merge-driver <base> <ours> <theirs>
+//   %O — path to base (ancestor) copy
+//   %A — path to our copy (git overwrites this on success with merged content)
+//   %B — path to their copy
+//
+// Behavior:
+//   1. Decrypt each side to plaintext YAML (skipping decrypt for empty/missing files)
+//   2. Run yamlmerge.Merge for a structural three-way merge
+//   3. If clean, re-encrypt the result and write it back to %A
+//   4. If conflicting, print the conflict paths and exit non-zero so git
+//      shows the conflict to the human (encrypted %A stays intact)
 func runMergeDriver(args []string) int {
-	fmt.Fprintln(os.Stderr, "dop merge-driver: SOPS-aware three-way merge is not implemented in P1.a")
-	fmt.Fprintln(os.Stderr, "  received args:", args)
-	fmt.Fprintln(os.Stderr, "  resolve this conflict manually: decrypt both branches, merge YAML, re-encrypt")
-	return 1
+	if len(args) < 3 {
+		fmt.Fprintln(os.Stderr, "dop merge-driver: expected <base> <ours> <theirs>")
+		return 2
+	}
+	basePath, oursPath, theirsPath := args[0], args[1], args[2]
+
+	base, err := decryptForMerge(basePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop merge-driver: decrypt base %s: %v\n", basePath, err)
+		return 1
+	}
+	ours, err := decryptForMerge(oursPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop merge-driver: decrypt ours %s: %v\n", oursPath, err)
+		return 1
+	}
+	theirs, err := decryptForMerge(theirsPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop merge-driver: decrypt theirs %s: %v\n", theirsPath, err)
+		return 1
+	}
+
+	res, err := yamlmerge.Merge(base, ours, theirs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop merge-driver: %v\n", err)
+		return 1
+	}
+	if len(res.Conflicts) > 0 {
+		fmt.Fprintln(os.Stderr, "dop merge-driver: unresolved conflicts:")
+		for _, p := range res.Conflicts {
+			fmt.Fprintln(os.Stderr, "  -", p)
+		}
+		return 1
+	}
+
+	mergedPlain, err := yamlmerge.EmitBytes(res.Merged)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop merge-driver: emit merged YAML: %v\n", err)
+		return 1
+	}
+
+	// Re-encrypt with sops using the age recipient from vault's .sops.yaml.
+	// Because sops --encrypt takes a filepath, stage the plaintext in a tempfile.
+	tmp, err := os.CreateTemp("", "dop-merge-*.yaml")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop merge-driver: %v\n", err)
+		return 1
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(mergedPlain); err != nil {
+		tmp.Close()
+		fmt.Fprintf(os.Stderr, "dop merge-driver: %v\n", err)
+		return 1
+	}
+	tmp.Close()
+
+	// Rely on .sops.yaml in the working tree to select recipients.
+	cmd := exec.Command("sops", "--encrypt", "--input-type", "yaml", "--output-type", "yaml", "--output", oursPath, tmpPath)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "dop merge-driver: sops encrypt: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(os.Stderr, "dop merge-driver: merged cleanly")
+	return 0
+}
+
+// decryptForMerge returns plaintext YAML for one side of the merge. Empty
+// or missing files return an empty document — matches yamlmerge's nil-safe
+// semantics for adds/deletes.
+func decryptForMerge(path string) ([]byte, error) {
+	if path == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, nil
+	}
+	if !isSOPSEnvelope(raw) {
+		return raw, nil
+	}
+	// Explicit --input-type yaml — git passes temp file paths without a .yaml
+	// suffix, and sops otherwise falls back to JSON parsing.
+	cmd := exec.Command("sops", "--decrypt", "--input-type", "yaml", "--output-type", "yaml", path)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("sops --decrypt: %s (%w)", stderr.String(), err)
+	}
+	return stdout.Bytes(), nil
+}
+
+func isSOPSEnvelope(raw []byte) bool {
+	return bytes.Contains(raw, []byte("\nsops:")) || bytes.HasPrefix(raw, []byte("sops:"))
 }
 
 func loadAndResolve(vaultPath string) (*resolve.Resolution, error) {
