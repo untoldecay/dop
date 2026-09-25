@@ -20,6 +20,7 @@ import (
 	"github.com/fray/dop/internal/agentauth"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/doctor"
 	"github.com/fray/dop/internal/execchild"
 	"github.com/fray/dop/internal/initcmd"
 	"github.com/fray/dop/internal/resolve"
@@ -47,6 +48,7 @@ usage:
   dop token issue --grants g1,g2 [--name X] [--expires D] [--note T]  mint a new auth token
   dop token list [--vault PATH]                  show active tokens (never prints bearer values)
   dop token revoke <name-or-prefix>              remove a token from the vault
+  dop doctor                                     health self-check (schema, keys, upstream scopes)
   dop team add-key --name W --pubkey age1...     add teammate as SOPS recipient
   dop team remove --name W                       remove teammate; prints rotation checklist
   dop team list                                  list team members
@@ -97,6 +99,8 @@ func main() {
 		os.Exit(runToken(os.Args[2:]))
 	case "team":
 		os.Exit(runTeam(os.Args[2:]))
+	case "doctor":
+		os.Exit(runDoctor(os.Args[2:]))
 	case "log":
 		os.Exit(runLog(os.Args[2:]))
 	case "merge-driver":
@@ -535,6 +539,27 @@ func runTokenRevoke(args []string) int {
 		AgentName: query,
 		Outcome:   "ok",
 	})
+	return 0
+}
+
+func runDoctor(args []string) int {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	vaultPath := fs.String("vault", envOr("DOP_VAULT", defaultVaultPath()), "path to vault YAML")
+	_ = fs.Parse(args)
+
+	paths, _ := config.Resolve()
+	var v *vault.Vault
+	if *vaultPath != "" {
+		if loaded, err := vault.Load(*vaultPath); err == nil {
+			v = loaded
+		} else {
+			fmt.Fprintf(os.Stderr, "dop doctor: (vault load failed: %v — checks that need the vault will be skipped)\n\n", err)
+		}
+	}
+	_, anyFail := doctor.Run(v, paths, *vaultPath, os.Stdout, nil)
+	if anyFail {
+		return 1
+	}
 	return 0
 }
 
