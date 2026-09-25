@@ -1,96 +1,62 @@
-# Skill: dop — scoped credential access
+---
+name: dop-credential-access
+description: Use when needing to call a service whose credentials live in the DOP vault (Notion, Boiler, GitHub, Linear, custom APIs) — for reading data, writing changes, or admin operations
+---
 
-Run any command with per-agent scoped credentials from your DOP vault.
-Never asks you for the token; never prints it back.
+# DOP Credential Access
 
-## When to use
+## Overview
 
-Use this skill whenever you need to call a service in the DOP vault
-(Notion, Boiler, GitHub, Linear, custom APIs) and the human has said
-something like:
+DOP holds service credentials in a per-agent scoped vault. Always invoke the target command through `dop exec` — never handle bearers directly.
 
-- "use the credentials from dop"
-- "read from my boiler / notion"
-- "run this against prod / staging"
-- "with my read-only token"
+## When to Use
 
-If the user hasn't authorized a specific service, ask before proceeding.
+- User references DOP, "the vault", "my scoped token", "the read-only token", or a service known to be under DOP (Notion, Boiler, GitHub, Linear, and any others declared in `dop token list`)
+- User says "call the API", "read the Notion database", "write to Boiler" and hasn't told you to use a different auth path
 
-## Prerequisites (must be true before invoking)
+## When NOT to Use
 
-The token must already be in the shell env — either as `DOP_TOKEN=<bearer>`
-or via a `--sign-with <keyfile>` reference the user gave you. Never request
-the raw credential in chat; that would leak it into your context window
-and into transcripts.
+- User has provided direct credentials for a one-off task
+- Target service is not tracked in the vault
+- User explicitly asks for a different auth mechanism
 
-## Usage pattern
+## Core Pattern
 
-Always run the target command via `dop exec`:
+Every credential-requiring command becomes:
 
 ```bash
-dop exec --agent-name <short-descriptive-name> -- <your command>
+dop exec --agent-name <specific-task-name> -- <your command>
 ```
 
-Where:
+`--agent-name` labels the audit log. Use something specific to the task (`claude-notion-migration-check`, not `claude`). It is not a secret.
 
-- `--agent-name` is a self-reported label that ends up in the audit log.
-  Use something specific to the task (`claude-notion-migration-check`,
-  `claude-boiler-daily-report`), not just `claude`. It is NOT a secret.
-- `<your command>` is whatever you actually want to run. `dop` injects
-  environment variables like `BOILER_TOKEN`, `NOTION_TOKEN`,
-  `BOILER_BASE_URL`, etc., scoped to what the current token unlocks.
-
-## Discovering what your token can do
-
-Before doing anything sensitive, run:
+If the user hands you an age keyfile path instead of setting `DOP_TOKEN`, use signed-challenge auth:
 
 ```bash
-dop whoami
+dop exec --agent-name <vault-agent-pubkey-name> --sign-with <keyfile> -- <your command>
 ```
 
-This prints the token's *name* and the *grants* it unlocks (e.g.
-`boiler.read`, `notion.write`). NEVER print bearers.
+## Quick Reference
 
-If a grant you need is missing, stop and tell the human — do not attempt
-to escalate.
-
-## Cryptographic-identity (`--sign-with`) variant
-
-If the user tells you to use a signed-challenge auth (e.g. for a Buzz
-agent that has its own keypair), the shape is:
-
-```bash
-dop exec --agent-name <agent-name-in-vault> \
-         --sign-with <path-to-age-keyfile> \
-         -- <your command>
-```
-
-The `--agent-name` here must match a `agent_pubkeys.<name>` entry in the
-vault; DOP verifies the keyfile's derived age recipient matches.
+| Task | Command |
+|---|---|
+| Discover what your token unlocks | `dop whoami` |
+| Preview env vars the token injects | `dop env` |
+| Run a command with scoped env | `dop exec --agent-name X -- CMD` |
+| Strip inherited env from the child | add `--clean-env` |
 
 ## Do NOT
 
-- **Do not** copy `DOP_TOKEN` into chat, PR descriptions, git commits,
-  logs, or files. The whole point is that it stays in the env only.
-- **Do not** run commands outside `dop exec` if they need any credential
-  the vault manages — you'd end up either failing (no env vars) or
-  reaching for a fallback secret that shouldn't exist.
-- **Do not** call `dop token issue` or `dop token revoke` from an
-  automated turn without the human explicitly asking. Both are admin ops.
+- Request `DOP_TOKEN` or any bearer in chat. It stays in the shell env only.
+- Run `dop token issue` or `dop token revoke` unprompted. Both are admin ops.
+- Fall back to raw upstream env vars (e.g. `NOTION_TOKEN=...`) if `dop exec` fails. Report the error instead.
 
-## Failure modes and what to do
+## Common Failure Modes
 
-- **`dop exec: unknown auth token`** — `DOP_TOKEN` is set but not
-  recognized by the vault. Ask the human to check they exported the
-  right token; do not retry silently.
-- **`dop exec: no vault path`** — the user hasn't run `dop init --vault
-  <path>` on this machine. Point them at the DOP README.
-- **`dop exec: sops binary not found in $PATH`** — installer prereq
-  missing. Suggest `brew install sops`.
+- **`unknown auth token`** — `DOP_TOKEN` is set but not in the vault. Ask the user to check they exported the right one.
+- **`no vault path`** — the user hasn't run `dop init --vault ...` on this machine. Point them at the DOP README.
+- **`sops binary not found`** — installer prereq missing. Suggest `brew install sops`.
 
-## Where the audit log lives
+## Audit Trail
 
-Every `dop exec` you make writes a line to
-`~/.config/dop/logs/access-<host>-<YYYY-MM>.jsonl`. The human can review
-your access with `dop log tail` or `dop log grep agent_name=<yours>`.
-Choose a distinctive `--agent-name` so your session is greppable later.
+Every invocation writes one line to `~/.config/dop/logs/access-<host>-<YYYY-MM>.jsonl`. Users grep by `agent_name`, so make `--agent-name` distinctive per task.

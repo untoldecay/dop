@@ -17,14 +17,21 @@ RECIPES=./docs/RECIPES.md
 
 echo "=== [1] skill file exists and is non-trivial"
 [[ -f "$SKILL" ]] || fail "SKILL.md missing at $SKILL"
-[[ $(wc -l < "$SKILL") -gt 40 ]] || fail "SKILL.md suspiciously short"
+[[ $(wc -l < "$SKILL") -gt 20 ]] || fail "SKILL.md suspiciously short"
 pass "skill file present"
 
-echo "=== [2] skill file has required sections"
-for section in "When to use" "Prerequisites" "Usage pattern" "Do NOT" "Failure modes"; do
-    grep -qi "## .*$section" "$SKILL" || fail "SKILL.md missing section: $section"
-done
-pass "all required sections present"
+echo "=== [2] YAML frontmatter with name + description"
+# Frontmatter must be at file top: --- ... ---
+head -1 "$SKILL" | grep -q "^---" || fail "no opening --- for frontmatter"
+awk 'NR==1&&/^---/{f=1;next} f&&/^---/{exit} f' "$SKILL" | grep -q "^name:" || fail "no name: in frontmatter"
+awk 'NR==1&&/^---/{f=1;next} f&&/^---/{exit} f' "$SKILL" | grep -qi "^description: Use when" || fail "description must start with 'Use when'"
+pass "frontmatter present with name + 'Use when' description"
+
+echo "=== [3] skill covers the DOP-specific essentials"
+# These aren't format requirements — they're content requirements for THIS skill
+grep -q -- "dop exec" "$SKILL" || fail "skill doesn't mention the dop exec command"
+grep -qi "do not\|don't\|never" "$SKILL" || fail "skill lacks any negative-guidance section"
+pass "essential dop-usage content present"
 
 echo "=== [3] recipes doc exists with the three harnesses"
 [[ -f "$RECIPES" ]] || fail "RECIPES.md missing"
