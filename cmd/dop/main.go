@@ -6,16 +6,19 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"time"
 
 	"github.com/fray/dop/internal/agentauth"
+	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/execchild"
 	"github.com/fray/dop/internal/initcmd"
@@ -43,6 +46,8 @@ usage:
   dop token issue --grants g1,g2 [--name X] [--expires D] [--note T]  mint a new auth token
   dop token list [--vault PATH]                  show active tokens (never prints bearer values)
   dop token revoke <name-or-prefix>              remove a token from the vault
+  dop log tail [--n N]                           print recent audit log lines
+  dop log grep KEY=VAL [KEY=VAL...]              filter audit log by JSON field equality
   dop merge-driver <base> <ours> <theirs>        internal: git merge driver (see .gitattributes)
   dop help
 
@@ -86,6 +91,8 @@ func main() {
 		os.Exit(runPush(os.Args[2:]))
 	case "token":
 		os.Exit(runToken(os.Args[2:]))
+	case "log":
+		os.Exit(runLog(os.Args[2:]))
 	case "merge-driver":
 		os.Exit(runMergeDriver(os.Args[2:]))
 	case "help", "-h", "--help":
@@ -175,8 +182,20 @@ func runExec(args []string) int {
 		freshnessCheck(*vaultPath)
 	}
 
+	auditor := auditWriter()
+	cmdHead := audit.TruncCmdHead(child)
+
 	res, authMethod, err := resolveAuth(*vaultPath, *signWith, *agentName)
 	if err != nil {
+		_ = auditor.Log(audit.Event{
+			Op:         "exec",
+			AgentName:  *agentName,
+			AuthMethod: authMethod,
+			TokenHash:  audit.HashBearer(os.Getenv("DOP_TOKEN")),
+			Outcome:    "denied",
+			Reason:     err.Error(),
+			CmdHead:    cmdHead,
+		})
 		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
 		return 1
 	}
@@ -184,11 +203,34 @@ func runExec(args []string) int {
 		"dop exec: agent=%q auth=%s grants=%v env_keys=%d\n",
 		*agentName, authMethod, res.GrantsUsed, len(res.Env),
 	)
+	// Log BEFORE exec — the syscall replaces this process, so a post-exec
+	// log write would never run. Outcome "ok" here means "we successfully
+	// resolved credentials"; whether the child command succeeds is out of scope.
+	_ = auditor.Log(audit.Event{
+		Op:         "exec",
+		AgentName:  *agentName,
+		AuthMethod: authMethod,
+		TokenHash:  audit.HashBearer(res.TokenID),
+		Grants:     res.GrantsUsed,
+		Outcome:    "ok",
+		CmdHead:    cmdHead,
+	})
 	if err := execchild.Run(child, res.Env, *cleanEnv); err != nil {
 		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// auditWriter returns a Writer scoped to the DOP config logs dir. Returns
+// a no-op Writer if config resolution fails — audit is best-effort, never
+// blocks the hot path.
+func auditWriter() *audit.Writer {
+	paths, err := config.Resolve()
+	if err != nil {
+		return audit.New("")
+	}
+	return audit.New(paths.Logs)
 }
 
 // resolveAuth picks between bearer-token and signed-challenge auth based
@@ -385,6 +427,14 @@ func runTokenIssue(args []string) int {
 	fmt.Fprintf(os.Stderr, "dop token issue: issued %q (grants: %v)\n", rec.Name, grants)
 	fmt.Fprintln(os.Stderr, "  keep the bearer below safe — it is printed ONCE:")
 	fmt.Println(bearer)
+	_ = auditWriter().Log(audit.Event{
+		Op:         "token-issue",
+		AgentName:  rec.Name,
+		AuthMethod: "-",
+		TokenHash:  audit.HashBearer(bearer),
+		Grants:     grants,
+		Outcome:    "ok",
+	})
 	return 0
 }
 
@@ -474,7 +524,145 @@ func runTokenRevoke(args []string) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "dop token revoke: removed %q\n", query)
+	_ = auditWriter().Log(audit.Event{
+		Op:        "token-revoke",
+		AgentName: query,
+		Outcome:   "ok",
+	})
 	return 0
+}
+
+// runLog dispatches `dop log <tail|grep>`.
+func runLog(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: dop log <tail|grep> ...")
+		return 2
+	}
+	switch args[0] {
+	case "tail":
+		return runLogTail(args[1:])
+	case "grep":
+		return runLogGrep(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "dop log: unknown subcommand %q\n", args[0])
+		return 2
+	}
+}
+
+func runLogTail(args []string) int {
+	fs := flag.NewFlagSet("log tail", flag.ExitOnError)
+	n := fs.Int("n", 20, "number of most-recent lines to print")
+	_ = fs.Parse(args)
+	lines, err := readAllLogLines()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop log tail: %v\n", err)
+		return 1
+	}
+	start := len(lines) - *n
+	if start < 0 {
+		start = 0
+	}
+	for _, l := range lines[start:] {
+		fmt.Println(l)
+	}
+	return 0
+}
+
+func runLogGrep(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: dop log grep KEY=VAL [KEY=VAL ...]")
+		return 2
+	}
+	// Parse KEY=VAL predicates.
+	preds := map[string]string{}
+	for _, a := range args {
+		i := strings.IndexByte(a, '=')
+		if i <= 0 {
+			fmt.Fprintf(os.Stderr, "dop log grep: bad predicate %q (want KEY=VAL)\n", a)
+			return 2
+		}
+		preds[a[:i]] = a[i+1:]
+	}
+	lines, err := readAllLogLines()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop log grep: %v\n", err)
+		return 1
+	}
+	for _, l := range lines {
+		var e audit.Event
+		if err := json.Unmarshal([]byte(l), &e); err != nil {
+			continue
+		}
+		if !matchEvent(e, preds) {
+			continue
+		}
+		fmt.Println(l)
+	}
+	return 0
+}
+
+func matchEvent(e audit.Event, preds map[string]string) bool {
+	for k, want := range preds {
+		var got string
+		switch k {
+		case "op":
+			got = e.Op
+		case "agent_name":
+			got = e.AgentName
+		case "auth_method":
+			got = e.AuthMethod
+		case "outcome":
+			got = e.Outcome
+		case "token_hash":
+			got = e.TokenHash
+		default:
+			return false // unknown key → no match
+		}
+		if got != want {
+			return false
+		}
+	}
+	return true
+}
+
+// readAllLogLines reads every access-*.jsonl file under the DOP logs dir,
+// concatenated in filename-sorted order. Chronological within a file;
+// across-file ordering is only right if callers accept the natural sort
+// (per-host, per-month) — which is fine for tail/grep at V1.
+func readAllLogLines() ([]string, error) {
+	paths, err := config.Resolve()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(paths.Logs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var files []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "access-") && strings.HasSuffix(e.Name(), ".jsonl") {
+			files = append(files, e.Name())
+		}
+	}
+	sort.Strings(files)
+
+	var out []string
+	for _, name := range files {
+		b, err := os.ReadFile(filepath.Join(paths.Logs, name))
+		if err != nil {
+			continue
+		}
+		for _, ln := range strings.Split(string(b), "\n") {
+			ln = strings.TrimSpace(ln)
+			if ln != "" {
+				out = append(out, ln)
+			}
+		}
+	}
+	return out, nil
 }
 
 func splitCSV(s string) []string {
