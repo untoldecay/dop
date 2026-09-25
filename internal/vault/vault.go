@@ -30,6 +30,17 @@ type Vault struct {
 	Integrations  map[string]Integration `yaml:"integrations"`
 	Grants        map[string]Grant       `yaml:"grants"`
 	AuthTokens    map[string]AuthToken   `yaml:"auth_tokens"`
+	AgentPubkeys  map[string]AgentPubkey `yaml:"agent_pubkeys,omitempty"`
+}
+
+// AgentPubkey records a cryptographic-identity agent. Auth proceeds by
+// possession of the corresponding age private key file (`dop exec --sign-with
+// <keyfile>`). No bearer token is required — the agent's identity is the
+// public key, which is safe to commit to the vault.
+type AgentPubkey struct {
+	PubkeyAge string   `yaml:"pubkey_age"`
+	Grants    []string `yaml:"grants"`
+	Note      string   `yaml:"note,omitempty"`
 }
 
 type Integration struct {

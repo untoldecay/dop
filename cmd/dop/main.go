@@ -15,6 +15,7 @@ import (
 
 	"time"
 
+	"github.com/fray/dop/internal/agentauth"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/execchild"
 	"github.com/fray/dop/internal/initcmd"
@@ -34,7 +35,7 @@ usage:
   dop init                                       first-run setup (generate age key)
   dop init --vault <path-or-url>                 attach a vault repo (option 3: local path OK)
   dop encrypt <plaintext.yaml> <encrypted.yaml>  encrypt a plaintext vault with your age key
-  dop exec   [--vault PATH] [--agent-name NAME] [--clean-env] [--no-pull] -- CMD [ARGS...]
+  dop exec   [--vault PATH] [--agent-name NAME] [--sign-with KEYFILE] [--clean-env] [--no-pull] -- CMD [ARGS...]
   dop whoami [--vault PATH]
   dop env    [--vault PATH]
   dop pull                                       git pull the vault clone
@@ -158,7 +159,8 @@ func runEncrypt(args []string) int {
 func runExec(args []string) int {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
 	vaultPath := fs.String("vault", envOr("DOP_VAULT", defaultVaultPath()), "path to vault YAML")
-	agentName := fs.String("agent-name", "", "self-reported agent identifier (audit only)")
+	agentName := fs.String("agent-name", "", "self-reported agent identifier (audit only) OR the agent_pubkeys key when --sign-with is used")
+	signWith := fs.String("sign-with", "", "path to age private key file for signed-challenge auth (skips DOP_TOKEN)")
 	cleanEnv := fs.Bool("clean-env", false, "strip inherited env, keep only PATH/HOME/USER + injected")
 	noPull := fs.Bool("no-pull", false, "skip the auto-pull freshness check")
 	_ = fs.Parse(args)
@@ -173,20 +175,70 @@ func runExec(args []string) int {
 		freshnessCheck(*vaultPath)
 	}
 
-	res, err := loadAndResolve(*vaultPath)
+	res, authMethod, err := resolveAuth(*vaultPath, *signWith, *agentName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(os.Stderr,
-		"dop exec: agent=%q grants=%v env_keys=%d\n",
-		*agentName, res.GrantsUsed, len(res.Env),
+		"dop exec: agent=%q auth=%s grants=%v env_keys=%d\n",
+		*agentName, authMethod, res.GrantsUsed, len(res.Env),
 	)
 	if err := execchild.Run(child, res.Env, *cleanEnv); err != nil {
 		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// resolveAuth picks between bearer-token and signed-challenge auth based
+// on flag presence, then builds the env from the resolved grants.
+func resolveAuth(vaultPath, signWith, agentName string) (*resolve.Resolution, string, error) {
+	if vaultPath == "" {
+		return nil, "", fmt.Errorf("no vault path (--vault or $DOP_VAULT)")
+	}
+	v, err := vault.Load(vaultPath)
+	if err != nil {
+		return nil, "", err
+	}
+	if signWith != "" {
+		grants, err := agentauth.Verify(v, agentName, signWith)
+		if err != nil {
+			return nil, "signed", err
+		}
+		return buildResolutionFromGrants(v, agentName, grants)
+	}
+	bearer := os.Getenv("DOP_TOKEN")
+	res, err := resolve.Resolve(v, bearer)
+	if err != nil {
+		return nil, "bearer", err
+	}
+	return res, "bearer", nil
+}
+
+// buildResolutionFromGrants materializes env vars for a grant list, without
+// going through the bearer→auth_tokens lookup. Used for signed-challenge auth.
+func buildResolutionFromGrants(v *vault.Vault, tokenID string, grants []string) (*resolve.Resolution, string, error) {
+	// Reuse resolve's env-building logic via a synthetic auth-token entry.
+	// Insert a temporary auth_token into an in-memory copy of the vault so we
+	// can call resolve.Resolve with a bearer string.
+	synthetic := "signed:" + tokenID
+	if v.AuthTokens == nil {
+		v.AuthTokens = map[string]vault.AuthToken{}
+	}
+	v.AuthTokens[synthetic] = vault.AuthToken{
+		Name:   "signed:" + tokenID,
+		Grants: grants,
+	}
+	res, err := resolve.Resolve(v, synthetic)
+	// Remove our synthetic entry from the caller-visible vault (defensive; we
+	// don't persist v anywhere but be tidy).
+	delete(v.AuthTokens, synthetic)
+	if err != nil {
+		return nil, "signed", err
+	}
+	res.TokenID = "signed:" + tokenID
+	return res, "signed", nil
 }
 
 // freshnessCheck runs an auto-pull on the vault clone if the last pull was
