@@ -1,137 +1,174 @@
-// Package vault loads the DOP vault from disk.
+// Package vault holds v1 vault schema types + admin-plane vault loading.
 //
-// A vault file is either:
-//   - plaintext YAML (P0 fixtures, tests) — detected by ABSENCE of a top-level `sops:` key
-//   - SOPS-encrypted YAML — detected by PRESENCE of the `sops:` metadata key
+// v1 schema:
 //
-// SOPS decryption shells out to the `sops` binary. The Go library alternative
-// drags in ~40MB of cloud KMS SDKs (AWS/GCP/Azure/Vault/HuaweiCloud) for
-// backends DOP does not use. Shell-out keeps the binary at ~5MB and preserves
-// full sops-cli interop (users can `sops file.yaml` to edit).
-//
-// Age key path: SOPS reads $SOPS_AGE_KEY_FILE (set by main.go to
-// ~/.config/dop/keys/age.txt by default).
+//	schema_version: v1
+//	admins:
+//	  <admin-name>:
+//	    age_recipient: age1...
+//	    ed25519_pubkey: <hex>
+//	    added_at: 2026-09-28
+//	    note: "cam-laptop"
+//	integrations:
+//	  <name>:
+//	    description: "..."
+//	    metadata: {...}
+//	    tokens:
+//	      <upstream-token-name>:
+//	        value: "..."
+//	        scope_note: "read-only"
+//	grants:
+//	  <grant-id>:
+//	    integration: <integration-name>
+//	    token: <upstream-token-name>
+//	    env_prefix: "NOTION"
+//	capabilities:
+//	  <capability-id>:            # hex of the 32-byte raw id
+//	    subject: "research-agent"
+//	    grants: [notion.read]
+//	    created_at: 2026-09-28T14:22:00Z
+//	    expires_at: 2026-10-01T14:22:00Z
+//	    generation: 3
+//	    lookup_id: "<40-hex>"    # bundle filename
+//	    bundle_hash: "<hex>"     # sha256 of bundle file
+//	    issued_by: "<hex>"       # admin ed25519 pubkey
+//	    status: active | revoked
+//	    signature: "<hex>"       # ed25519 over the record
+//	generations:
+//	  <subject>: N               # monotonic per-subject counter
+//	vault_context: "<40-hex>"    # per-vault random, used in HMAC for lookup_id
 package vault
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-const SupportedSchemaVersion = 1
+// SchemaVersion is the current schema label. v1 vaults MUST carry this;
+// loading refuses anything else (including numeric v0 schemas from
+// pre-v1.0 DOP builds).
+const SchemaVersion = "v1"
 
+// Vault is the plaintext view of vault.yaml.
 type Vault struct {
-	SchemaVersion int                    `yaml:"schema_version"`
-	Integrations  map[string]Integration `yaml:"integrations"`
-	Grants        map[string]Grant       `yaml:"grants"`
-	AuthTokens    map[string]AuthToken   `yaml:"auth_tokens"`
-	AgentPubkeys  map[string]AgentPubkey `yaml:"agent_pubkeys,omitempty"`
-	TeamMembers   map[string]TeamMember  `yaml:"team_members,omitempty"`
+	SchemaVersion string                 `yaml:"schema_version"`
+	Admins        map[string]Admin       `yaml:"admins,omitempty"`
+	Integrations  map[string]Integration `yaml:"integrations,omitempty"`
+	Grants        map[string]Grant       `yaml:"grants,omitempty"`
+	Capabilities  map[string]Capability  `yaml:"capabilities,omitempty"`
+	Generations   map[string]uint64      `yaml:"generations,omitempty"`
+	VaultContext  string                 `yaml:"vault_context,omitempty"`
 }
 
-// TeamMember records a human vault-holder (age recipient). Adding an entry
-// registers them as a SOPS recipient in .sops.yaml; removing an entry
-// requires rotating every upstream token they may have decrypted historically.
-type TeamMember struct {
-	PubkeyAge string `yaml:"pubkey_age"`
-	AddedAt   string `yaml:"added_at,omitempty"`
-	AddedBy   string `yaml:"added_by,omitempty"`
-	Note      string `yaml:"note,omitempty"`
+// Admin is one authorized vault administrator.
+type Admin struct {
+	AgeRecipient  string    `yaml:"age_recipient"`
+	Ed25519Pubkey string    `yaml:"ed25519_pubkey"`
+	AddedAt       time.Time `yaml:"added_at,omitempty"`
+	Note          string    `yaml:"note,omitempty"`
 }
 
-// AgentPubkey records a cryptographic-identity agent. Auth proceeds by
-// possession of the corresponding age private key file (`dop exec --sign-with
-// <keyfile>`). No bearer token is required — the agent's identity is the
-// public key, which is safe to commit to the vault.
-type AgentPubkey struct {
-	PubkeyAge string   `yaml:"pubkey_age"`
-	Grants    []string `yaml:"grants"`
-	Note      string   `yaml:"note,omitempty"`
-}
-
+// Integration models one upstream service and its tokens.
 type Integration struct {
-	Description string            `yaml:"description"`
-	Metadata    map[string]string `yaml:"metadata"`
-	Tokens      map[string]Token  `yaml:"tokens"`
+	Description string            `yaml:"description,omitempty"`
+	Metadata    map[string]string `yaml:"metadata,omitempty"`
+	Tokens      map[string]Token  `yaml:"tokens,omitempty"`
 }
 
 type Token struct {
-	Value       string `yaml:"value"`
-	ScopeNote   string `yaml:"scope_note"`
-	UpstreamRef string `yaml:"upstream_ref,omitempty"`
+	Value     string `yaml:"value"`
+	ScopeNote string `yaml:"scope_note,omitempty"`
 }
 
+// Grant maps a scope label to (integration, upstream-token, env prefix).
 type Grant struct {
 	Integration string `yaml:"integration"`
 	Token       string `yaml:"token"`
-	EnvPrefix   string `yaml:"env_prefix"`
+	EnvPrefix   string `yaml:"env_prefix,omitempty"`
 }
 
-type AuthToken struct {
-	Name      string   `yaml:"name"`
-	CreatedBy string   `yaml:"created_by,omitempty"`
-	CreatedAt string   `yaml:"created_at,omitempty"`
-	ExpiresAt string   `yaml:"expires_at,omitempty"`
-	Grants    []string `yaml:"grants"`
-	Note      string   `yaml:"note,omitempty"`
+// Capability is the vault-side metadata record for one issued bearer.
+// The YAML type is a plain view; conversion to/from
+// `internal/capability.Record` (which carries the signature helpers)
+// happens in the issuance layer.
+type Capability struct {
+	Subject    string    `yaml:"subject"`
+	Grants     []string  `yaml:"grants"`
+	CreatedAt  time.Time `yaml:"created_at"`
+	ExpiresAt  time.Time `yaml:"expires_at"`
+	Generation uint64    `yaml:"generation"`
+	LookupID   string    `yaml:"lookup_id"`
+	BundleHash string    `yaml:"bundle_hash"`
+	IssuedBy   string    `yaml:"issued_by"`
+	Status     string    `yaml:"status"`
+	Signature  string    `yaml:"signature"`
 }
 
-// Load reads a vault file. Transparently handles both plaintext and
-// SOPS-encrypted YAML — the latter via `sops --decrypt`.
-func Load(path string) (*Vault, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read vault %q: %w", path, err)
-	}
-
-	yamlBytes := raw
-	if isSOPSEncrypted(raw) {
-		yamlBytes, err = sopsDecrypt(path)
-		if err != nil {
-			return nil, fmt.Errorf("decrypt vault %q: %w", path, err)
-		}
-	}
-
+// ParsePlain unmarshals plaintext YAML into a Vault, enforcing v1 schema.
+func ParsePlain(b []byte) (*Vault, error) {
 	var v Vault
-	if err := yaml.Unmarshal(yamlBytes, &v); err != nil {
-		return nil, fmt.Errorf("parse vault %q: %w", path, err)
+	if err := yaml.Unmarshal(b, &v); err != nil {
+		return nil, fmt.Errorf("parse vault yaml: %w", err)
 	}
-	if v.SchemaVersion != SupportedSchemaVersion {
-		return nil, fmt.Errorf(
-			"vault schema_version=%d, this dop binary supports %d — upgrade one side",
-			v.SchemaVersion, SupportedSchemaVersion,
-		)
+	if v.SchemaVersion == "" {
+		// Empty file — treat as fresh vault, set version.
+		v.SchemaVersion = SchemaVersion
+		return &v, nil
+	}
+	if v.SchemaVersion != SchemaVersion {
+		return nil, fmt.Errorf("unsupported vault schema_version=%q; this dop build handles %q. v0.3 vaults are NOT migrated automatically — start fresh", v.SchemaVersion, SchemaVersion)
 	}
 	return &v, nil
 }
 
-// isSOPSEncrypted returns true if raw looks like a SOPS-encrypted YAML file.
-// SOPS stores its metadata under a top-level `sops:` mapping — cheap check.
-func isSOPSEncrypted(raw []byte) bool {
-	return bytes.Contains(raw, []byte("\nsops:")) || bytes.HasPrefix(raw, []byte("sops:"))
+// EmitPlain marshals a Vault back to YAML.
+func EmitPlain(v *Vault) ([]byte, error) {
+	if v.SchemaVersion == "" {
+		v.SchemaVersion = SchemaVersion
+	}
+	return yaml.Marshal(v)
 }
 
-// sopsDecrypt shells out to `sops --decrypt <path>` and returns the plaintext.
-// Missing binary produces a clear install hint instead of a cryptic exec error.
-func sopsDecrypt(path string) ([]byte, error) {
-	if _, err := exec.LookPath("sops"); err != nil {
-		return nil, errors.New("sops binary not found in $PATH — install via `brew install sops` or from https://github.com/getsops/sops/releases")
+// SubjectGeneration returns the current generation for a subject, 0 if
+// unknown.
+func (v *Vault) SubjectGeneration(subject string) uint64 {
+	if v.Generations == nil {
+		return 0
 	}
-	cmd := exec.Command("sops", "--decrypt", path)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := stderr.String()
-		if msg == "" {
-			msg = err.Error()
-		}
-		return nil, fmt.Errorf("sops --decrypt failed: %s (check $SOPS_AGE_KEY_FILE)", msg)
-	}
-	return stdout.Bytes(), nil
+	return v.Generations[subject]
 }
+
+// BumpGeneration increments the counter for a subject and returns the
+// new value.
+func (v *Vault) BumpGeneration(subject string) uint64 {
+	if v.Generations == nil {
+		v.Generations = map[string]uint64{}
+	}
+	v.Generations[subject]++
+	return v.Generations[subject]
+}
+
+// ---
+
+// LoadPlain reads a file, returns the parsed Vault. Missing file returns
+// a fresh empty Vault (used during bootstrap).
+func LoadPlain(path string) (*Vault, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &Vault{SchemaVersion: SchemaVersion}, nil
+		}
+		return nil, err
+	}
+	return ParsePlain(b)
+}
+
+// ---
+
+// ErrNotAdminInstall is returned when a subcommand that needs the vault
+// runs on a machine that has no admin key (an agent install).
+var ErrNotAdminInstall = errors.New("not an admin install (no keys/admin.age.enc) — this machine cannot decrypt or mutate the vault")
