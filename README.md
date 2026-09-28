@@ -11,6 +11,29 @@ Design docs: `../../_rules/_projects/DOP/`
 
 **P0–P5 shipped.** Encrypted vault, git-synced with a real SOPS-aware three-way merge driver, `dop token issue/list/revoke` with a confirmation gate for sensitive grants, signed-challenge auth for crypto agents (`--sign-with`), JSONL audit log with `dop log tail/grep`, and a Claude Code skill + docs recipes.
 
+## Testing
+
+One command runs everything:
+
+```zsh
+./scripts/test.sh              # unit + e2e (skips the recursive p10)
+./scripts/test.sh --unit-only  # Go unit tests (~1s, no external deps)
+./scripts/test.sh --e2e-only   # shell e2e (needs sops, git, age-keygen, gh, goreleaser, python3)
+WITH_P10=1 ./scripts/test.sh   # include p10_first_run (~doubles runtime — it re-runs everything else)
+```
+
+**Unit tests** live next to the code they test (Go convention): every
+`internal/*/` package with logic has a `*_test.go` sibling.
+
+**End-to-end tests** live in `testdata/e2e/`, one shell script per phase:
+`p1b_merge.sh` (merge driver), `p2_token_issue.sh` (token CLI),
+`p3_signed_auth.sh`, `p4_audit_log.sh`, `p5_skill_recipe.sh`,
+`p6_team_ops.sh`, `p7_distribution.sh`, `p8_doctor.sh`,
+`p9_tui_gates.sh`, `p10_first_run.sh`.
+
+Each e2e script spins up a fresh temp `$HOME`, `dop init`s from
+scratch, and cleans up after itself. Safe to run repeatedly.
+
 ## Runtime dependencies
 
 - `git` on `$PATH`
