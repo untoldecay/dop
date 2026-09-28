@@ -26,16 +26,19 @@ type addIntegrationView struct {
 	client *admin.Client
 	paths  *config.Paths
 
-	step       int
-	nameBuf    strings.Builder
-	descBuf    strings.Builder
-	urlBuf     strings.Builder
-	scratchBuf strings.Builder // per-token-field scratch
-	tokens     []integrationTokenDraft
-	cur        integrationTokenDraft
-	err        string
-	flash      string
-	done       bool
+	step    int
+	nameBuf strings.Builder
+	descBuf strings.Builder
+	urlBuf  strings.Builder
+	// The currently-active token's field buffers. Reset when a token is
+	// finalized and we start collecting the next one.
+	tokenNameBuf  strings.Builder
+	tokenValueBuf strings.Builder
+	tokenScopeBuf strings.Builder
+	tokens        []integrationTokenDraft
+	err           string
+	flash         string
+	done          bool
 
 	// step 4 = "add another token?" y/n
 	// step 5 = confirm
@@ -75,8 +78,8 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if v.step == 4 {
 			switch mm.String() {
 			case "y", "Y":
-				v.step = 1 // back to token name (indexed by cur)
-				v.cur = integrationTokenDraft{}
+				// buffers already reset in advance(); go back to token name.
+				v.step = 1
 			case "n", "N", "enter":
 				v.step = 5 // confirm
 			}
@@ -111,63 +114,31 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return v, nil
 }
 
+// curBuf returns the buffer for the currently-active text-input step.
+// Never returns a copy — each buffer lives on the struct and outlives
+// the caller.
 func (v *addIntegrationView) curBuf() *strings.Builder {
 	switch v.step {
 	case 0:
 		return &v.nameBuf
-	case 1:
-		return v.tokenBuf(0)
-	case 2:
-		return v.tokenBuf(1)
-	case 3:
-		return v.tokenBuf(2)
 	case 10:
 		return &v.descBuf
 	case 11:
 		return &v.urlBuf
-	}
-	return &strings.Builder{}
-}
-
-// tokenBuf returns the current-token field buffer (0=name, 1=value, 2=scope)
-// through the pointer receiver on the draft.
-func (v *addIntegrationView) tokenBuf(field int) *strings.Builder {
-	// Store in scratch strings.Builder pool on `cur` — because the fields
-	// on the draft are strings, not builders, we back them with a builder
-	// per field. Simpler: bring the field into a builder on demand.
-	var b strings.Builder
-	switch field {
-	case 0:
-		b.WriteString(v.cur.name)
 	case 1:
-		b.WriteString(v.cur.value)
+		return &v.tokenNameBuf
 	case 2:
-		b.WriteString(v.cur.scope)
-	}
-	// Return a wrapper whose changes get flushed back at the next advance().
-	v.scratchBuf = b
-	return &v.scratchBuf
-}
-
-// This is a small state hack — we sync scratch back to cur at the top
-// of advance().
-var _ = 0 // silence linter
-
-// syncScratch pushes scratchBuf's value back to the appropriate cur field
-// based on the current step.
-func (v *addIntegrationView) syncScratch() {
-	switch v.step {
-	case 1:
-		v.cur.name = v.scratchBuf.String()
-	case 2:
-		v.cur.value = v.scratchBuf.String()
+		return &v.tokenValueBuf
 	case 3:
-		v.cur.scope = v.scratchBuf.String()
+		return &v.tokenScopeBuf
 	}
+	// Steps 4/5/6/100 aren't text-input; the input handler ignores
+	// them. Return a throwaway.
+	var scratch strings.Builder
+	return &scratch
 }
 
 func (v *addIntegrationView) advance() (tea.Model, tea.Cmd) {
-	v.syncScratch()
 	switch v.step {
 	case 0:
 		if strings.TrimSpace(v.nameBuf.String()) == "" {
@@ -181,33 +152,35 @@ func (v *addIntegrationView) advance() (tea.Model, tea.Cmd) {
 	case 11:
 		v.step = 1 // start collecting the first token
 	case 1:
-		if strings.TrimSpace(v.cur.name) == "" {
+		if strings.TrimSpace(v.tokenNameBuf.String()) == "" {
 			v.err = "token name required"
 			return v, nil
 		}
 		v.err = ""
 		v.step = 2
 	case 2:
-		if strings.TrimSpace(v.cur.value) == "" {
+		if strings.TrimSpace(v.tokenValueBuf.String()) == "" {
 			v.err = "token value required"
 			return v, nil
 		}
 		v.err = ""
 		v.step = 3
 	case 3:
-		if strings.TrimSpace(v.cur.scope) == "" {
-			v.cur.scope = "read-only"
+		scope := strings.TrimSpace(v.tokenScopeBuf.String())
+		if scope == "" {
+			scope = "read-only"
 		}
-		v.tokens = append(v.tokens, v.cur)
-		v.cur = integrationTokenDraft{}
+		v.tokens = append(v.tokens, integrationTokenDraft{
+			name:  strings.TrimSpace(v.tokenNameBuf.String()),
+			value: strings.TrimSpace(v.tokenValueBuf.String()),
+			scope: scope,
+		})
+		v.tokenNameBuf.Reset()
+		v.tokenValueBuf.Reset()
+		v.tokenScopeBuf.Reset()
 		v.step = 4
 	}
 	return v, nil
-}
-
-// Store for currently-edited token field.
-type addIntegrationViewExtra struct {
-	scratchBuf strings.Builder
 }
 
 func (v *addIntegrationView) save() tea.Cmd {
@@ -265,7 +238,7 @@ func (v *addIntegrationView) View() string {
 	}
 
 	prompt := ""
-	value := v.scratchBuf.String()
+	value := ""
 	switch v.step {
 	case 0:
 		prompt = "Integration name (e.g. notion, boiler)"
@@ -278,10 +251,13 @@ func (v *addIntegrationView) View() string {
 		value = v.urlBuf.String()
 	case 1:
 		prompt = "Token name (e.g. read, write, admin)"
+		value = v.tokenNameBuf.String()
 	case 2:
 		prompt = "Token VALUE (the real bearer from the upstream service)"
+		value = v.tokenValueBuf.String()
 	case 3:
 		prompt = "Scope note (default: read-only)"
+		value = v.tokenScopeBuf.String()
 	case 4:
 		b.WriteString("Add another token? (y/n)\n")
 		if v.err != "" {
@@ -308,12 +284,6 @@ func (v *addIntegrationView) View() string {
 	b.WriteString("\n" + helpSt.Render("enter next · esc cancel"))
 	return b.String()
 }
-
-// scratchBuf shim
-func (v *addIntegrationView) getScratchBuf() *strings.Builder { return &v.scratchBuf }
-
-// Add a field to keep the compile-time embedded buffer.
-type _addintcompatanchor struct{ addIntegrationView }
 
 // ---------- Add grant ----------
 
