@@ -17,6 +17,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/fray/dop/internal/admin"
+	"github.com/fray/dop/internal/approval"
 	"github.com/fray/dop/internal/config"
 )
 
@@ -34,6 +35,8 @@ func runAdmin(args []string) int {
 		return runAdminLogout(args[1:])
 	case "status":
 		return runAdminStatus(args[1:])
+	case "set-approval":
+		return runAdminSetApproval(args[1:])
 	case "__session-daemon":
 		// Internal: fork target from `dop admin login`. Not shown in help.
 		return runAdminSessionDaemon(args[1:])
@@ -100,6 +103,76 @@ func runAdminInit(args []string) int {
 	fmt.Fprintf(os.Stderr, "dop admin init: wrote %s (mode 0600)\n", admin.KeyFile(paths))
 	fmt.Fprintf(os.Stderr, "  admin ed25519 pubkey: %s\n", keys.AdminPubkey())
 	fmt.Fprintf(os.Stderr, "  vault decryption age recipient: %s\n", keys.Age.Recipient().String())
+
+	// v1.6 — approval passphrase, used to gate out-of-band claim
+	// approvals (web + CLI). Distinct from the admin passphrase so we
+	// never ask the user to type the master secret into a phone form.
+	appPass1, err := readPassphrase("Choose an approval passphrase (used to confirm agent claims): ", *pfromStdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin init: approval passphrase: %v\n", err)
+		return 1
+	}
+	if len(appPass1) < 6 {
+		fmt.Fprintln(os.Stderr, "dop admin init: approval passphrase must be at least 6 characters")
+		return 1
+	}
+	if !*pfromStdin {
+		appPass2, err := readPassphrase("Confirm approval passphrase: ", false)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop admin init: %v\n", err)
+			return 1
+		}
+		if appPass1 != appPass2 {
+			fmt.Fprintln(os.Stderr, "dop admin init: approval passphrases do not match")
+			return 1
+		}
+	}
+	if err := approval.Set(paths, appPass1); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin init: store approval passphrase: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(os.Stderr, "  approval passphrase stored (keys/approval.hash)")
+	return 0
+}
+
+// runAdminSetApproval (re)sets the approval passphrase without touching
+// the admin key. Useful if the passphrase leaks or the user wants to
+// rotate.
+func runAdminSetApproval(args []string) int {
+	fs := flag.NewFlagSet("admin set-approval", flag.ExitOnError)
+	pfromStdin := fs.Bool("passphrase-stdin", false, "read passphrase from stdin (testing only)")
+	_ = fs.Parse(args)
+
+	paths, err := config.Resolve()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin set-approval: %v\n", err)
+		return 1
+	}
+	pass1, err := readPassphrase("New approval passphrase: ", *pfromStdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin set-approval: %v\n", err)
+		return 1
+	}
+	if len(pass1) < 6 {
+		fmt.Fprintln(os.Stderr, "dop admin set-approval: passphrase must be at least 6 characters")
+		return 1
+	}
+	if !*pfromStdin {
+		pass2, err := readPassphrase("Confirm: ", false)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop admin set-approval: %v\n", err)
+			return 1
+		}
+		if pass1 != pass2 {
+			fmt.Fprintln(os.Stderr, "dop admin set-approval: passphrases do not match")
+			return 1
+		}
+	}
+	if err := approval.Set(paths, pass1); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin set-approval: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(os.Stderr, "dop admin set-approval: stored")
 	return 0
 }
 

@@ -20,6 +20,22 @@ DOP holds service credentials in a per-agent scoped vault. Always invoke the tar
 - Target service is not tracked in the vault
 - User explicitly asks for a different auth mechanism
 
+## Onboarding (first time the user hands you access)
+
+If the user gives you a bearer AND a PIN (something like `SP-BZ-SA`), bind first:
+
+```bash
+DOP_TOKEN=<bearer> dop claim <PIN>
+```
+
+`dop claim` will print a QR code + a public URL and block. The user scans the QR on their phone (or opens the URL), enters their DOP approval passphrase, and approves. Then `dop claim` records this agent's cryptographic identity and writes a private key to `~/.dop/agent-keys/<lookup_id>.key`. Subsequent `dop exec` calls prove possession of that key automatically.
+
+**Wait for the approval — do not cancel and retry.** The approval window is 2 minutes; if it expires, ask the user for a fresh PIN via `dop token repin --subject <name>`.
+
+If the user only gives you a bearer (no PIN), the token was issued with `--no-bind` — skip claim, jump straight to `dop exec`.
+
+If the PIN has expired ("PIN does not match" after clearly correct input), ask the user to run `dop token repin --subject <name>` and hand you a fresh one.
+
 ## Core Pattern
 
 Every credential-requiring command becomes:
@@ -29,12 +45,6 @@ dop exec --agent-name <specific-task-name> -- <your command>
 ```
 
 `--agent-name` labels the audit log. Use something specific to the task (`claude-notion-migration-check`, not `claude`). It is not a secret.
-
-If the user hands you an age keyfile path instead of setting `DOP_TOKEN`, use signed-challenge auth:
-
-```bash
-dop exec --agent-name <vault-agent-pubkey-name> --sign-with <keyfile> -- <your command>
-```
 
 ## Quick Reference
 
@@ -53,7 +63,12 @@ dop exec --agent-name <vault-agent-pubkey-name> --sign-with <keyfile> -- <your c
 
 ## Common Failure Modes
 
-- **`unknown auth token`** — `DOP_TOKEN` is set but not in the vault. Ask the user to check they exported the right one.
+- **`approval window expired`** — the user didn't run `dop approve <SAS>` in time. Ask them to run `dop token repin --subject <name>` for a fresh PIN, then start over.
+- **`claim rejected by admin`** — the user chose to deny. Stop and ask them why before retrying.
+- **`this bearer requires a PIN claim first`** — run `dop claim <PIN>` with the PIN the user gave you before attempting exec.
+- **`this bearer is bound but no agent key is present on this machine`** — the bearer was claimed on a different machine. Ask the user to revoke + re-issue for this host.
+- **`PIN does not match` / `PIN expired`** — ask the user for a fresh PIN via `dop token repin --subject <name>`.
+- **`unknown bearer (bundle not found)`** — `DOP_TOKEN` is set but not in the vault. Ask the user to check they exported the right one.
 - **`no vault path`** — the user hasn't run `dop init --vault ...` on this machine. Point them at the DOP README.
 - **`sops binary not found`** — installer prereq missing. Suggest `brew install sops`.
 

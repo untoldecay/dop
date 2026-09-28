@@ -19,7 +19,7 @@ CFG_ROOT="$HOME/Library/Application Support/dop"
 VAULT_DIR="$CFG_ROOT/vault"
 
 echo "=== [1] admin init"
-echo -n "$PASS" | "$DOP" admin init --passphrase-stdin >/dev/null
+printf "%s\n%s\n" "$PASS" "$PASS-approve" | "$DOP" admin init --passphrase-stdin >/dev/null
 
 echo "=== [2] init --vault (local bare bootstrap)"
 BARE="$WORKROOT/bare"
@@ -51,10 +51,10 @@ grants:
 EOF
 
 echo "=== [5] token issue (admin required)"
-BEARER=$("$DOP" token issue --grants notion.read --name test-agent 2>/dev/null || true)
+BEARER=$("$DOP" token issue --no-bind --grants notion.read --name test-agent 2>/dev/null || true)
 if [[ -z "$BEARER" ]]; then
     # Re-run capturing stderr to diagnose
-    "$DOP" token issue --grants notion.read --name test-agent 2>&1 | tail -5
+    "$DOP" token issue --no-bind --grants notion.read --name test-agent 2>&1 | tail -5
     fail "no bearer emitted"
 fi
 [[ "$BEARER" == tok_1* ]] || fail "bearer wrong shape: $BEARER"
@@ -87,7 +87,7 @@ echo "=== [10] admin logout"
 sleep 0.3   # daemon has a 50ms grace period after OK before Shutdown
 
 echo "=== [11] issuing without an active session fails"
-if "$DOP" token issue --grants notion.read --name after-logout 2>/dev/null; then
+if "$DOP" token issue --no-bind --grants notion.read --name after-logout 2>/dev/null; then
     fail "issue without session should have failed"
 fi
 pass "unlocked issue refused"

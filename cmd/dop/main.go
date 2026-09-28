@@ -26,10 +26,12 @@ usage:
   dop admin login                                start session (prompts passphrase)
   dop admin logout                               end session
   dop admin status                               show session state + TTL
+  dop admin set-approval                         (re)set the approval passphrase
   dop init --vault <url|path>                    attach vault (admin-required for first attach)
   dop token issue --grants CSV --name L [flags]  mint a capability + bearer (admin-required)
   dop token list                                 list capabilities (admin-required)
   dop token revoke <name>                        revoke a capability (admin-required)
+  dop token repin --subject S [--pin-ttl D]      reissue an expired/consumed PIN (admin-required)
   dop integration add --name N --token N=V:NOTE  add/update an integration (admin-required)
   dop integration list                           list integrations (admin-required)
   dop integration remove --name N [--force]      remove an integration (admin-required)
@@ -43,14 +45,23 @@ usage:
 
   # Agent / execution plane
   dop init --cache <url|path>                    clone vault as agent (no admin keys generated)
+  dop claim <PIN> [--token-file PATH]            bind this agent to a bearer via PIN (v1.3)
+                                                 v1.6: shows QR + starts Cloudflare tunnel → admin approves on phone via passphrase
+                                                 --no-tunnel for LAN-only; --skip-approval for unattended
   dop exec [--token-file PATH] --agent-name X -- CMD [ARGS...]
   dop whoami                                     describe current bearer
   dop env                                        print shell-eval-able exports
+
+  # Approval plane (v1.5) — admin confirms in-flight PIN claims
+  dop pending                                    list pending claims
+  dop approve <SAS>                              approve a pending claim
+  dop reject <SAS>                               reject a pending claim
 
   # Common
   dop pull                                       git pull vault
   dop push                                       git push vault
   dop doctor [--security]                        health check
+  dop watch [--since D] [--filter K,K] [--all]   live-tail the audit log
 
 env:
   DOP_TOKEN          bearer for exec/whoami/env
@@ -88,6 +99,14 @@ func main() {
 		os.Exit(runVault(os.Args[2:]))
 	case "team":
 		os.Exit(runTeam(os.Args[2:]))
+	case "claim":
+		os.Exit(runClaim(os.Args[2:]))
+	case "approve":
+		os.Exit(runApprove(os.Args[2:]))
+	case "reject":
+		os.Exit(runReject(os.Args[2:]))
+	case "pending":
+		os.Exit(runPending(os.Args[2:]))
 	case "exec":
 		os.Exit(runExec(os.Args[2:]))
 	case "whoami":
@@ -100,6 +119,8 @@ func main() {
 		os.Exit(runPush(os.Args[2:]))
 	case "doctor":
 		os.Exit(runDoctor(os.Args[2:]))
+	case "watch":
+		os.Exit(runWatch(os.Args[2:]))
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return

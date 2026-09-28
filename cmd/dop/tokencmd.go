@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/fray/dop/internal/admin"
+	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/vault"
@@ -33,7 +34,7 @@ import (
 
 func runToken(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop token <issue|list|revoke> ...")
+		fmt.Fprintln(os.Stderr, "usage: dop token <issue|list|revoke|repin> ...")
 		return 2
 	}
 	switch args[0] {
@@ -43,6 +44,8 @@ func runToken(args []string) int {
 		return runTokenList(args[1:])
 	case "revoke":
 		return runTokenRevoke(args[1:])
+	case "repin":
+		return runTokenRepin(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop token: unknown subcommand %q\n", args[0])
 		return 2
@@ -55,11 +58,23 @@ func runTokenIssue(args []string) int {
 	name := fs.String("name", "", "human-readable subject/label")
 	expires := fs.String("expires", "72h", "duration until expiry (default 72h)")
 	note := fs.String("note", "", "free-text note (not used in v1.0)")
+	bindPubkey := fs.String("bind-pubkey", "", "pre-bind the bearer to this ed25519 pubkey (hex)")
+	noBind := fs.Bool("no-bind", false, "issue an unbound bearer (bearer alone grants access)")
+	pinTTL := fs.String("pin-ttl", "5m", "PIN validity window when --bind is default")
 	_ = fs.Parse(args)
 	_ = note
 
 	if strings.TrimSpace(*grantsCSV) == "" {
 		fmt.Fprintln(os.Stderr, "dop token issue: --grants is required")
+		return 2
+	}
+	if *noBind && *bindPubkey != "" {
+		fmt.Fprintln(os.Stderr, "dop token issue: --no-bind and --bind-pubkey are mutually exclusive")
+		return 2
+	}
+	pinDur, err := time.ParseDuration(*pinTTL)
+	if err != nil || pinDur <= 0 {
+		fmt.Fprintf(os.Stderr, "dop token issue: --pin-ttl: %v\n", err)
 		return 2
 	}
 	grants := splitCSV(*grantsCSV)
@@ -141,6 +156,44 @@ func runTokenIssue(args []string) int {
 	expiresAt := time.Now().Add(expDur).UTC().Truncate(time.Second)
 	lookupID := capability.LookupID(vaultCtx, bearer)
 
+	// Resolve binding mode. Default is PIN-claim: user copies bearer+PIN
+	// to their agent, agent runs `dop claim PIN` to bind an identity.
+	var pin string
+	var envBinding *capability.EnvelopeBinding
+	var recBinding *capability.RecordBinding
+	switch {
+	case *noBind:
+		envBinding = &capability.EnvelopeBinding{Kind: vault.BindingKindNone}
+		recBinding = &capability.RecordBinding{Kind: vault.BindingKindNone}
+	case *bindPubkey != "":
+		envBinding = &capability.EnvelopeBinding{
+			Kind:   vault.BindingKindPubkey,
+			Pubkey: *bindPubkey,
+		}
+		recBinding = &capability.RecordBinding{
+			Kind:      vault.BindingKindPubkey,
+			Pubkey:    *bindPubkey,
+			ClaimedAt: time.Now().UTC().Truncate(time.Second),
+		}
+	default:
+		p, err := capability.NewPIN()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+			return 1
+		}
+		pin = p
+		pinExpiry := time.Now().Add(pinDur).UTC().Truncate(time.Second)
+		envBinding = &capability.EnvelopeBinding{
+			Kind:      vault.BindingKindPIN,
+			PinHash:   capability.HashPIN(bearer, pin),
+			PinExpiry: pinExpiry.Unix(),
+		}
+		recBinding = &capability.RecordBinding{
+			Kind:      vault.BindingKindPIN,
+			PinExpiry: pinExpiry,
+		}
+	}
+
 	// Write bundle to disk.
 	bundlePath := filepath.Join(paths.Vault, "capabilities", lookupID+".bundle")
 	if err := os.MkdirAll(filepath.Dir(bundlePath), 0o755); err != nil {
@@ -159,6 +212,7 @@ func runTokenIssue(args []string) int {
 		ExpiresAt:    expiresAt,
 		Subject:      subject,
 		Env:          envBundle,
+		Binding:      envBinding,
 	})
 	f.Close()
 	if err != nil {
@@ -178,6 +232,7 @@ func runTokenIssue(args []string) int {
 		LookupID:     lookupID,
 		BundleHash:   bundleHash,
 		Status:       capability.RecordStatusActive,
+		Binding:      recBinding,
 	}
 	if err := signRecordViaDaemon(client, &rec); err != nil {
 		fmt.Fprintf(os.Stderr, "dop token issue: sign: %v\n", err)
@@ -193,9 +248,26 @@ func runTokenIssue(args []string) int {
 		return 1
 	}
 
+	audit.Append(paths, audit.Event{
+		Kind:     audit.EventIssue,
+		Subject:  subject,
+		LookupID: lookupID,
+		Extra: map[string]string{
+			"binding":    envBinding.Kind,
+			"grants":     strings.Join(grants, ","),
+			"expires_at": expiresAt.Format(time.RFC3339),
+		},
+	})
 	fmt.Fprintf(os.Stderr, "dop token issue: issued %s (grants: %v, expires: %s)\n", subject, grants, expiresAt.Format(time.RFC3339))
-	fmt.Fprintln(os.Stderr, "  bearer (shown ONCE — copy now):")
-	fmt.Println(bearer)
+	if pin != "" {
+		fmt.Fprintln(os.Stderr, "  bearer + PIN (shown ONCE — copy now):")
+		fmt.Println(bearer)
+		fmt.Println(pin)
+		fmt.Fprintf(os.Stderr, "  PIN valid for %s. Tell your agent: `dop claim %s`\n", pinDur, pin)
+	} else {
+		fmt.Fprintln(os.Stderr, "  bearer (shown ONCE — copy now):")
+		fmt.Println(bearer)
+	}
 	return 0
 }
 
@@ -286,7 +358,171 @@ func runTokenRevoke(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop token revoke: %v\n", err)
 		return 1
 	}
+	audit.Append(paths, audit.Event{
+		Kind:     audit.EventRevoke,
+		Subject:  c.Subject,
+		LookupID: c.LookupID,
+	})
 	fmt.Fprintf(os.Stderr, "dop token revoke: revoked %s (gen bumped to %d)\n", query, c.Generation)
+	return 0
+}
+
+func runTokenRepin(args []string) int {
+	fs := flag.NewFlagSet("token repin", flag.ExitOnError)
+	subject := fs.String("subject", "", "subject whose PIN should be reissued (required)")
+	tokenFile := fs.String("token-file", "", "read the current bearer from file")
+	pinTTL := fs.String("pin-ttl", "5m", "PIN validity window")
+	_ = fs.Parse(args)
+
+	if strings.TrimSpace(*subject) == "" {
+		fmt.Fprintln(os.Stderr, "dop token repin: --subject is required")
+		return 2
+	}
+	pinDur, err := time.ParseDuration(*pinTTL)
+	if err != nil || pinDur <= 0 {
+		fmt.Fprintf(os.Stderr, "dop token repin: --pin-ttl: %v\n", err)
+		return 2
+	}
+	bearer, err := readBearer(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token repin: %v — supply via $DOP_TOKEN or --token-file\n", err)
+		return 1
+	}
+
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token repin: %v\n", err)
+		return 1
+	}
+	v, vaultPath, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token repin: %v\n", err)
+		return 1
+	}
+
+	// Match subject → capability record.
+	var (
+		capIDHex string
+		crec     vault.Capability
+		matched  int
+	)
+	for id, c := range v.Capabilities {
+		if c.Subject == *subject && c.Status == capability.RecordStatusActive {
+			capIDHex = id
+			crec = c
+			matched++
+		}
+	}
+	if matched == 0 {
+		fmt.Fprintf(os.Stderr, "dop token repin: no active capability with subject %q\n", *subject)
+		return 1
+	}
+	if matched > 1 {
+		fmt.Fprintf(os.Stderr, "dop token repin: subject %q matches multiple active capabilities\n", *subject)
+		return 1
+	}
+	if crec.Binding == nil || crec.Binding.Kind != vault.BindingKindPIN {
+		fmt.Fprintln(os.Stderr, "dop token repin: capability is not PIN-bound; nothing to repin")
+		return 1
+	}
+	if crec.Binding.Pubkey != "" {
+		fmt.Fprintln(os.Stderr, "dop token repin: capability is already claimed; revoke + re-issue to rebind")
+		return 1
+	}
+
+	// Verify the supplied bearer really is the one for this capability by
+	// decrypting the bundle. This also protects against mismatched
+	// --token-file / --subject combos.
+	ctxPath := filepath.Join(paths.Vault, "vault-context.bin")
+	vaultCtx, err := os.ReadFile(ctxPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token repin: no vault_context: %v\n", err)
+		return 1
+	}
+	lookupID := capability.LookupID(vaultCtx, bearer)
+	if lookupID != crec.LookupID {
+		fmt.Fprintln(os.Stderr, "dop token repin: bearer does not match this subject")
+		return 1
+	}
+	bundlePath := filepath.Join(paths.Vault, "capabilities", lookupID+".bundle")
+	oldBundleBytes, err := os.ReadFile(bundlePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token repin: %v\n", err)
+		return 1
+	}
+	env, hdr, err := capability.Read(oldBundleBytes, capability.ReadOpts{Bearer: bearer})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token repin: decrypt bundle: %v\n", err)
+		return 1
+	}
+
+	// Generate new PIN, rewrite the bundle in place.
+	newPIN, err := capability.NewPIN()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token repin: %v\n", err)
+		return 1
+	}
+	pinExpiry := time.Now().Add(pinDur).UTC().Truncate(time.Second)
+	newGen := v.BumpGeneration(crec.Subject)
+
+	newEnvBinding := &capability.EnvelopeBinding{
+		Kind:      vault.BindingKindPIN,
+		PinHash:   capability.HashPIN(bearer, newPIN),
+		PinExpiry: pinExpiry.Unix(),
+	}
+	tmpPath := bundlePath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token repin: %v\n", err)
+		return 1
+	}
+	newBundleBytes, err := capability.Write(f, capability.WriteOpts{
+		CapabilityID: hdr.CapabilityID,
+		Bearer:       bearer,
+		Generation:   newGen,
+		ExpiresAt:    time.Unix(hdr.ExpiresAtUnix, 0).UTC(),
+		Subject:      env.Subject,
+		Env:          env.Env,
+		Binding:      newEnvBinding,
+	})
+	f.Close()
+	if err != nil {
+		os.Remove(tmpPath)
+		fmt.Fprintf(os.Stderr, "dop token repin: rewrite bundle: %v\n", err)
+		return 1
+	}
+	newBundleHash := capability.HashBundle(newBundleBytes)
+
+	crec.Generation = newGen
+	crec.BundleHash = newBundleHash
+	crec.Binding.PinExpiry = pinExpiry
+	rec := vaultCapability2Record(crec, capIDHex)
+	if err := signRecordViaDaemon(client, &rec); err != nil {
+		os.Remove(tmpPath)
+		fmt.Fprintf(os.Stderr, "dop token repin: sign: %v\n", err)
+		return 1
+	}
+	v.Capabilities[capIDHex] = capability2VaultCapability(rec)
+	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
+		os.Remove(tmpPath)
+		fmt.Fprintf(os.Stderr, "dop token repin: save vault: %v\n", err)
+		return 1
+	}
+	if err := os.Rename(tmpPath, bundlePath); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token repin: swap bundle: %v\n", err)
+		return 1
+	}
+
+	audit.Append(paths, audit.Event{
+		Kind:     audit.EventRepin,
+		Subject:  crec.Subject,
+		LookupID: lookupID,
+		Extra:    map[string]string{"pin_ttl": pinDur.String()},
+	})
+	fmt.Fprintf(os.Stderr, "dop token repin: reissued PIN for %s (valid %s)\n", *subject, pinDur)
+	fmt.Fprintln(os.Stderr, "  new PIN (shown ONCE):")
+	fmt.Println(newPIN)
 	return 0
 }
 
@@ -391,7 +627,7 @@ func writeSopsConfig(vaultDir string, recipients []string) error {
 // vault.Capability is the YAML view; capability.Record is the signing-enabled type.
 
 func capability2VaultCapability(r capability.Record) vault.Capability {
-	return vault.Capability{
+	c := vault.Capability{
 		Subject:    r.Subject,
 		Grants:     r.Grants,
 		CreatedAt:  r.CreatedAt,
@@ -403,10 +639,19 @@ func capability2VaultCapability(r capability.Record) vault.Capability {
 		Status:     r.Status,
 		Signature:  r.Signature,
 	}
+	if r.Binding != nil {
+		c.Binding = &vault.Binding{
+			Kind:      r.Binding.Kind,
+			PinExpiry: r.Binding.PinExpiry,
+			Pubkey:    r.Binding.Pubkey,
+			ClaimedAt: r.Binding.ClaimedAt,
+		}
+	}
+	return c
 }
 
 func vaultCapability2Record(c vault.Capability, capIDHex string) capability.Record {
-	return capability.Record{
+	r := capability.Record{
 		CapabilityID: capIDHex,
 		Subject:      c.Subject,
 		Grants:       c.Grants,
@@ -419,6 +664,15 @@ func vaultCapability2Record(c vault.Capability, capIDHex string) capability.Reco
 		Status:       c.Status,
 		Signature:    c.Signature,
 	}
+	if c.Binding != nil {
+		r.Binding = &capability.RecordBinding{
+			Kind:      c.Binding.Kind,
+			PinExpiry: c.Binding.PinExpiry,
+			Pubkey:    c.Binding.Pubkey,
+			ClaimedAt: c.Binding.ClaimedAt,
+		}
+	}
+	return r
 }
 
 // signRecordViaDaemon asks the daemon to ed25519-sign the record's

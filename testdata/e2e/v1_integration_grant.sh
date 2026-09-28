@@ -15,7 +15,7 @@ export DOP_NO_TUI=1
 PASS="the-passphrase-15chars"
 
 echo "=== [1] setup"
-echo -n "$PASS" | "$DOP" admin init --passphrase-stdin >/dev/null
+printf "%s\n%s\n" "$PASS" "$PASS-approve" | "$DOP" admin init --passphrase-stdin >/dev/null
 "$DOP" init --vault "$WORKROOT/bare" >/dev/null 2>&1
 echo -n "$PASS" | "$DOP" admin login --passphrase-stdin >/dev/null
 
@@ -50,7 +50,7 @@ echo "$out" | grep -q "unknown integration" || fail "unknown integration error w
 pass "unknown integration errored"
 
 echo "=== [7] issue against the fresh integration + grant"
-BEARER=$("$DOP" token issue --grants notion.read --name test 2>/dev/null)
+BEARER=$("$DOP" token issue --no-bind --grants notion.read --name test 2>/dev/null)
 [[ "$BEARER" == tok_1* ]] || fail "no bearer"
 env_out=$(DOP_TOKEN="$BEARER" "$DOP" exec --agent-name t -- env 2>/dev/null)
 echo "$env_out" | grep -q "NOTION_TOKEN=ntn_ro_NEW" || fail "wrong token value in env"

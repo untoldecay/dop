@@ -15,7 +15,7 @@ export DOP_NO_TUI=1
 PASS="the-passphrase-15chars"
 
 echo "=== [1] setup + seed integration"
-echo -n "$PASS" | "$DOP" admin init --passphrase-stdin >/dev/null
+printf "%s\n%s\n" "$PASS" "$PASS-approve" | "$DOP" admin init --passphrase-stdin >/dev/null
 "$DOP" init --vault "$WORKROOT/bare" >/dev/null 2>&1
 echo -n "$PASS" | "$DOP" admin login --passphrase-stdin >/dev/null
 "$DOP" integration add --name notion --token "read=ntn_ro_X:read-only" >/dev/null 2>&1

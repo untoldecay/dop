@@ -22,7 +22,7 @@ PASS="the-passphrase-15chars"
 echo "=== [A1] admin init + attach vault + login + seed"
 HOME="$MACHINE_A" "$DOP" -h >/dev/null 2>&1 || true  # smoke
 export DOP_NO_TUI=1
-echo -n "$PASS" | HOME="$MACHINE_A" "$DOP" admin init --passphrase-stdin >/dev/null
+printf "%s\n%s\n" "$PASS" "$PASS-approve" | HOME="$MACHINE_A" "$DOP" admin init --passphrase-stdin >/dev/null
 HOME="$MACHINE_A" "$DOP" init --vault "$BARE" >/dev/null 2>&1
 echo -n "$PASS" | HOME="$MACHINE_A" "$DOP" admin login --passphrase-stdin >/dev/null
 VAULT_A="$MACHINE_A/Library/Application Support/dop/vault"
@@ -38,9 +38,9 @@ grants:
 EOF
 
 echo "=== [A2] issue a bearer for the server"
-BEARER=$(HOME="$MACHINE_A" "$DOP" token issue --grants notion.read --name prod-server --expires 30d 2>&1 | tail -1)
+BEARER=$(HOME="$MACHINE_A" "$DOP" token issue --no-bind --grants notion.read --name prod-server --expires 30d 2>&1 | tail -1)
 if [[ "$BEARER" != tok_1* ]]; then
-    HOME="$MACHINE_A" "$DOP" token issue --grants notion.read --name debug --expires 30d 2>&1 | head -10
+    HOME="$MACHINE_A" "$DOP" token issue --no-bind --grants notion.read --name debug --expires 30d 2>&1 | head -10
     fail "expected bearer, got: $BEARER"
 fi
 [[ "$BEARER" == tok_1* ]] || fail "bad bearer"
@@ -78,7 +78,7 @@ echo "$who" | grep -q "prod-server" || fail "subject not shown"
 pass "whoami works from agent install"
 
 echo "=== [B5] agent cannot issue tokens"
-if HOME="$MACHINE_B" "$DOP" token issue --grants notion.read --name bad 2>&1; then
+if HOME="$MACHINE_B" "$DOP" token issue --no-bind --grants notion.read --name bad 2>&1; then
     fail "agent should not be able to issue tokens"
 fi
 pass "issuing from agent refused"

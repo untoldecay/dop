@@ -239,6 +239,7 @@ type issueView struct {
 	expiryBuf strings.Builder
 	err       string
 	bearer    string
+	pin       string
 	done      bool
 	flash     string
 	grantList []string
@@ -258,6 +259,7 @@ func (v *issueView) Flash() string { return v.flash }
 
 type issueResultMsg struct {
 	bearer string
+	pin    string
 	err    string
 }
 
@@ -268,6 +270,7 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.err = mm.err
 		} else {
 			v.bearer = mm.bearer
+			v.pin = mm.pin
 			v.step = 100 // success screen
 		}
 		return v, nil
@@ -346,9 +349,35 @@ func (v *issueView) issue() tea.Cmd {
 		if err := cmd.Run(); err != nil {
 			return issueResultMsg{err: strings.TrimSpace(stderr.String())}
 		}
-		// Bearer is on stdout (single line).
-		return issueResultMsg{bearer: strings.TrimSpace(stdout.String())}
+		// stdout: bearer on line 1, PIN on line 2 (when --bind is default).
+		bearer, pin := "", ""
+		for _, ln := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+			ln = strings.TrimSpace(ln)
+			switch {
+			case strings.HasPrefix(ln, "tok_"):
+				bearer = ln
+			case looksLikePIN(ln):
+				pin = ln
+			}
+		}
+		return issueResultMsg{bearer: bearer, pin: pin}
 	}
+}
+
+// looksLikePIN matches the `XX-XX-XX` alpha PIN format.
+func looksLikePIN(s string) bool {
+	if len(s) != 8 || s[2] != '-' || s[5] != '-' {
+		return false
+	}
+	for i, c := range s {
+		if i == 2 || i == 5 {
+			continue
+		}
+		if c < 'A' || c > 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 func (v *issueView) View() string {
@@ -356,12 +385,24 @@ func (v *issueView) View() string {
 	b.WriteString(titleSt.Render("Issue token") + "\n\n")
 	if v.step == 100 {
 		b.WriteString(okSt.Render("✓ issued") + "\n\n")
-		b.WriteString("Bearer (shown ONCE — copy now):\n")
-		b.WriteString("  " + lipgloss.NewStyle().Bold(true).Render(v.bearer) + "\n\n")
-		if copyToClipboard(v.bearer) {
-			b.WriteString(okSt.Render("copied to clipboard") + "\n\n")
+		if v.pin != "" {
+			// PIN-bound: prefer the one-liner your agent will actually run.
+			b.WriteString("Bearer + PIN (shown ONCE — copy now):\n")
+			b.WriteString("  " + lipgloss.NewStyle().Bold(true).Render(v.bearer) + "\n")
+			b.WriteString("  " + lipgloss.NewStyle().Bold(true).Render(v.pin) + "\n\n")
+			handoff := "Tell your agent:\n  DOP_TOKEN=" + v.bearer + " dop claim " + v.pin
+			b.WriteString(mutedSt.Render(handoff) + "\n\n")
+			if copyToClipboard(handoff) {
+				b.WriteString(okSt.Render("handoff copied to clipboard") + "\n")
+			}
+		} else {
+			b.WriteString("Bearer (shown ONCE — copy now):\n")
+			b.WriteString("  " + lipgloss.NewStyle().Bold(true).Render(v.bearer) + "\n\n")
+			if copyToClipboard(v.bearer) {
+				b.WriteString(okSt.Render("copied to clipboard") + "\n\n")
+			}
+			b.WriteString(mutedSt.Render("then: export DOP_TOKEN="+v.bearer) + "\n")
 		}
-		b.WriteString(mutedSt.Render("then: export DOP_TOKEN="+v.bearer) + "\n")
 		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
 		return b.String()
 	}

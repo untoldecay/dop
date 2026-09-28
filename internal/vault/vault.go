@@ -105,8 +105,32 @@ type Capability struct {
 	BundleHash string    `yaml:"bundle_hash"`
 	IssuedBy   string    `yaml:"issued_by"`
 	Status     string    `yaml:"status"`
+	Binding    *Binding  `yaml:"binding,omitempty"`
 	Signature  string    `yaml:"signature"`
 }
+
+// Binding tracks how a bearer proves it belongs to the intended agent.
+//
+//	Kind    "pin"    — issued with a PIN, PIN-hash lives in the bundle;
+//	                   Pubkey filled in after claim.
+//	Kind    "pubkey" — admin pre-supplied the agent's pubkey; no PIN.
+//	Kind    "none"   — legacy / opt-out; bearer alone is enough.
+//
+// A PIN-bound capability moves through two states:
+//   - Unclaimed:  PinExpiry is set, Pubkey is empty.
+//   - Claimed:    Pubkey is set, PinExpiry cleared.
+type Binding struct {
+	Kind      string    `yaml:"kind" json:"kind"`
+	PinExpiry time.Time `yaml:"pin_expiry,omitempty" json:"pin_expiry,omitempty"`
+	Pubkey    string    `yaml:"pubkey,omitempty" json:"pubkey,omitempty"`
+	ClaimedAt time.Time `yaml:"claimed_at,omitempty" json:"claimed_at,omitempty"`
+}
+
+const (
+	BindingKindPIN    = "pin"
+	BindingKindPubkey = "pubkey"
+	BindingKindNone   = "none"
+)
 
 // ParsePlain unmarshals plaintext YAML into a Vault, enforcing v1 schema.
 func ParsePlain(b []byte) (*Vault, error) {

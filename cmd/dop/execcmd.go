@@ -47,6 +47,10 @@ func runExec(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
 		return 1
 	}
+	if err := verifyBinding(bearer, res); err != nil {
+		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
+		return 1
+	}
 	fmt.Fprintf(os.Stderr, "dop exec: agent=%q subject=%q gen=%d env_keys=%d\n",
 		*agentName, res.subject, res.generation, len(env))
 	if err := execChild(child, env, *cleanEnv); err != nil {
@@ -54,6 +58,63 @@ func runExec(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// verifyBinding enforces v1.3 binding rules:
+//   - kind=none      → no check
+//   - kind=pin, no pubkey → claim required
+//   - kind=pin, has pubkey  → must sign a challenge with the local agent key
+//   - kind=pubkey    → must sign a challenge with the local agent key
+func verifyBinding(bearer string, res resolveResult) error {
+	if res.binding == nil {
+		return nil
+	}
+	switch res.binding.Kind {
+	case "", "none":
+		return nil
+	case "pin":
+		if res.binding.Pubkey == "" {
+			return errors.New("this bearer requires a PIN claim first — run `dop claim <PIN>`")
+		}
+	case "pubkey":
+		// fall through
+	default:
+		return fmt.Errorf("unknown binding kind %q", res.binding.Kind)
+	}
+	paths, err := config.Resolve()
+	if err != nil {
+		return err
+	}
+	priv, err := loadAgentKey(paths, res.lookupID)
+	if err != nil {
+		return fmt.Errorf("agent key: %w", err)
+	}
+	if priv == nil {
+		return errors.New("this bearer is bound but no agent key is present on this machine — run `dop claim <PIN>` on the agent's machine")
+	}
+	pubBytes, err := hex.DecodeString(res.binding.Pubkey)
+	if err != nil {
+		return fmt.Errorf("binding pubkey not hex: %w", err)
+	}
+	if len(pubBytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("binding pubkey wrong size: %d", len(pubBytes))
+	}
+	pub, ok := priv.Public().(ed25519.PublicKey)
+	if !ok {
+		return errors.New("agent key: no public component")
+	}
+	// Constant-time comparison: local pubkey must match bound pubkey.
+	if !ed25519.PublicKey(pubBytes).Equal(pub) {
+		return errors.New("local agent key does not match the bound pubkey (was this bearer rebound?)")
+	}
+	// Sign+verify a canonical challenge — proves possession, not just
+	// filesystem presence.
+	challenge := []byte("dop-v1-exec:" + res.lookupID + ":" + res.capID)
+	sig := ed25519.Sign(priv, challenge)
+	if !ed25519.Verify(pub, challenge, sig) {
+		return errors.New("agent key self-verify failed")
+	}
+	return nil
 }
 
 func runWhoami(args []string) int {
@@ -71,6 +132,21 @@ func runWhoami(args []string) int {
 	fmt.Printf("subject:    %s\n", res.subject)
 	fmt.Printf("generation: %d\n", res.generation)
 	fmt.Printf("expires_at: %s\n", res.expiresAt.Format(time.RFC3339))
+	if res.binding != nil {
+		fmt.Printf("binding:    %s", res.binding.Kind)
+		switch res.binding.Kind {
+		case "pin":
+			if res.binding.Pubkey == "" {
+				fmt.Printf(" (unclaimed)\n")
+			} else {
+				fmt.Printf(" (claimed → %s…)\n", res.binding.Pubkey[:16])
+			}
+		case "pubkey":
+			fmt.Printf(" → %s…\n", res.binding.Pubkey[:16])
+		default:
+			fmt.Println()
+		}
+	}
 	return 0
 }
 
@@ -127,6 +203,8 @@ type resolveResult struct {
 	generation uint64
 	expiresAt  time.Time
 	capID      string
+	lookupID   string
+	binding    *capability.EnvelopeBinding
 }
 
 // resolveBearer: hash bearer to lookup id, read bundle file, decrypt,
@@ -193,6 +271,8 @@ func resolveBearer(bearer string) (map[string]string, resolveResult, error) {
 		generation: hdr.Generation,
 		expiresAt:  time.Unix(hdr.ExpiresAtUnix, 0),
 		capID:      hex.EncodeToString(hdr.CapabilityID[:]),
+		lookupID:   lookupID,
+		binding:    env.Binding,
 	}, nil
 }
 
@@ -275,6 +355,25 @@ func execChild(argv []string, env map[string]string, cleanEnv bool) error {
 	} else {
 		finalEnv = append(finalEnv, os.Environ()...)
 	}
+	// v1.5 env-hardening — when the child is `git`, strip external
+	// config + disable hooks + refuse ext protocols BEFORE injecting
+	// credential env. Prevents a hostile repo's hooks or a rogue
+	// ~/.gitconfig include-if from running with the injected token in
+	// reach. Pattern lifted from Buzz's configure_git_auth.
+	if base := filepath.Base(argv[0]); base == "git" {
+		finalEnv = stripEnv(finalEnv, []string{
+			"GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_ASKPASS",
+		})
+		finalEnv = append(finalEnv,
+			"GIT_TERMINAL_PROMPT=0",
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_COUNT=2",
+			"GIT_CONFIG_KEY_0=core.hooksPath",
+			"GIT_CONFIG_VALUE_0=/dev/null",
+			"GIT_CONFIG_KEY_1=protocol.ext.allow",
+			"GIT_CONFIG_VALUE_1=never",
+		)
+	}
 	// Sort injected keys for determinism.
 	keys := make([]string, 0, len(env))
 	for k := range env {
@@ -285,6 +384,24 @@ func execChild(argv []string, env map[string]string, cleanEnv bool) error {
 		finalEnv = append(finalEnv, k+"="+env[k])
 	}
 	return syscall.Exec(bin, argv, finalEnv)
+}
+
+// stripEnv returns env minus any KEY=... entries whose KEY is in the
+// removal set.
+func stripEnv(env []string, remove []string) []string {
+	set := map[string]bool{}
+	for _, k := range remove {
+		set[k] = true
+	}
+	out := env[:0]
+	for _, kv := range env {
+		i := strings.IndexByte(kv, '=')
+		if i > 0 && set[kv[:i]] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 func lookPath(bin string) (string, error) {

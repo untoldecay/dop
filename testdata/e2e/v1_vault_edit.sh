@@ -16,7 +16,7 @@ export DOP_NO_TUI=1
 PASS="the-passphrase-15chars"
 
 echo "=== [1] setup"
-echo -n "$PASS" | "$DOP" admin init --passphrase-stdin >/dev/null
+printf "%s\n%s\n" "$PASS" "$PASS-approve" | "$DOP" admin init --passphrase-stdin >/dev/null
 "$DOP" init --vault "$WORKROOT/bare" >/dev/null 2>&1
 echo -n "$PASS" | "$DOP" admin login --passphrase-stdin >/dev/null
 "$DOP" integration add --name notion --token "read=OLD_VALUE:read-only" >/dev/null 2>&1
@@ -33,7 +33,7 @@ pass "vault edit succeeded"
 
 echo "=== [3] value was actually changed"
 "$DOP" grant add --id notion.read --integration notion --token read >/dev/null 2>&1
-BEARER=$("$DOP" token issue --grants notion.read --name checker 2>/dev/null)
+BEARER=$("$DOP" token issue --no-bind --grants notion.read --name checker 2>/dev/null)
 env_out=$(DOP_TOKEN="$BEARER" "$DOP" exec --agent-name c -- env 2>/dev/null)
 echo "$env_out" | grep -q "NOTION_TOKEN=NEW_VALUE" || fail "value not updated: $env_out"
 pass "edit persisted correctly"

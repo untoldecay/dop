@@ -21,7 +21,7 @@ CFG_ROOT="$HOME/Library/Application Support/dop"
 VAULT_DIR="$CFG_ROOT/vault"
 
 echo "=== [1] admin init + init --vault + login + seed"
-echo -n "$PASS" | "$DOP" admin init --passphrase-stdin >/dev/null
+printf "%s\n%s\n" "$PASS" "$PASS-approve" | "$DOP" admin init --passphrase-stdin >/dev/null
 "$DOP" init --vault "$WORKROOT/bare" >/dev/null 2>&1
 echo -n "$PASS" | "$DOP" admin login --passphrase-stdin >/dev/null
 cat > "$VAULT_DIR/vault.yaml" <<'EOF'
@@ -41,7 +41,7 @@ grants:
 EOF
 
 echo "=== [2] issue a bearer"
-BEARER=$("$DOP" token issue --grants notion.read --name research 2>/dev/null)
+BEARER=$("$DOP" token issue --no-bind --grants notion.read --name research 2>/dev/null)
 [[ "$BEARER" == tok_1* ]] || fail "bad bearer"
 
 echo "=== [3] dop exec — env visible in child"
@@ -86,7 +86,7 @@ fi
 pass "missing bearer errored"
 
 echo "=== [10] issue a fresh bearer with 1s TTL, wait, exec fails"
-FRESH=$("$DOP" token issue --grants notion.read --name shortlived --expires 1s 2>/dev/null)
+FRESH=$("$DOP" token issue --no-bind --grants notion.read --name shortlived --expires 1s 2>/dev/null)
 sleep 2
 if DOP_TOKEN="$FRESH" "$DOP" exec --agent-name f -- true 2>/dev/null; then
     fail "expired bearer should fail"
@@ -95,7 +95,7 @@ pass "expired bearer rejected"
 
 echo "=== [11] tamper the bundle → exec fails"
 # Issue a fresh bearer specifically for this test.
-TAMPER_BEARER=$("$DOP" token issue --grants notion.read --name tamperX --expires 1h 2>/dev/null)
+TAMPER_BEARER=$("$DOP" token issue --no-bind --grants notion.read --name tamperX --expires 1h 2>/dev/null)
 # Pick the newest bundle — that's the one for TAMPER_BEARER.
 BUNDLE=$(ls -t "$VAULT_DIR/capabilities" | head -1)
 [[ -n "$BUNDLE" ]] || fail "no bundle to tamper"

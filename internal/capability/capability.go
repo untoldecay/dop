@@ -83,6 +83,23 @@ type EnvBundle struct {
 	// they match.
 	Generation    uint64 `json:"generation"`
 	ExpiresAtUnix int64  `json:"expires_at_unix"`
+	// Binding — v1.3.0. Present when the capability is bound to an
+	// agent identity (PIN-claim or admin-supplied pubkey).
+	Binding *EnvelopeBinding `json:"binding,omitempty"`
+}
+
+// EnvelopeBinding is the binding view inside a bundle envelope. It's
+// bearer-locked (only the bearer holder can read it), which is exactly
+// who should be able to see the PIN hash to verify a claim attempt.
+//
+// PinHash is HMAC-SHA256(bearer, pin_normalized), hex-encoded. Binding
+// the PIN hash to the bearer means a stolen bundle without a bearer is
+// useless AND the hash can't be pre-computed by rainbow tables.
+type EnvelopeBinding struct {
+	Kind      string `json:"kind"`
+	PinHash   string `json:"pin_hash,omitempty"`
+	PinExpiry int64  `json:"pin_expiry,omitempty"`
+	Pubkey    string `json:"pubkey,omitempty"`
 }
 
 // WriteOpts configures Write.
@@ -93,6 +110,9 @@ type WriteOpts struct {
 	ExpiresAt    time.Time // written as unix seconds
 	Subject      string    // human label for whoami — encrypted inside
 	Env          map[string]string
+	// Binding, if set, is written into the envelope so the bearer holder
+	// can verify PIN claims and/or authenticated exec.
+	Binding *EnvelopeBinding
 	// Rand is the entropy source. nil → crypto/rand.
 	Rand io.Reader
 }
@@ -148,6 +168,7 @@ func Write(w io.Writer, opts WriteOpts) ([]byte, error) {
 		Subject:       opts.Subject,
 		Generation:    opts.Generation,
 		ExpiresAtUnix: opts.ExpiresAt.Unix(),
+		Binding:       opts.Binding,
 	}
 	plaintext, err := json.Marshal(payload)
 	if err != nil {
@@ -357,4 +378,65 @@ func LookupID(vaultContext []byte, bearer string) string {
 	mac.Write([]byte(bearer))
 	sum := mac.Sum(nil)
 	return hex.EncodeToString(sum[:20]) // 40-char filename
+}
+
+// pinAlphabet is 24 uppercase letters with confusables removed (I, L, O
+// dropped). Numbers are excluded so PINs are unambiguously letters when
+// spoken. 24^6 ≈ 191M possibilities — plenty for a 5-min claim window
+// under rate limiting.
+const pinAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ"
+
+// NewPIN returns a fresh 6-letter PIN formatted as `XX-XX-XX`.
+func NewPIN() (string, error) {
+	buf := make([]byte, 6)
+	if _, err := io.ReadFull(rand.Reader, buf); err != nil {
+		return "", err
+	}
+	out := make([]byte, 8)
+	for i, b := range buf {
+		c := pinAlphabet[int(b)%len(pinAlphabet)]
+		switch i {
+		case 0, 1:
+			out[i] = c
+		case 2, 3:
+			out[i+1] = c
+		case 4, 5:
+			out[i+2] = c
+		}
+	}
+	out[2] = '-'
+	out[5] = '-'
+	return string(out), nil
+}
+
+// NormalizePIN uppercases and strips non-alphabet chars, letting users
+// re-enter a PIN with lowercase or different separators.
+func NormalizePIN(pin string) string {
+	buf := make([]byte, 0, len(pin))
+	for i := 0; i < len(pin); i++ {
+		c := pin[i]
+		if c >= 'a' && c <= 'z' {
+			c -= 32
+		}
+		if c >= 'A' && c <= 'Z' {
+			buf = append(buf, c)
+		}
+	}
+	return string(buf)
+}
+
+// HashPIN returns HMAC-SHA256(bearer, normalized(pin)) hex-encoded.
+// The bearer-keyed HMAC prevents rainbow-table precomputation and ties
+// verifiability to bundle possession.
+func HashPIN(bearer, pin string) string {
+	norm := NormalizePIN(pin)
+	mac := hmac.New(sha256.New, []byte(bearer))
+	mac.Write([]byte(norm))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// VerifyPIN is a constant-time compare of HashPIN against the stored hash.
+func VerifyPIN(bearer, pin, storedHex string) bool {
+	got := HashPIN(bearer, pin)
+	return hmac.Equal([]byte(got), []byte(storedHex))
 }

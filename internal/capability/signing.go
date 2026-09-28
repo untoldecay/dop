@@ -31,20 +31,30 @@ import (
 // Record is the vault-side metadata for one issued capability.
 // Fields with `json:"-"` are computed / injected at load time.
 type Record struct {
-	CapabilityID  string    `json:"capability_id"`         // hex of the raw 32-byte id
-	Subject       string    `json:"subject"`               // human label
-	Grants        []string  `json:"grants"`                // grant ids
-	CreatedAt     time.Time `json:"created_at"`
-	ExpiresAt     time.Time `json:"expires_at"`
-	Generation    uint64    `json:"generation"`
-	LookupID      string    `json:"lookup_id"`             // 40-hex bundle filename
-	BundleHash    string    `json:"bundle_hash"`           // sha256 hex of bundle file
-	IssuedBy      string    `json:"issued_by"`             // ed25519 pubkey hex
-	Status        string    `json:"status"`                // "active" | "revoked"
+	CapabilityID string    `json:"capability_id"` // hex of the raw 32-byte id
+	Subject      string    `json:"subject"`       // human label
+	Grants       []string  `json:"grants"`        // grant ids
+	CreatedAt    time.Time `json:"created_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	Generation   uint64    `json:"generation"`
+	LookupID     string    `json:"lookup_id"`   // 40-hex bundle filename
+	BundleHash   string    `json:"bundle_hash"` // sha256 hex of bundle file
+	IssuedBy     string    `json:"issued_by"`   // ed25519 pubkey hex
+	Status       string    `json:"status"`      // "active" | "revoked"
+	Binding      *RecordBinding `json:"binding,omitempty"`
 
 	// Signature over the canonical form of every other field. Excluded
 	// from that canonical form during signing/verification.
 	Signature string `json:"signature"`
+}
+
+// RecordBinding is the vault-side view. Mirrors vault.Binding but lives
+// in the capability package to avoid cyclic imports.
+type RecordBinding struct {
+	Kind      string    `json:"kind"`
+	PinExpiry time.Time `json:"pin_expiry,omitempty"`
+	Pubkey    string    `json:"pubkey,omitempty"`
+	ClaimedAt time.Time `json:"claimed_at,omitempty"`
 }
 
 const RecordStatusActive = "active"
@@ -66,6 +76,23 @@ func (r Record) SigningPayload() ([]byte, error) {
 		"bundle_hash":   r.BundleHash,
 		"issued_by":     r.IssuedBy,
 		"status":        r.Status,
+	}
+	// Include binding only when set — pre-v1.3 records signed without it
+	// still verify.
+	if r.Binding != nil {
+		bindingMap := map[string]any{
+			"kind": r.Binding.Kind,
+		}
+		if !r.Binding.PinExpiry.IsZero() {
+			bindingMap["pin_expiry"] = r.Binding.PinExpiry.UTC().Format(time.RFC3339Nano)
+		}
+		if r.Binding.Pubkey != "" {
+			bindingMap["pubkey"] = r.Binding.Pubkey
+		}
+		if !r.Binding.ClaimedAt.IsZero() {
+			bindingMap["claimed_at"] = r.Binding.ClaimedAt.UTC().Format(time.RFC3339Nano)
+		}
+		m["binding"] = bindingMap
 	}
 	// Deterministic key order.
 	keys := make([]string, 0, len(m))

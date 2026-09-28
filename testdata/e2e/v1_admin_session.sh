@@ -24,7 +24,7 @@ export XDG_CONFIG_HOME="$WORKROOT/c"
 PASSPHRASE="hunter22-open-sesame"
 
 echo "=== [1] dop admin init"
-echo -n "$PASSPHRASE" | "$DOP" admin init --passphrase-stdin 2>&1 | head -5
+printf "%s\n%s\n" "$PASSPHRASE" "$PASSPHRASE-approve" | "$DOP" admin init --passphrase-stdin 2>&1 | head -6
 KEYFILE="$HOME/Library/Application Support/dop/keys/admin.age.enc"
 [[ -f "$KEYFILE" ]] || KEYFILE="$XDG_CONFIG_HOME/dop/keys/admin.age.enc"
 [[ -f "$KEYFILE" ]] || fail "keyfile missing"

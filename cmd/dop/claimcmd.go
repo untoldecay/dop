@@ -1,0 +1,477 @@
+// `dop claim <PIN>` — v1.3 PIN claim.
+//
+// Runs on the agent's machine (which for the common case is also the
+// admin's machine — Cam's laptop, Claude Code, etc). Requires an active
+// admin session because the claim mutates the vault (updates the
+// capability record's binding and bumps generation) and only the admin
+// can sign + re-encrypt.
+//
+// Flow:
+//  1. Read bearer from $DOP_TOKEN (or --token-file).
+//  2. Decrypt local bundle → verify PIN hash + not-expired.
+//  3. Generate an ed25519 keypair for the agent.
+//  4. Bump generation, update record binding (pubkey + claimed_at, clear
+//     pin_expiry), re-write the bundle with the new binding + new gen.
+//  5. Ask daemon to sign the updated record + re-encrypt the vault.
+//  6. Persist the agent private key under <paths.Root>/agent-keys/.
+//  7. Print success and the one-liner the agent should eval.
+//
+// A remote agent (no admin session on its host) can't call this — the
+// admin should issue with `--bind-pubkey <hex>` instead, using the
+// agent's pre-published pubkey.
+
+package main
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"flag"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"github.com/mdp/qrterminal/v3"
+
+	"github.com/fray/dop/internal/approvalserver"
+	"github.com/fray/dop/internal/audit"
+	"github.com/fray/dop/internal/capability"
+	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/pendingclaim"
+	"github.com/fray/dop/internal/tunnel"
+	"github.com/fray/dop/internal/vault"
+)
+
+func runClaim(args []string) int {
+	fs := flag.NewFlagSet("claim", flag.ExitOnError)
+	tokenFile := fs.String("token-file", "", "read bearer from file (alternative to $DOP_TOKEN)")
+	shell := fs.Bool("shell", false, "after claim, print `eval $(dop env-shell ...)`-style exports")
+	skipApproval := fs.Bool("skip-approval", false, "finalize immediately without out-of-band approval (unsafe for chat handoff)")
+	noTunnel := fs.Bool("no-tunnel", false, "serve the approval page on LAN only (no Cloudflare tunnel)")
+	bindAddr := fs.String("bind", "127.0.0.1", "interface to bind the approval server (use 0.0.0.0 with --no-tunnel for LAN access)")
+	_ = fs.Parse(args)
+
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: dop claim <PIN>")
+		return 2
+	}
+	pinArg := fs.Arg(0)
+
+	bearer, err := readBearer(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim: %v\n", err)
+		return 1
+	}
+
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim: %v — an active admin session is required to record the binding\n", err)
+		return 1
+	}
+
+	// Decrypt the local bundle to inspect its binding.
+	ctxPath := filepath.Join(paths.Vault, "vault-context.bin")
+	vaultCtx, err := os.ReadFile(ctxPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim: no vault_context (%s): %v\n", ctxPath, err)
+		return 1
+	}
+	lookupID := capability.LookupID(vaultCtx, bearer)
+	bundlePath := filepath.Join(paths.Vault, "capabilities", lookupID+".bundle")
+	oldBundleBytes, err := os.ReadFile(bundlePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "dop claim: unknown bearer (bundle not found)")
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "dop claim: %v\n", err)
+		return 1
+	}
+	env, hdr, err := capability.Read(oldBundleBytes, capability.ReadOpts{Bearer: bearer})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim: decrypt bundle: %v\n", err)
+		return 1
+	}
+	if env.Binding == nil {
+		fmt.Fprintln(os.Stderr, "dop claim: this bearer has no binding (issued with --no-bind); nothing to claim")
+		return 1
+	}
+	switch env.Binding.Kind {
+	case vault.BindingKindPIN:
+		// ok
+	case vault.BindingKindPubkey:
+		fmt.Fprintln(os.Stderr, "dop claim: this bearer was pre-bound to an admin-supplied pubkey; PIN claim is not applicable")
+		return 1
+	default:
+		fmt.Fprintf(os.Stderr, "dop claim: unsupported binding kind %q\n", env.Binding.Kind)
+		return 1
+	}
+	if env.Binding.Pubkey != "" {
+		fmt.Fprintln(os.Stderr, "dop claim: this bearer is already claimed; revoke + re-issue if you meant to rebind")
+		return 1
+	}
+	if env.Binding.PinExpiry > 0 && time.Now().Unix() > env.Binding.PinExpiry {
+		audit.Append(paths, audit.Event{
+			Kind:     audit.EventClaimDenied,
+			Subject:  env.Subject,
+			LookupID: lookupID,
+			Extra:    map[string]string{"reason": "pin_expired"},
+		})
+		fmt.Fprintln(os.Stderr, "dop claim: PIN expired — run `dop token repin` to reissue one")
+		return 1
+	}
+	if !capability.VerifyPIN(bearer, pinArg, env.Binding.PinHash) {
+		audit.Append(paths, audit.Event{
+			Kind:     audit.EventClaimDenied,
+			Subject:  env.Subject,
+			LookupID: lookupID,
+			Extra:    map[string]string{"reason": "pin_mismatch"},
+		})
+		fmt.Fprintln(os.Stderr, "dop claim: PIN does not match")
+		return 1
+	}
+
+	// Generate agent keypair.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim: keygen: %v\n", err)
+		return 1
+	}
+	pubHex := hex.EncodeToString(pub)
+	claimedAt := time.Now().UTC().Truncate(time.Second)
+
+	// Passphrase-gated approval (v1.6). Skippable for unattended flows.
+	if !*skipApproval {
+		if err := awaitApproval(paths, lookupID, hex.EncodeToString(hdr.CapabilityID[:]), env.Subject, pubHex, *noTunnel, *bindAddr); err != nil {
+			fmt.Fprintf(os.Stderr, "dop claim: %v\n", err)
+			return 1
+		}
+	}
+
+	// Load vault via daemon so we can update the record.
+	v, vaultPath, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim: %v\n", err)
+		return 1
+	}
+	capIDHex := hex.EncodeToString(hdr.CapabilityID[:])
+	crec, ok := v.Capabilities[capIDHex]
+	if !ok {
+		fmt.Fprintln(os.Stderr, "dop claim: capability record not in vault (may need `dop pull`)")
+		return 1
+	}
+	if crec.Status != capability.RecordStatusActive {
+		fmt.Fprintf(os.Stderr, "dop claim: capability is not active (status=%s)\n", crec.Status)
+		return 1
+	}
+
+	// Bump generation for rebind hardening (rollback-replay guard).
+	newGen := v.BumpGeneration(crec.Subject)
+
+	// Rewrite bundle with updated binding + new generation.
+	newEnvBinding := &capability.EnvelopeBinding{
+		Kind:   vault.BindingKindPIN,
+		Pubkey: pubHex,
+	}
+	newBundlePath := bundlePath + ".tmp"
+	f, err := os.Create(newBundlePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim: %v\n", err)
+		return 1
+	}
+	newBundleBytes, err := capability.Write(f, capability.WriteOpts{
+		CapabilityID: hdr.CapabilityID,
+		Bearer:       bearer,
+		Generation:   newGen,
+		ExpiresAt:    time.Unix(hdr.ExpiresAtUnix, 0).UTC(),
+		Subject:      env.Subject,
+		Env:          env.Env,
+		Binding:      newEnvBinding,
+	})
+	f.Close()
+	if err != nil {
+		os.Remove(newBundlePath)
+		fmt.Fprintf(os.Stderr, "dop claim: rewrite bundle: %v\n", err)
+		return 1
+	}
+	newBundleHash := capability.HashBundle(newBundleBytes)
+
+	// Update the vault record.
+	crec.Generation = newGen
+	crec.BundleHash = newBundleHash
+	crec.Binding = &vault.Binding{
+		Kind:      vault.BindingKindPIN,
+		Pubkey:    pubHex,
+		ClaimedAt: claimedAt,
+	}
+	rec := vaultCapability2Record(crec, capIDHex)
+	if err := signRecordViaDaemon(client, &rec); err != nil {
+		os.Remove(newBundlePath)
+		fmt.Fprintf(os.Stderr, "dop claim: sign: %v\n", err)
+		return 1
+	}
+	v.Capabilities[capIDHex] = capability2VaultCapability(rec)
+
+	// Save vault before renaming the bundle — if vault write fails, we
+	// leave the old bundle in place.
+	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
+		os.Remove(newBundlePath)
+		fmt.Fprintf(os.Stderr, "dop claim: save vault: %v\n", err)
+		return 1
+	}
+	if err := os.Rename(newBundlePath, bundlePath); err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim: swap bundle: %v (vault was updated — resync will fix)\n", err)
+		return 1
+	}
+
+	// Persist the agent private key.
+	keyPath, err := writeAgentKey(paths, lookupID, priv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim: persist key: %v\n", err)
+		return 1
+	}
+
+	audit.Append(paths, audit.Event{
+		Kind:     audit.EventClaim,
+		Subject:  env.Subject,
+		LookupID: lookupID,
+		Actor:    pubHex,
+		Extra:    map[string]string{"generation": fmt.Sprintf("%d", newGen)},
+	})
+	fmt.Fprintf(os.Stderr, "dop claim: bound %s → pubkey %s… (gen %d)\n",
+		env.Subject, pubHex[:16], newGen)
+	if *shell {
+		fmt.Printf("export DOP_TOKEN=%s\n", bearer)
+	}
+	fmt.Fprintf(os.Stderr, "  agent key: %s\n", keyPath)
+	fmt.Fprintf(os.Stderr, "  run: dop exec --agent-name %s -- <cmd>\n", env.Subject)
+	return 0
+}
+
+// awaitApproval spins up:
+//   - a local HTTP server bound to bindAddr:PORT
+//   - optionally a cloudflared tunnel pointing at that server
+//   - a QR code displayed on the terminal encoding the URL
+//
+// It emits a `claim_pending` audit event (fires the macOS notification),
+// writes the pending-claim file for `dop pending` / `dop approve <SAS>`
+// CLI compatibility, then blocks until the human decides on the web
+// page OR the CLI approve command lands OR TTL expires.
+func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex string, noTunnel bool, bindAddr string) error {
+	sas, err := pendingclaim.NewSAS()
+	if err != nil {
+		return fmt.Errorf("SAS gen: %w", err)
+	}
+	displayToken, err := approvalserver.NewDisplayToken()
+	if err != nil {
+		return fmt.Errorf("token gen: %w", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	rec := pendingclaim.Record{
+		SAS:          sas,
+		LookupID:     lookupID,
+		CapabilityID: capIDHex,
+		Subject:      subject,
+		Pubkey:       pubHex,
+		StartedAt:    now,
+		ExpiresAt:    now.Add(pendingclaim.TTL),
+		State:        pendingclaim.StatePending,
+	}
+	if err := pendingclaim.Write(paths, rec); err != nil {
+		return err
+	}
+	defer pendingclaim.Delete(paths, lookupID)
+
+	// Bind an ephemeral port on bindAddr.
+	listener, err := net.Listen("tcp", bindAddr+":0")
+	if err != nil {
+		return fmt.Errorf("bind approval server: %w", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	srv := approvalserver.New(paths, rec, displayToken)
+	httpSrv := &http.Server{Handler: srv.Handler()}
+	go func() { _ = httpSrv.Serve(listener) }()
+	defer func() {
+		shCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		_ = httpSrv.Shutdown(shCtx)
+	}()
+
+	// Optionally launch a Cloudflare tunnel.
+	var (
+		publicURL string
+		tun       *tunnel.Tunnel
+	)
+	if !noTunnel && tunnel.Available() {
+		tctx, tcancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer tcancel()
+		t, terr := tunnel.Start(tctx, port, 15*time.Second)
+		if terr != nil {
+			fmt.Fprintf(os.Stderr, "dop claim: tunnel unavailable (%v) — falling back to LAN URL\n", terr)
+		} else {
+			tun = t
+			publicURL = t.URL + "/c/" + displayToken
+			defer tun.Stop()
+		}
+	} else if !tunnel.Available() {
+		fmt.Fprintln(os.Stderr, "dop claim: cloudflared not on PATH — serving LAN-only. `brew install cloudflared` for internet approval.")
+	}
+	localURL := fmt.Sprintf("http://%s:%d/c/%s", bindAddr, port, displayToken)
+	if publicURL == "" {
+		publicURL = localURL
+	}
+	srv.PublicURL = publicURL
+
+	audit.Append(paths, audit.Event{
+		Kind:     audit.EventClaimPending,
+		Subject:  subject,
+		LookupID: lookupID,
+		Extra: map[string]string{
+			"sas":        sas,
+			"expires_in": pendingclaim.TTL.String(),
+			"url":        publicURL,
+		},
+	})
+
+	// Print QR + text URL.
+	fmt.Fprintf(os.Stderr, "\ndop claim: PENDING — approve within %s\n", pendingclaim.TTL)
+	fmt.Fprintf(os.Stderr, "  subject: %s\n", subject)
+	fmt.Fprintf(os.Stderr, "  SAS:     %s\n\n", sas)
+	qrterminal.GenerateHalfBlock(publicURL, qrterminal.L, os.Stderr)
+	fmt.Fprintf(os.Stderr, "\n  scan the QR, or open: %s\n", publicURL)
+	if publicURL != localURL {
+		fmt.Fprintf(os.Stderr, "  (LAN fallback: %s)\n", localURL)
+	}
+	fmt.Fprintln(os.Stderr, "  the page asks for your DOP approval passphrase.")
+
+	// Clean up on Ctrl-C.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	// Wait on: (1) the web server signaling a decision, (2) the pending
+	// file's on-disk state (CLI `dop approve <SAS>` flow), (3) TTL, (4)
+	// Ctrl-C.
+	deadline := time.Now().Add(pendingclaim.TTL)
+	tick := time.NewTicker(400 * time.Millisecond)
+	defer tick.Stop()
+
+	decisionCh := make(chan approvalserver.Decision, 1)
+	go func() {
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		defer cancel()
+		decisionCh <- srv.Wait(ctx)
+	}()
+
+	for {
+		select {
+		case <-sigCh:
+			return errors.New("interrupted — pending claim cancelled")
+		case d := <-decisionCh:
+			switch d {
+			case approvalserver.DecisionApproved:
+				// Grace period so the "Approved" HTML fully flushes back
+				// through the tunnel before we tear it down.
+				time.Sleep(1500 * time.Millisecond)
+				return nil
+			case approvalserver.DecisionRejected:
+				audit.Append(paths, audit.Event{
+					Kind:     audit.EventClaimDenied,
+					Subject:  subject,
+					LookupID: lookupID,
+					Extra:    map[string]string{"reason": "rejected"},
+				})
+				return errors.New("claim rejected via web")
+			default:
+				audit.Append(paths, audit.Event{
+					Kind:     audit.EventClaimDenied,
+					Subject:  subject,
+					LookupID: lookupID,
+					Extra:    map[string]string{"reason": "approval_timeout"},
+				})
+				return errors.New("approval window expired")
+			}
+		case <-tick.C:
+			if time.Now().After(deadline) {
+				audit.Append(paths, audit.Event{
+					Kind:     audit.EventClaimDenied,
+					Subject:  subject,
+					LookupID: lookupID,
+					Extra:    map[string]string{"reason": "approval_timeout"},
+				})
+				return errors.New("approval window expired")
+			}
+			// Also check the pending file — dop approve <SAS> --passphrase
+			// mutates the on-disk state.
+			cur, err := pendingclaim.Read(paths, lookupID)
+			if err != nil {
+				continue
+			}
+			switch cur.State {
+			case pendingclaim.StateApproved:
+				time.Sleep(500 * time.Millisecond)
+				return nil
+			case pendingclaim.StateRejected:
+				audit.Append(paths, audit.Event{
+					Kind:     audit.EventClaimDenied,
+					Subject:  subject,
+					LookupID: lookupID,
+					Extra:    map[string]string{"reason": "rejected"},
+				})
+				return errors.New("claim rejected")
+			}
+		}
+	}
+}
+
+// writeAgentKey persists the ed25519 private key to
+// <paths.Root>/agent-keys/<lookup_id>.key with restrictive perms.
+// Returns the file path.
+func writeAgentKey(paths *config.Paths, lookupID string, priv ed25519.PrivateKey) (string, error) {
+	dir := filepath.Join(paths.Root, "agent-keys")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, lookupID+".key")
+	if err := os.WriteFile(p, priv, 0o600); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+// loadAgentKey returns the ed25519 private key for a given lookupID, or
+// nil if absent. Also enforces mode 0600 (refuses to load a key with
+// looser permissions).
+func loadAgentKey(paths *config.Paths, lookupID string) (ed25519.PrivateKey, error) {
+	p := filepath.Join(paths.Root, "agent-keys", lookupID+".key")
+	fi, err := os.Stat(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("%s: permissions %o are too permissive (want 0600)", p, fi.Mode().Perm())
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) != ed25519.PrivateKeySize {
+		return nil, errors.New("agent key: wrong size")
+	}
+	return ed25519.PrivateKey(b), nil
+}

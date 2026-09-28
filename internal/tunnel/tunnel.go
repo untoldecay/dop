@@ -1,0 +1,112 @@
+// Package tunnel spawns `cloudflared tunnel --url http://localhost:PORT`
+// and returns the public HTTPS URL it announces on stderr.
+//
+// Zero-config: uses Cloudflare's "Quick Tunnel" flow which doesn't
+// require an account or a domain. The URL is ephemeral (dies with the
+// process). Perfect for a 2-min claim approval window.
+//
+// Fallback: if cloudflared is not on PATH, callers should still be able
+// to serve on LAN (same-network phone) — that path lives in the caller,
+// not here.
+package tunnel
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os/exec"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+)
+
+// urlRegexp matches the "https://<something>.trycloudflare.com" line
+// cloudflared prints in its startup banner. cloudflared writes it to
+// stderr wrapped in a fancy box; we grep the URL out.
+var urlRegexp = regexp.MustCompile(`https://[a-z0-9-]+\.trycloudflare\.com`)
+
+// Tunnel is a running cloudflared subprocess.
+type Tunnel struct {
+	cmd *exec.Cmd
+	URL string
+
+	stopMu sync.Mutex
+	stopped bool
+}
+
+// Available reports whether the cloudflared binary is on $PATH.
+func Available() bool {
+	_, err := exec.LookPath("cloudflared")
+	return err == nil
+}
+
+// Start spawns cloudflared pointed at http://localhost:localPort and
+// waits until it announces its public URL (or timeoutSec expires).
+// Returns a running Tunnel — callers MUST call Stop when done.
+func Start(ctx context.Context, localPort int, timeout time.Duration) (*Tunnel, error) {
+	if !Available() {
+		return nil, errors.New("cloudflared binary not found on PATH — install from https://developers.cloudflare.com/cloudflared/")
+	}
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	cmd := exec.Command("cloudflared", "tunnel", "--no-autoupdate",
+		"--url", fmt.Sprintf("http://localhost:%d", localPort))
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	// cloudflared writes to stderr; also drain stdout to prevent block.
+	cmd.Stdout = io.Discard
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start cloudflared: %w", err)
+	}
+	t := &Tunnel{cmd: cmd}
+
+	// Read stderr until we see a trycloudflare URL or timeout.
+	urlCh := make(chan string, 1)
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		scanner.Buffer(make([]byte, 0, 1024), 64*1024)
+		found := false
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !found {
+				if m := urlRegexp.FindString(line); m != "" {
+					urlCh <- m
+					found = true
+				}
+			}
+			// Otherwise drain silently. If we wanted a debug mode, we'd
+			// route this to a log file.
+		}
+	}()
+
+	select {
+	case u := <-urlCh:
+		t.URL = strings.TrimSpace(u)
+		return t, nil
+	case <-time.After(timeout):
+		t.Stop()
+		return nil, fmt.Errorf("cloudflared did not announce a URL within %s", timeout)
+	case <-ctx.Done():
+		t.Stop()
+		return nil, ctx.Err()
+	}
+}
+
+// Stop kills the tunnel process. Idempotent.
+func (t *Tunnel) Stop() {
+	t.stopMu.Lock()
+	defer t.stopMu.Unlock()
+	if t.stopped || t.cmd == nil || t.cmd.Process == nil {
+		return
+	}
+	t.stopped = true
+	_ = t.cmd.Process.Kill()
+	// Reap it so it doesn't linger as a zombie.
+	go func() { _, _ = t.cmd.Process.Wait() }()
+}
