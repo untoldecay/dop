@@ -11,6 +11,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/fray/dop/internal/tui"
 )
 
 const usage = `dop — Doors of Perception (v1.0)
@@ -54,7 +56,9 @@ env:
 
 func main() {
 	if len(os.Args) < 2 {
-		// TUI launch stubbed for Phase 5. For now: print usage.
+		if shouldLaunchTUI() {
+			os.Exit(tui.Run())
+		}
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
@@ -103,6 +107,23 @@ func stripGlobalFlags(argv []string) []string {
 		out = append(out, a)
 	}
 	return out
+}
+
+// shouldLaunchTUI: `dop` alone launches the TUI iff both stdin and
+// stdout are TTYs AND DOP_NO_TUI isn't set.
+func shouldLaunchTUI() bool {
+	if os.Getenv("DOP_NO_TUI") != "" {
+		return false
+	}
+	fi, err := os.Stdin.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	fo, err := os.Stdout.Stat()
+	if err != nil || fo.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	return true
 }
 
 func envOr(key, def string) string {
