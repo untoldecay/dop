@@ -90,6 +90,8 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "admin":
+		os.Exit(runAdmin(os.Args[2:]))
 	case "init":
 		os.Exit(runInit(os.Args[2:]))
 	case "encrypt":
