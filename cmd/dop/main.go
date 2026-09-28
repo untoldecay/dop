@@ -26,6 +26,7 @@ import (
 	"github.com/fray/dop/internal/resolve"
 	"github.com/fray/dop/internal/teamops"
 	"github.com/fray/dop/internal/tokenio"
+	"github.com/fray/dop/internal/tui"
 	"github.com/fray/dop/internal/vault"
 	"github.com/fray/dop/internal/vaultgit"
 	"github.com/fray/dop/internal/vaultsync"
@@ -37,6 +38,7 @@ import (
 const usage = `dop — Doors of Perception
 
 usage:
+  dop                                            interactive TUI (default when on a TTY)
   dop init                                       first-run setup (generate age key)
   dop init --vault <path-or-url>                 attach a vault repo (option 3: local path OK)
   dop encrypt <plaintext.yaml> <encrypted.yaml>  encrypt a plaintext vault with your age key
@@ -61,14 +63,21 @@ env:
   DOP_TOKEN         bearer auth token (required for exec/whoami/env)
   DOP_VAULT         default --vault path (overridable per-call)
   DOP_AUTO_PULL     max staleness before dop exec auto-pulls (Go duration, default 5m)
+  DOP_NO_TUI        set to any value to disable the TUI on 'dop' alone (agents/cron)
   SOPS_AGE_KEY_FILE overrides DOP's own age key path (advanced)
 `
 
 func main() {
+	// TUI launch: `dop` with no subcommand on a TTY, unless suppressed.
 	if len(os.Args) < 2 {
+		if shouldLaunchTUI() {
+			os.Exit(tui.Run())
+		}
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
+	// Global --no-tui flag: strip it from os.Args so subcommands don't see it.
+	os.Args = stripNoTUI(os.Args)
 
 	// Point SOPS at DOP's key file by default so `vault.Load` on encrypted
 	// vaults just works. Callers may override via SOPS_AGE_KEY_FILE.
@@ -1157,4 +1166,42 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// shouldLaunchTUI is true iff `dop` was called with no subcommand AND we
+// have a TTY on stdin/stdout AND DOP_NO_TUI is not set. Agents/cron: set
+// DOP_NO_TUI=1 or invoke a subcommand.
+func shouldLaunchTUI() bool {
+	if os.Getenv("DOP_NO_TUI") != "" {
+		return false
+	}
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	if fi.Mode()&os.ModeCharDevice == 0 {
+		return false // stdin is a pipe/file
+	}
+	fo, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	if fo.Mode()&os.ModeCharDevice == 0 {
+		return false // stdout is a pipe/file
+	}
+	return true
+}
+
+// stripNoTUI removes any occurrence of --no-tui from argv so it doesn't
+// leak into subcommand flag parsing. It has no other meaning post-dispatch:
+// once you passed a subcommand, you're headless by definition.
+func stripNoTUI(argv []string) []string {
+	out := argv[:0]
+	for _, a := range argv {
+		if a == "--no-tui" || a == "-no-tui" {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
