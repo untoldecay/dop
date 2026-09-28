@@ -53,15 +53,9 @@ run_e2e() {
     local failed=0
     local names_failed=()
 
-    # Order matters for readability, not correctness. Sort ensures p1b < p2 < ... < p10.
-    for t in $(ls testdata/e2e/p*.sh | sort); do
+    # v1 phases share the same naming: v1_<topic>.sh.
+    for t in $(ls testdata/e2e/v1_*.sh 2>/dev/null | sort); do
         name=$(basename "$t")
-        # p10_first_run.sh runs the whole regression suite itself — skip in
-        # normal runs to avoid double-work. Include it via --with-p10 if wanted.
-        if [[ "$name" == "p10_first_run.sh" && "${WITH_P10:-0}" != "1" ]]; then
-            gray "  ⋯ $name (skipped; set WITH_P10=1 to include)"
-            continue
-        fi
         logf=$(mktemp)
         if DOP_NO_TUI=1 DOP_BIN="$DOP_ROOT/dop" bash "$t" > "$logf" 2>&1; then
             green "  ✓ $name"

@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -111,31 +113,134 @@ func runTeamList(args []string) int {
 	return 0
 }
 
-// --- dop doctor --- minimal until Phase 5.
+// --- dop doctor + --security ---
 
 func runDoctor(args []string) int {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	securityMode := fs.Bool("security", false, "include security-focused warnings")
+	_ = fs.Parse(args)
+
 	paths, _ := config.Resolve()
-	// Basic checks — enough to prove a v1 install is coherent.
 	fmt.Println("dop doctor:")
+
+	anyFail := false
+	line := func(status, name, detail string) {
+		fmt.Printf("  %s %s — %s\n", status, name, detail)
+		if status == "✗" {
+			anyFail = true
+		}
+	}
+
+	// --- basic ---
+	if _, err := exec.LookPath("sops"); err != nil {
+		line("✗", "binary:sops", "not on $PATH — brew install sops")
+	} else {
+		line("✓", "binary:sops", "on $PATH")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		line("✗", "binary:git", "not on $PATH")
+	} else {
+		line("✓", "binary:git", "on $PATH")
+	}
 	adminOK := admin.KeyFileExists(paths)
 	if adminOK {
-		fmt.Println("  ✓ admin key present")
+		line("✓", "install:type", "admin (has keys/admin.age.enc)")
 	} else {
-		fmt.Println("  ! no admin key (agent install)")
+		line("!", "install:type", "agent (no admin key — mutations refused)")
 	}
 	vpath := vaultFilePath(paths)
 	if _, err := os.Stat(vpath); err == nil {
-		fmt.Println("  ✓ vault attached at", vpath)
+		line("✓", "vault:attached", vpath)
 	} else {
-		fmt.Println("  ! no vault at", vpath)
+		line("!", "vault:attached", "no vault at "+vpath)
 	}
 	c := admin.NewClient(admin.SockPath(paths))
 	if c.SessionActive() {
-		fmt.Println("  ✓ admin session active")
+		st, _ := c.Status()
+		if st != nil {
+			line("✓", "admin:session", fmt.Sprintf("unlocked (idle_ttl_left=%s, abs_ttl_left=%s)",
+				remainingTTL(st.IdleTTLSeconds, st.LastActivityUnix),
+				remainingTTL(st.AbsTTLSeconds, st.StartedAtUnix)))
+		} else {
+			line("!", "admin:session", "unlocked but status unreachable")
+		}
 	} else {
-		fmt.Println("  ⋯ admin session locked")
+		line("⋯", "admin:session", "locked")
+	}
+
+	// --- security ---
+	if *securityMode {
+		fmt.Println("\n  --- security ---")
+
+		// Warn if admin session TTL env is unusually long.
+		if v := os.Getenv("DOP_ADMIN_MAX_TTL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 2*time.Hour {
+				line("!", "sec:admin-ttl", fmt.Sprintf("DOP_ADMIN_MAX_TTL=%s is > 2h — reduce for admin machines", d))
+			}
+		}
+
+		// Bundle file perms.
+		capDir := filepath.Join(paths.Vault, "capabilities")
+		if entries, err := os.ReadDir(capDir); err == nil {
+			bad := 0
+			for _, e := range entries {
+				info, err := e.Info()
+				if err != nil {
+					continue
+				}
+				if info.Mode().Perm()&0o077 != 0 {
+					bad++
+				}
+			}
+			if bad > 0 {
+				line("!", "sec:bundle-perms", fmt.Sprintf("%d bundle files have world/group-readable perms", bad))
+			} else {
+				line("✓", "sec:bundle-perms", "all bundles restrictive-perms")
+			}
+		}
+
+		// Warn about DOP_TOKEN in shell history (best-effort — .zsh_history is common on macOS).
+		if h := os.Getenv("HOME"); h != "" {
+			for _, hf := range []string{".zsh_history", ".bash_history"} {
+				p := filepath.Join(h, hf)
+				if b, err := os.ReadFile(p); err == nil {
+					if strings.Contains(string(b), "DOP_TOKEN=") {
+						line("!", "sec:history", fmt.Sprintf("%s contains 'DOP_TOKEN=' — rotate any bearers referenced there", p))
+					}
+				}
+			}
+		}
+
+		// vault.yaml permissions.
+		if fi, err := os.Stat(vpath); err == nil {
+			if fi.Mode().Perm()&0o044 != 0 {
+				line("!", "sec:vault-perms", fmt.Sprintf("%s is group/world-readable", vpath))
+			}
+		}
+
+		// Agent-install: warn if there's a keys/ directory that shouldn't be there.
+		if !adminOK && exists(paths.KeysDir) {
+			line("!", "sec:agent-keys", "agent install has a keys/ directory — verify it's empty")
+		}
+	}
+
+	if anyFail {
+		return 1
 	}
 	return 0
+}
+
+func exists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+func remainingTTL(ttlSec int64, refUnix int64) string {
+	remaining := time.Until(time.Unix(refUnix, 0).Add(time.Duration(ttlSec) * time.Second))
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining.Round(time.Second).String()
 }
 
 // hexEncodeBytes returns the lowercase hex of b. Used by tokencmd.

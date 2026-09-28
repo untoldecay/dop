@@ -94,13 +94,11 @@ fi
 pass "expired bearer rejected"
 
 echo "=== [11] tamper the bundle → exec fails"
-BUNDLE=$(ls "$VAULT_DIR/capabilities" | head -1)
-if [[ -z "$BUNDLE" ]]; then
-    fail "no bundle to tamper (unexpected — all bundles deleted)"
-fi
-# Actually, our revoke deleted the one bundle. Issue another for tampering.
-TAMPER_BEARER=$("$DOP" token issue --grants notion.read --name tamper --expires 1h 2>/dev/null)
-BUNDLE=$(ls "$VAULT_DIR/capabilities" | head -1)
+# Issue a fresh bearer specifically for this test.
+TAMPER_BEARER=$("$DOP" token issue --grants notion.read --name tamperX --expires 1h 2>/dev/null)
+# Pick the newest bundle — that's the one for TAMPER_BEARER.
+BUNDLE=$(ls -t "$VAULT_DIR/capabilities" | head -1)
+[[ -n "$BUNDLE" ]] || fail "no bundle to tamper"
 # Flip a byte in the ciphertext region.
 python3 -c "
 import sys

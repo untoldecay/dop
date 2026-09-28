@@ -63,7 +63,7 @@ func runTokenIssue(args []string) int {
 		return 2
 	}
 	grants := splitCSV(*grantsCSV)
-	expDur, err := time.ParseDuration(*expires)
+	expDur, err := parseDurationLoose(*expires)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop token issue: --expires: %v\n", err)
 		return 2
@@ -470,6 +470,28 @@ func resolveGrantsToEnv(v *vault.Vault, grants []string) map[string]string {
 		}
 	}
 	return out
+}
+
+// parseDurationLoose extends time.ParseDuration to accept "d" for days
+// and "w" for weeks. Anything time.ParseDuration handles natively still
+// works.
+func parseDurationLoose(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasSuffix(s, "d") {
+		var n float64
+		if _, err := fmt.Sscanf(s[:len(s)-1], "%f", &n); err != nil {
+			return 0, err
+		}
+		return time.Duration(n * float64(24*time.Hour)), nil
+	}
+	if strings.HasSuffix(s, "w") {
+		var n float64
+		if _, err := fmt.Sscanf(s[:len(s)-1], "%f", &n); err != nil {
+			return 0, err
+		}
+		return time.Duration(n * float64(7*24*time.Hour)), nil
+	}
+	return time.ParseDuration(s)
 }
 
 func splitCSV(s string) []string {

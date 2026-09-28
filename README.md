@@ -1,119 +1,104 @@
 # dop — Doors of Perception
 
-Local-first, git-synced, per-agent-scoped credential gateway CLI.
+A local-first, git-synced, per-agent-scoped credential gateway CLI with a
+**two-plane authority model**:
 
-Design docs: `../../_rules/_projects/DOP/`
-- `PROJECT_BRIEF.md` — vision + model
-- `ARCHITECTURE.md` — data shapes + threat model
-- `BUILD_PLAN.md` — phased roadmap
+- **Administrative plane** — decrypts + mutates the vault. Protected by a
+  passphrase-unlocked admin session (sudo-style TTL).
+- **Execution plane** — consumes per-bearer capability bundles. Never
+  touches the vault. Remote servers install with no admin key at all.
+
+Design docs: [`../../_rules/_projects/DOP/`](../../_rules/_projects/DOP/) —
+`PROJECT_BRIEF.md`, `ARCHITECTURE.md`, `BUILD_PLAN.md`.
 
 ## Status
 
-**P0–P5 shipped.** Encrypted vault, git-synced with a real SOPS-aware three-way merge driver, `dop token issue/list/revoke` with a confirmation gate for sensitive grants, signed-challenge auth for crypto agents (`--sign-with`), JSONL audit log with `dop log tail/grep`, and a Claude Code skill + docs recipes.
-
-## Testing
-
-One command runs everything:
-
-```zsh
-./scripts/test.sh              # unit + e2e (skips the recursive p10)
-./scripts/test.sh --unit-only  # Go unit tests (~1s, no external deps)
-./scripts/test.sh --e2e-only   # shell e2e (needs sops, git, age-keygen, gh, goreleaser, python3)
-WITH_P10=1 ./scripts/test.sh   # include p10_first_run (~doubles runtime — it re-runs everything else)
-```
-
-**Unit tests** live next to the code they test (Go convention): every
-`internal/*/` package with logic has a `*_test.go` sibling.
-
-**End-to-end tests** live in `testdata/e2e/`, one shell script per phase:
-`p1b_merge.sh` (merge driver), `p2_token_issue.sh` (token CLI),
-`p3_signed_auth.sh`, `p4_audit_log.sh`, `p5_skill_recipe.sh`,
-`p6_team_ops.sh`, `p7_distribution.sh`, `p8_doctor.sh`,
-`p9_tui_gates.sh`, `p10_first_run.sh`.
-
-Each e2e script spins up a fresh temp `$HOME`, `dop init`s from
-scratch, and cleans up after itself. Safe to run repeatedly.
+**v1.0.0.** Fresh cutover from v0.3.x — no automatic migration.
 
 ## Runtime dependencies
 
-- `git` on `$PATH`
-- `sops` (>= 3.7) on `$PATH` — install via `brew install sops` or [GitHub releases](https://github.com/getsops/sops/releases)
-
-(SOPS is shelled out to instead of linked in — keeps the binary ~3MB stripped instead of ~40MB, and lets you `sops vault.yaml` to edit encrypted vaults with your normal tooling.)
+- `git`
+- `sops` (>= 3.7) — `brew install sops` or [releases](https://github.com/getsops/sops/releases)
 
 ## Build
 
 ```
 cd apps/dop
 go build -o dop ./cmd/dop
-./dop help
 ```
 
-## Quick start (encrypted vault, local bare repo)
+## Testing
 
 ```
-cd apps/dop
-go build -o dop ./cmd/dop
-
-# 1. Generate your age key (once per machine)
-./dop init
-
-# 2. Attach a vault repo (option 3: local bare — no remote needed)
-./dop init --vault /tmp/my-dop-vault-repo
-
-# 3. Seed your first vault. The clone lives at ~/.config/dop/vault/
-#    (or ~/Library/Application Support/dop/vault/ on macOS)
-VAULT_DIR="$(./dop env-config vault-dir 2>/dev/null || echo ~/.config/dop/vault)"
-cp ./testdata/vault.example.yaml "$VAULT_DIR/vault.plain.yaml"
-
-# 4. Encrypt it with your age key
-./dop encrypt "$VAULT_DIR/vault.plain.yaml" "$VAULT_DIR/vault.yaml"
-
-# 5. Use it — resolves scoped env vars from the encrypted vault
-export DOP_TOKEN=tok_p0_readonly
-./dop whoami       # shows grants for your token
-./dop env          # prints shell-eval-able exports
-./dop exec --agent-name "demo" -- env | grep -E '^(BOILER|NOTION)_'
+./scripts/test.sh              # unit + e2e (~11s)
+./scripts/test.sh --unit-only  # unit only (~1s)
+./scripts/test.sh --e2e-only   # e2e only (needs sops, git, python3)
 ```
 
-## Plaintext quick start (no encryption, no git — for tests only)
+Unit tests live next to code (Go convention). E2E scripts live in
+`testdata/e2e/v1_*.sh`.
+
+## Quick start — admin machine
 
 ```
-export DOP_VAULT=./testdata/vault.example.yaml
-export DOP_TOKEN=tok_p0_readonly
+# One-time
+dop admin init                                         # prompt: passphrase (twice)
+dop init --vault https://github.com/you/dop-vault.git  # attach a vault
 
-./dop whoami
-./dop env
-./dop exec --agent-name "demo" -- env | grep -E '^(BOILER|NOTION)_'
+# Per session
+dop admin login                                        # prompt: passphrase
+                                                       # session lasts 15m idle / 60m absolute
+
+# Issue a bearer (admin session required)
+dop token issue --grants notion.read --name research --expires 72h
+# → prints tok_1... ONCE — copy it now
+```
+
+## Quick start — agent / remote server
+
+```
+# No admin key generated on this machine
+dop init --cache https://github.com/you/dop-vault.git
+
+# Bearer arrives out-of-band (SSH, systemd credential, etc.)
+export DOP_TOKEN=tok_1...
+
+# Run scoped commands
+dop exec --agent-name my-job -- ./run.sh
+dop whoami           # shows subject + generation + expiry
+dop env              # shell-eval-able exports
 ```
 
 ## Commands
 
 ```
-dop init                            first-run: generate age key
-dop init --vault <path-or-url>      attach vault repo (bootstraps if path missing)
-dop encrypt <plain.yaml> <enc.yaml> encrypt a plaintext vault with your age key
-dop exec [--clean-env] -- CMD ...   run CMD with scoped env from DOP_TOKEN
-dop whoami                          show what DOP_TOKEN resolves to
-dop env                             print `export KEY=VAL` lines (for `eval "$(dop env)"`)
+dop admin init                              generate wrapped admin keys (once)
+dop admin login                             start session
+dop admin logout                            end session
+dop admin status                            show state + TTL
+
+dop init --vault <path-or-url>              admin install
+dop init --cache <path-or-url>              agent install (no admin keys)
+
+dop token issue --grants CSV --name L [flags]  admin session required
+dop token list                              admin session required
+dop token revoke <name>                     admin session required
+
+dop team add-key --name W --pubkey <age>    admin session required
+dop team list                               admin session required
+
+dop exec [--token-file P] --agent-name X -- CMD    bearer required
+dop whoami                                  describe current bearer
+dop env                                     print exports
+
+dop pull / dop push                         git pull/push the vault
+dop doctor [--security]                     health check
 ```
 
-## Recipes
+Env vars:
 
-See [`docs/RECIPES.md`](docs/RECIPES.md) for shell/cron, Claude Code, and Buzz cryptographic-agent patterns.
-
-## Layout
-
-```
-apps/dop/
-├── cmd/dop/main.go              CLI entry, subcommand dispatch
-├── internal/
-│   ├── config/                  ~/.config/dop path resolution (XDG-aware)
-│   ├── agekeys/                 age keypair generation + load
-│   ├── initcmd/                 dop init logic
-│   ├── vaultgit/                dop init --vault: bootstrap + clone + install driver
-│   ├── vault/                   YAML loader (auto-decrypt SOPS via shell-out)
-│   ├── resolve/                 bearer token → grants → env vars
-│   └── execchild/               syscall.Exec wrapper (--clean-env)
-└── testdata/vault.example.yaml  fixture vault (plaintext, for tests)
-```
+- `DOP_TOKEN`, `DOP_TOKEN_FILE` — bearer for agent commands
+- `DOP_VAULT` — override vault path
+- `DOP_NO_TUI` — force headless mode
+- `DOP_ADMIN_TTL` — session idle timeout (default 15m)
+- `DOP_ADMIN_MAX_TTL` — session absolute timeout (default 60m)
