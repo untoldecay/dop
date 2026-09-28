@@ -73,14 +73,14 @@ type BundleHeader struct {
 	WrappedKey    [WrappedKeyBytes]byte
 }
 
-// EnvBundle is the payload — a map of env-var name → value. Marshaled as
-// JSON before encryption. Callers reading with ReadBundle receive this
-// after successful decryption.
+// EnvBundle is the payload — a map of env-var name → value plus enough
+// metadata for the bearer-holder to identify what they hold.
 type EnvBundle struct {
-	Env map[string]string `json:"env"`
-	// Additional metadata carried inside the ciphertext for
-	// defense-in-depth. The outer header carries the same generation and
-	// expires_at, which must match on decrypt.
+	Env     map[string]string `json:"env"`
+	Subject string            `json:"subject,omitempty"`
+	// Duplicate of the outer header for defense-in-depth. The outer
+	// carries the same generation and expires_at; decryption checks
+	// they match.
 	Generation    uint64 `json:"generation"`
 	ExpiresAtUnix int64  `json:"expires_at_unix"`
 }
@@ -91,6 +91,7 @@ type WriteOpts struct {
 	Bearer       string    // bearer, will not be stored
 	Generation   uint64
 	ExpiresAt    time.Time // written as unix seconds
+	Subject      string    // human label for whoami — encrypted inside
 	Env          map[string]string
 	// Rand is the entropy source. nil → crypto/rand.
 	Rand io.Reader
@@ -144,6 +145,7 @@ func Write(w io.Writer, opts WriteOpts) ([]byte, error) {
 	// Encrypt env payload.
 	payload := EnvBundle{
 		Env:           opts.Env,
+		Subject:       opts.Subject,
 		Generation:    opts.Generation,
 		ExpiresAtUnix: opts.ExpiresAt.Unix(),
 	}

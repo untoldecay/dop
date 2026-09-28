@@ -111,23 +111,6 @@ func runTeamList(args []string) int {
 	return 0
 }
 
-// --- dop exec / whoami / env --- Phase 4 fleshes these out.
-
-func runExec(args []string) int {
-	fmt.Fprintln(os.Stderr, "dop exec: not implemented in Phase 3 build; ships in Phase 4")
-	return 1
-}
-
-func runWhoami(args []string) int {
-	fmt.Fprintln(os.Stderr, "dop whoami: not implemented in Phase 3 build; ships in Phase 4")
-	return 1
-}
-
-func runEnv(args []string) int {
-	fmt.Fprintln(os.Stderr, "dop env: not implemented in Phase 3 build; ships in Phase 4")
-	return 1
-}
-
 // --- dop doctor --- minimal until Phase 5.
 
 func runDoctor(args []string) int {

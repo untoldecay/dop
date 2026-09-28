@@ -98,13 +98,19 @@ func runTokenIssue(args []string) int {
 		return 1
 	}
 
-	// Ensure vault_context exists.
+	// Ensure vault_context exists (both in the vault AND as a sidecar
+	// so agent installs — which can't decrypt the vault — can compute
+	// lookup ids).
 	if v.VaultContext == "" {
 		ctx := make([]byte, 20)
 		rand.Read(ctx)
 		v.VaultContext = hex.EncodeToString(ctx)
 	}
 	vaultCtx, _ := hex.DecodeString(v.VaultContext)
+	ctxSidecarPath := filepath.Join(paths.Vault, "vault-context.bin")
+	if _, err := os.Stat(ctxSidecarPath); os.IsNotExist(err) {
+		_ = os.WriteFile(ctxSidecarPath, vaultCtx, 0o644)
+	}
 
 	// Generate bearer + capability id.
 	bearer, err := capability.NewBearer()
@@ -151,6 +157,7 @@ func runTokenIssue(args []string) int {
 		Bearer:       bearer,
 		Generation:   gen,
 		ExpiresAt:    expiresAt,
+		Subject:      subject,
 		Env:          envBundle,
 	})
 	f.Close()
