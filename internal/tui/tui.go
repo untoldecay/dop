@@ -94,10 +94,11 @@ type rootModel struct {
 }
 
 type menuItem struct {
-	label string
-	hint  string
-	key   string // single-key shortcut
-	fn    func(*rootModel) (tea.Model, tea.Cmd)
+	label   string
+	hint    string
+	key     string // single-key shortcut (for the footer legend only)
+	section string // grouping header; empty = ungrouped
+	fn      func(*rootModel) (tea.Model, tea.Cmd)
 }
 
 func newRootModel() *rootModel {
@@ -130,51 +131,53 @@ func (m *rootModel) rebuildMenu() {
 	m.menu = m.menu[:0]
 	switch {
 	case m.install == installNoKey:
-		// Fresh machine — offer inline setup + agent-style attach.
+		// Setup mode: no section headers (per TUI_GUIDELINES.md).
 		m.menu = []menuItem{
-			{label: "Setup admin", hint: "generate + wrap admin keys (first-run)", key: "S", fn: (*rootModel).openSetupAdmin},
-			{label: "Attach vault (agent)", hint: "join an existing vault as read-only agent", key: "a", fn: (*rootModel).openAttachAgent},
-			{label: "Doctor", hint: "health check on this install", key: "d", fn: (*rootModel).openDoctor},
+			{label: "Setup admin", hint: "generate + wrap admin keys", key: "S", fn: (*rootModel).openSetupAdmin},
+			{label: "Attach vault", hint: "join an existing vault as agent", key: "a", fn: (*rootModel).openAttachAgent},
+			{label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
 			{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
 		}
 	case m.install == installAdmin && m.session == sessionLocked:
 		m.menu = []menuItem{
-			{label: "Login", hint: "unlock admin session (passphrase)", key: "l", fn: (*rootModel).openLogin},
+			{label: "Login", hint: "unlock admin session", key: "l", fn: (*rootModel).openLogin},
 			{label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
 			{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
 		}
+	case m.install == installAdmin && m.session == sessionUnlocked && !vaultAttached(m.paths):
+		m.menu = []menuItem{
+			{label: "Attach vault", hint: "clone/link a vault repo", key: "a", fn: (*rootModel).openAttachAdmin},
+			{label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
+			{label: "Logout", hint: "end admin session", key: "o", fn: (*rootModel).doLogout},
+			{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
+		}
 	case m.install == installAdmin && m.session == sessionUnlocked:
-		items := []menuItem{
-			{label: "Status", hint: "current admin session state", key: "s", fn: (*rootModel).openStatus},
+		// Full menu, grouped per TUI_GUIDELINES.md.
+		m.menu = []menuItem{
+			// Vault
+			{section: "Vault", label: "Add integration", hint: "add a service + upstream tokens", fn: (*rootModel).openAddIntegration},
+			{section: "Vault", label: "Add grant", hint: "map a grant to an integration/token", fn: (*rootModel).openAddGrant},
+			{section: "Vault", label: "List integrations", hint: "show all integrations", fn: (*rootModel).openIntegrationList},
+			{section: "Vault", label: "Remove integration", hint: "delete (+ dependent grants)", fn: (*rootModel).openIntegrationRemove},
+			{section: "Vault", label: "List grants", hint: "show all grants", fn: (*rootModel).openGrantList},
+			{section: "Vault", label: "Remove grant", hint: "delete a grant", fn: (*rootModel).openGrantRemove},
+			// Tokens
+			{section: "Tokens", label: "Issue token", hint: "mint a new bearer", key: "i", fn: (*rootModel).openIssue},
+			{section: "Tokens", label: "List tokens", hint: "show issued capabilities", fn: (*rootModel).openList},
+			{section: "Tokens", label: "Revoke token", hint: "kill an issued bearer", fn: (*rootModel).openRevoke},
+			// Team
+			{section: "Team", label: "Add team member", hint: "add another admin's pubkey", fn: (*rootModel).openTeamAdd},
+			{section: "Team", label: "List team", hint: "show all admins", fn: (*rootModel).openTeamList},
+			{section: "Team", label: "Remove team member", hint: "with rotation checklist", fn: (*rootModel).openTeamRemove},
+			// Sync
+			{section: "Sync", label: "Pull vault", hint: "git pull", fn: (*rootModel).openPull},
+			{section: "Sync", label: "Push vault", hint: "git add/commit/push", fn: (*rootModel).openPush},
+			// System
+			{section: "System", label: "Status", hint: "session state", key: "s", fn: (*rootModel).openStatus},
+			{section: "System", label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
+			{section: "System", label: "Logout", hint: "end admin session", key: "o", fn: (*rootModel).doLogout},
+			{section: "System", label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
 		}
-		if !vaultAttached(m.paths) {
-			items = append(items, menuItem{
-				label: "Attach vault", hint: "clone/link a vault repo (admin)", key: "a", fn: (*rootModel).openAttachAdmin,
-			})
-		} else {
-			items = append(items,
-				menuItem{label: "Add integration", hint: "add a service (Notion, Boiler, …) + its upstream tokens", key: "I", fn: (*rootModel).openAddIntegration},
-				menuItem{label: "Add grant", hint: "map a grant id to an (integration, token, env prefix)", key: "g", fn: (*rootModel).openAddGrant},
-				menuItem{label: "Issue token", hint: "mint a new bearer", key: "i", fn: (*rootModel).openIssue},
-				menuItem{label: "List tokens", hint: "show issued capabilities", key: "L", fn: (*rootModel).openList},
-				menuItem{label: "Revoke token", hint: "kill an issued bearer", key: "r", fn: (*rootModel).openRevoke},
-				menuItem{label: "Add team member", hint: "add another admin's pubkey", key: "T", fn: (*rootModel).openTeamAdd},
-				menuItem{label: "List team", hint: "show all admins", key: "t", fn: (*rootModel).openTeamList},
-				menuItem{label: "Remove team member", hint: "with rotation checklist", key: "R", fn: (*rootModel).openTeamRemove},
-				menuItem{label: "List integrations", hint: "show all integrations + their upstream tokens", key: "N", fn: (*rootModel).openIntegrationList},
-				menuItem{label: "Remove integration", hint: "delete an integration (+ dependent grants)", key: "X", fn: (*rootModel).openIntegrationRemove},
-				menuItem{label: "List grants", hint: "show all grants", key: "G", fn: (*rootModel).openGrantList},
-				menuItem{label: "Remove grant", hint: "delete a grant", key: "Y", fn: (*rootModel).openGrantRemove},
-				menuItem{label: "Pull vault", hint: "git pull", key: "p", fn: (*rootModel).openPull},
-				menuItem{label: "Push vault", hint: "git add/commit/push", key: "P", fn: (*rootModel).openPush},
-			)
-		}
-		items = append(items,
-			menuItem{label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
-			menuItem{label: "Logout", hint: "end admin session", key: "o", fn: (*rootModel).doLogout},
-			menuItem{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
-		)
-		m.menu = items
 	}
 	if m.cursor >= len(m.menu) {
 		m.cursor = 0
@@ -248,42 +251,92 @@ func (m *rootModel) View() string {
 		return m.child.View()
 	}
 	var b strings.Builder
+
+	// Header — title + one-line state.
 	b.WriteString(titleSt.Render("dop — Doors of Perception") + "\n")
 	b.WriteString(mutedSt.Render(m.stateLine()) + "\n\n")
+
+	// Compute label column width across all items so descriptions align.
+	labelWidth := 0
+	for _, it := range m.menu {
+		if l := lipgloss.Width(it.label); l > labelWidth {
+			labelWidth = l
+		}
+	}
+	labelWidth += 2 // padding before description
+
+	// Render items, inserting section headers on transitions.
+	prevSection := ""
 	for i, it := range m.menu {
-		prefix := "  "
+		if it.section != prevSection && it.section != "" {
+			if prevSection != "" {
+				b.WriteString("\n")
+			}
+			b.WriteString("  " + mutedSt.Render(it.section) + "\n")
+			prevSection = it.section
+		} else if it.section == "" && prevSection != "" {
+			b.WriteString("\n")
+			prevSection = ""
+		}
+
+		prefix := "    "
 		label := it.label
 		if i == m.cursor {
-			prefix = cursorSt.Render("➤ ")
+			prefix = "  " + cursorSt.Render("➤ ")
 			label = cursorSt.Render(it.label)
 		}
-		key := ""
-		if it.key != "" {
-			key = mutedSt.Render(fmt.Sprintf(" [%s]", it.key))
+		// Pad label to column width (padding uses raw spaces so ANSI codes
+		// don't distort lipgloss.Width).
+		pad := labelWidth - lipgloss.Width(it.label)
+		if pad < 1 {
+			pad = 1
 		}
-		b.WriteString(prefix + label + key + "  " + mutedSt.Render(it.hint) + "\n")
+		b.WriteString(prefix + label + strings.Repeat(" ", pad))
+		b.WriteString(mutedSt.Render(it.hint) + "\n")
 	}
+
 	if m.flashMessage != "" {
 		b.WriteString("\n" + okSt.Render(m.flashMessage) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move · enter select · single-letter shortcuts · q quit"))
+
+	// Footer — a small legend of the most useful shortcuts.
+	footer := "↑↓ move · enter select"
+	if m.hasShortcut("s") {
+		footer += " · s status"
+	}
+	if m.hasShortcut("i") {
+		footer += " · i issue"
+	}
+	if m.hasShortcut("l") {
+		footer += " · l login"
+	}
+	footer += " · q quit"
+	b.WriteString("\n" + helpSt.Render(footer))
 	return b.String()
+}
+
+// hasShortcut reports whether any current menu item claims that key.
+func (m *rootModel) hasShortcut(k string) bool {
+	for _, it := range m.menu {
+		if it.key == k {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *rootModel) stateLine() string {
 	switch {
 	case m.install == installNoKey:
-		return "install: no admin key on this machine (use \"Setup admin\" first, or attach as agent)"
+		return "no admin key — start with Setup admin"
 	case m.install == installAdmin && m.session == sessionLocked:
-		return "install: admin. Session: locked."
+		return "admin · locked"
 	case m.install == installAdmin && m.session == sessionUnlocked:
 		st, _ := m.adminClient.Status()
 		if st != nil {
-			return fmt.Sprintf("install: admin. Session: unlocked · idle_ttl=%s · admin=%s…",
-				remainingHuman(st.IdleTTLSeconds, st.LastActivityUnix),
-				st.AdminPubkey[:12])
+			return fmt.Sprintf("admin · unlocked · %s idle", remainingHuman(st.IdleTTLSeconds, st.LastActivityUnix))
 		}
-		return "install: admin. Session: unlocked."
+		return "admin · unlocked"
 	}
 	return ""
 }
