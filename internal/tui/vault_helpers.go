@@ -35,17 +35,26 @@ func loadVaultForListing(client *admin.Client, paths *config.Paths) (*vault.Vaul
 	return &vv, vp, nil
 }
 
-// vaultAttached returns true iff a vault.yaml exists at the standard location.
+// vaultAttached returns true iff the vault directory is a git clone.
+// The signal is `.git/` — a successful clone always creates it, even for
+// an empty remote. Waiting for vault.yaml or .sops.yaml would hide the
+// mutation menu until the user's first save, which is exactly the moment
+// they need those options.
 func vaultAttached(paths *config.Paths) bool {
 	if paths == nil {
 		return false
 	}
-	_, err := os.Stat(paths.Vault + "/vault.yaml")
-	if err == nil {
+	if _, err := os.Stat(paths.Vault + "/.git"); err == nil {
 		return true
 	}
-	// Also count "vault dir cloned but empty" as attached — the user's
-	// intent is expressed by the presence of .sops.yaml.
-	_, err = os.Stat(paths.Vault + "/.sops.yaml")
-	return err == nil
+	// Belt + suspenders: also accept a file called `.git` (git worktree
+	// pointer) — happens if the user manually converted their setup.
+	if fi, err := os.Stat(paths.Vault + "/.git"); err == nil && !fi.IsDir() {
+		return true
+	}
+	// And still accept vault.yaml alone — covers weird test setups.
+	if _, err := os.Stat(paths.Vault + "/vault.yaml"); err == nil {
+		return true
+	}
+	return false
 }
