@@ -49,6 +49,26 @@ run_e2e() {
     go build -o dop ./cmd/dop
     trap 'rm -f dop' EXIT
 
+    # Fast smoke checks — would have caught v1.0.0's missing-TUI regression.
+    if ! ./dop help 2>&1 | grep -q "interactive TUI"; then
+        red "  ✗ smoke: dop help doesn't mention interactive TUI"
+        FAIL=1
+    else
+        green "  ✓ smoke: help mentions TUI"
+    fi
+    if ! ./dop help 2>&1 | grep -q "admin login"; then
+        red "  ✗ smoke: dop help missing 'admin login'"
+        FAIL=1
+    fi
+    if ! ./dop help 2>&1 | grep -q "token issue"; then
+        red "  ✗ smoke: dop help missing 'token issue'"
+        FAIL=1
+    fi
+    if ! ./dop help 2>&1 | grep -q "integration"; then
+        red "  ✗ smoke: dop help missing 'integration' subcommand"
+        FAIL=1
+    fi
+
     local passed=0
     local failed=0
     local names_failed=()

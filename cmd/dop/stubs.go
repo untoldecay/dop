@@ -23,18 +23,77 @@ import (
 
 func runTeam(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop team <add-key|list>")
+		fmt.Fprintln(os.Stderr, "usage: dop team <add-key|remove|list>")
 		return 2
 	}
 	switch args[0] {
 	case "add-key":
 		return runTeamAddKey(args[1:])
+	case "remove":
+		return runTeamRemove(args[1:])
 	case "list":
 		return runTeamList(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop team: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+// runTeamRemove drops a member from the admins list and prints the
+// upstream-token rotation checklist so the operator knows what to
+// rotate at the source services.
+func runTeamRemove(args []string) int {
+	fs := flag.NewFlagSet("team remove", flag.ExitOnError)
+	name := fs.String("name", "", "admin name to remove (required)")
+	force := fs.Bool("force", false, "actually remove (default is dry-run)")
+	_ = fs.Parse(args)
+
+	if *name == "" {
+		fmt.Fprintln(os.Stderr, "dop team remove: --name required")
+		return 2
+	}
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team remove: %v\n", err)
+		return 1
+	}
+	v, vp, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team remove: %v\n", err)
+		return 1
+	}
+	if _, ok := v.Admins[*name]; !ok {
+		fmt.Fprintf(os.Stderr, "dop team remove: no admin named %q\n", *name)
+		return 1
+	}
+
+	// Always print the checklist — this is the whole point.
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "⚠  Removing admin %q. Rotate the following upstream tokens NOW:\n\n", *name)
+	fmt.Fprintln(os.Stderr, "   Any cached copy of the vault they cloned before removal is still")
+	fmt.Fprintln(os.Stderr, "   decryptable with their old age key. Every token below must be")
+	fmt.Fprintln(os.Stderr, "   rotated at the upstream service AND updated via `dop integration add`.")
+	fmt.Fprintln(os.Stderr)
+	for iname, integ := range v.Integrations {
+		for tname, tok := range integ.Tokens {
+			fmt.Fprintf(os.Stderr, "   - %s.tokens.%s  (%s)\n", iname, tname, tok.ScopeNote)
+		}
+	}
+	fmt.Fprintln(os.Stderr)
+	if !*force {
+		fmt.Fprintln(os.Stderr, "dop team remove: dry run. Re-run with --force AFTER you have rotated the upstream tokens.")
+		return 0
+	}
+
+	// Force-remove.
+	delete(v.Admins, *name)
+	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
+		fmt.Fprintf(os.Stderr, "dop team remove: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "dop team remove: %s removed\n", *name)
+	return 0
 }
 
 func runTeamAddKey(args []string) int {

@@ -71,29 +71,55 @@ dop env              # shell-eval-able exports
 
 ## Commands
 
+Admin session:
 ```
-dop admin init                              generate wrapped admin keys (once)
-dop admin login                             start session
-dop admin logout                            end session
-dop admin status                            show state + TTL
-
-dop init --vault <path-or-url>              admin install
-dop init --cache <path-or-url>              agent install (no admin keys)
-
-dop token issue --grants CSV --name L [flags]  admin session required
-dop token list                              admin session required
-dop token revoke <name>                     admin session required
-
-dop team add-key --name W --pubkey <age>    admin session required
-dop team list                               admin session required
-
-dop exec [--token-file P] --agent-name X -- CMD    bearer required
-dop whoami                                  describe current bearer
-dop env                                     print exports
-
-dop pull / dop push                         git pull/push the vault
-dop doctor [--security]                     health check
+dop admin init          generate wrapped admin keys (once per machine)
+dop admin login         start session
+dop admin logout        end session
+dop admin status        show state + TTL
 ```
+
+Attach vault:
+```
+dop init --vault <path-or-url>    admin install
+dop init --cache <path-or-url>    agent install (no admin keys)
+```
+
+Vault contents (admin session required):
+```
+dop integration add --name N --token N=V:SCOPE [--base-url URL] [--token …]
+dop integration list
+dop integration remove --name N [--force]     # --force cascades to grants
+
+dop grant add --id ID --integration N --token T [--env-prefix P]
+dop grant list
+dop grant remove --id ID
+
+dop token issue --grants CSV --name L [--expires 72h]
+dop token list
+dop token revoke <name>
+
+dop team add-key --name W --pubkey <age> [--ed25519 P] [--note T]
+dop team list
+dop team remove --name W [--force]             # rotation checklist
+
+dop vault edit                                  # open decrypted vault in $EDITOR
+```
+
+Execution (bearer required):
+```
+dop exec [--token-file PATH] --agent-name X -- CMD
+dop whoami
+dop env
+```
+
+Common:
+```
+dop pull / dop push       git pull/push the vault
+dop doctor [--security]   health check
+```
+
+Or launch the TUI (`dop` alone on a TTY, unless `DOP_NO_TUI=1`).
 
 Env vars:
 

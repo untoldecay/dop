@@ -358,6 +358,9 @@ func (v *issueView) View() string {
 		b.WriteString(okSt.Render("✓ issued") + "\n\n")
 		b.WriteString("Bearer (shown ONCE — copy now):\n")
 		b.WriteString("  " + lipgloss.NewStyle().Bold(true).Render(v.bearer) + "\n\n")
+		if copyToClipboard(v.bearer) {
+			b.WriteString(okSt.Render("copied to clipboard") + "\n\n")
+		}
 		b.WriteString(mutedSt.Render("then: export DOP_TOKEN="+v.bearer) + "\n")
 		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
 		return b.String()

@@ -30,8 +30,16 @@ usage:
   dop token issue --grants CSV --name L [flags]  mint a capability + bearer (admin-required)
   dop token list                                 list capabilities (admin-required)
   dop token revoke <name>                        revoke a capability (admin-required)
+  dop integration add --name N --token N=V:NOTE  add/update an integration (admin-required)
+  dop integration list                           list integrations (admin-required)
+  dop integration remove --name N [--force]      remove an integration (admin-required)
+  dop grant add --id ID --integration N --token T   add a grant (admin-required)
+  dop grant list                                 list grants (admin-required)
+  dop grant remove --id ID                       remove a grant (admin-required)
   dop team add-key --name W --pubkey <age>       add admin recipient (admin-required)
   dop team list                                  list admins (admin-required)
+  dop team remove --name W [--force]             remove admin (with rotation checklist)
+  dop vault edit                                 open decrypted vault in $EDITOR
 
   # Agent / execution plane
   dop init --cache <url|path>                    clone vault as agent (no admin keys generated)
@@ -72,6 +80,12 @@ func main() {
 		os.Exit(runInit(os.Args[2:]))
 	case "token":
 		os.Exit(runToken(os.Args[2:]))
+	case "integration":
+		os.Exit(runIntegration(os.Args[2:]))
+	case "grant":
+		os.Exit(runGrant(os.Args[2:]))
+	case "vault":
+		os.Exit(runVault(os.Args[2:]))
 	case "team":
 		os.Exit(runTeam(os.Args[2:]))
 	case "exec":

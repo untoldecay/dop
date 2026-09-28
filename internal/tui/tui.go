@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -129,7 +130,10 @@ func (m *rootModel) rebuildMenu() {
 	m.menu = m.menu[:0]
 	switch {
 	case m.install == installNoKey:
+		// Fresh machine — offer inline setup + agent-style attach.
 		m.menu = []menuItem{
+			{label: "Setup admin", hint: "generate + wrap admin keys (first-run)", key: "S", fn: (*rootModel).openSetupAdmin},
+			{label: "Attach vault (agent)", hint: "join an existing vault as read-only agent", key: "a", fn: (*rootModel).openAttachAgent},
 			{label: "Doctor", hint: "health check on this install", key: "d", fn: (*rootModel).openDoctor},
 			{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
 		}
@@ -140,14 +144,37 @@ func (m *rootModel) rebuildMenu() {
 			{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
 		}
 	case m.install == installAdmin && m.session == sessionUnlocked:
-		m.menu = []menuItem{
+		items := []menuItem{
 			{label: "Status", hint: "current admin session state", key: "s", fn: (*rootModel).openStatus},
-			{label: "Issue token", hint: "mint a new bearer", key: "i", fn: (*rootModel).openIssue},
-			{label: "List tokens", hint: "show issued capabilities", key: "L", fn: (*rootModel).openList},
-			{label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
-			{label: "Logout", hint: "end admin session", key: "o", fn: (*rootModel).doLogout},
-			{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
 		}
+		if !vaultAttached(m.paths) {
+			items = append(items, menuItem{
+				label: "Attach vault", hint: "clone/link a vault repo (admin)", key: "a", fn: (*rootModel).openAttachAdmin,
+			})
+		} else {
+			items = append(items,
+				menuItem{label: "Add integration", hint: "add a service (Notion, Boiler, …) + its upstream tokens", key: "I", fn: (*rootModel).openAddIntegration},
+				menuItem{label: "Add grant", hint: "map a grant id to an (integration, token, env prefix)", key: "g", fn: (*rootModel).openAddGrant},
+				menuItem{label: "Issue token", hint: "mint a new bearer", key: "i", fn: (*rootModel).openIssue},
+				menuItem{label: "List tokens", hint: "show issued capabilities", key: "L", fn: (*rootModel).openList},
+				menuItem{label: "Revoke token", hint: "kill an issued bearer", key: "r", fn: (*rootModel).openRevoke},
+				menuItem{label: "Add team member", hint: "add another admin's pubkey", key: "T", fn: (*rootModel).openTeamAdd},
+				menuItem{label: "List team", hint: "show all admins", key: "t", fn: (*rootModel).openTeamList},
+				menuItem{label: "Remove team member", hint: "with rotation checklist", key: "R", fn: (*rootModel).openTeamRemove},
+				menuItem{label: "List integrations", hint: "show all integrations + their upstream tokens", key: "N", fn: (*rootModel).openIntegrationList},
+				menuItem{label: "Remove integration", hint: "delete an integration (+ dependent grants)", key: "X", fn: (*rootModel).openIntegrationRemove},
+				menuItem{label: "List grants", hint: "show all grants", key: "G", fn: (*rootModel).openGrantList},
+				menuItem{label: "Remove grant", hint: "delete a grant", key: "Y", fn: (*rootModel).openGrantRemove},
+				menuItem{label: "Pull vault", hint: "git pull", key: "p", fn: (*rootModel).openPull},
+				menuItem{label: "Push vault", hint: "git add/commit/push", key: "P", fn: (*rootModel).openPush},
+			)
+		}
+		items = append(items,
+			menuItem{label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
+			menuItem{label: "Logout", hint: "end admin session", key: "o", fn: (*rootModel).doLogout},
+			menuItem{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
+		)
+		m.menu = items
 	}
 	if m.cursor >= len(m.menu) {
 		m.cursor = 0
@@ -246,17 +273,30 @@ func (m *rootModel) View() string {
 func (m *rootModel) stateLine() string {
 	switch {
 	case m.install == installNoKey:
-		return "install: agent (no admin key). Run `dop admin init` in a terminal to become admin."
+		return "install: no admin key on this machine (use \"Setup admin\" first, or attach as agent)"
 	case m.install == installAdmin && m.session == sessionLocked:
 		return "install: admin. Session: locked."
 	case m.install == installAdmin && m.session == sessionUnlocked:
 		st, _ := m.adminClient.Status()
 		if st != nil {
-			return fmt.Sprintf("install: admin. Session: unlocked · admin=%s...", st.AdminPubkey[:12])
+			return fmt.Sprintf("install: admin. Session: unlocked · idle_ttl=%s · admin=%s…",
+				remainingHuman(st.IdleTTLSeconds, st.LastActivityUnix),
+				st.AdminPubkey[:12])
 		}
 		return "install: admin. Session: unlocked."
 	}
 	return ""
+}
+
+// remainingHuman is a small helper used by the state line (mirrors what
+// views.go's `remaining` does — kept separate here to avoid circular type
+// concerns).
+func remainingHuman(ttl int64, ref int64) string {
+	r := time.Until(time.Unix(ref, 0).Add(time.Duration(ttl) * time.Second))
+	if r < 0 {
+		r = 0
+	}
+	return r.Round(time.Second).String()
 }
 
 // --- transitions ---
@@ -305,3 +345,76 @@ func (m *rootModel) doLogout() (tea.Model, tea.Cmd) {
 }
 
 type flasher interface{ Flash() string }
+
+// --- new (batch 1) view openers ---
+
+func (m *rootModel) openSetupAdmin() (tea.Model, tea.Cmd) {
+	m.child = newSetupAdminView(m.paths)
+	return m, m.child.Init()
+}
+
+func (m *rootModel) openAttachAdmin() (tea.Model, tea.Cmd) {
+	m.child = newAttachVaultView(m.paths, true)
+	return m, m.child.Init()
+}
+
+func (m *rootModel) openAttachAgent() (tea.Model, tea.Cmd) {
+	m.child = newAttachVaultView(m.paths, false)
+	return m, m.child.Init()
+}
+
+func (m *rootModel) openAddIntegration() (tea.Model, tea.Cmd) {
+	m.child = newAddIntegrationView(m.adminClient, m.paths)
+	return m, m.child.Init()
+}
+
+func (m *rootModel) openAddGrant() (tea.Model, tea.Cmd) {
+	m.child = newAddGrantView(m.adminClient, m.paths)
+	return m, m.child.Init()
+}
+
+// --- batch 2 openers ---
+func (m *rootModel) openRevoke() (tea.Model, tea.Cmd) {
+	m.child = newRevokeView(m.adminClient, m.paths)
+	return m, m.child.Init()
+}
+func (m *rootModel) openTeamAdd() (tea.Model, tea.Cmd) {
+	m.child = newTeamAddView(m.adminClient, m.paths)
+	return m, m.child.Init()
+}
+func (m *rootModel) openTeamList() (tea.Model, tea.Cmd) {
+	m.child = newTeamListView(m.adminClient, m.paths)
+	return m, m.child.Init()
+}
+func (m *rootModel) openTeamRemove() (tea.Model, tea.Cmd) {
+	m.child = newTeamRemoveView(m.adminClient, m.paths)
+	return m, m.child.Init()
+}
+
+// --- batch 3 openers ---
+func (m *rootModel) openIntegrationList() (tea.Model, tea.Cmd) {
+	m.child = newIntegrationListView(m.adminClient, m.paths)
+	return m, m.child.Init()
+}
+func (m *rootModel) openIntegrationRemove() (tea.Model, tea.Cmd) {
+	m.child = newIntegrationRemoveView(m.adminClient, m.paths)
+	return m, m.child.Init()
+}
+func (m *rootModel) openGrantList() (tea.Model, tea.Cmd) {
+	m.child = newGrantListView(m.adminClient, m.paths)
+	return m, m.child.Init()
+}
+func (m *rootModel) openGrantRemove() (tea.Model, tea.Cmd) {
+	m.child = newGrantRemoveView(m.adminClient, m.paths)
+	return m, m.child.Init()
+}
+
+// --- batch 4 openers ---
+func (m *rootModel) openPull() (tea.Model, tea.Cmd) {
+	m.child = newSyncView("pull", m.paths)
+	return m, m.child.Init()
+}
+func (m *rootModel) openPush() (tea.Model, tea.Cmd) {
+	m.child = newSyncView("push", m.paths)
+	return m, m.child.Init()
+}
