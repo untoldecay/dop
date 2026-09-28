@@ -33,10 +33,15 @@ func TokenBearer() (string, error) {
 }
 
 // LoadPlain decrypts a vault (SOPS envelope) to plaintext YAML bytes, or
-// returns the file as-is if not encrypted (test fixtures).
+// returns the file as-is if not encrypted (test fixtures). Missing file
+// returns a minimal plaintext seed so first-time bootstrap flows work
+// without a special case at every caller.
 func LoadPlain(vaultPath string) ([]byte, error) {
 	raw, err := os.ReadFile(vaultPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return []byte("schema_version: 1\n"), nil
+		}
 		return nil, err
 	}
 	if !isSOPS(raw) {
@@ -52,23 +57,33 @@ func LoadPlain(vaultPath string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
-// SavePlain writes plaintext YAML to vaultPath. If the target was
-// previously SOPS-encrypted, re-encrypts via `sops --encrypt` respecting
-// the vault repo's .sops.yaml recipients. Otherwise writes plaintext.
+// SavePlain writes plaintext YAML to vaultPath. Encryption decision:
+// - If a .sops.yaml lives in the vault's directory → always encrypt
+//   (real vault; the .sops.yaml presence is the ground truth signal)
+// - Otherwise, if the previous file existed and was SOPS-encrypted → encrypt
+//   (defensive fallback)
+// - Otherwise → plaintext (test fixtures, headless bootstrap without config)
 func SavePlain(vaultPath string, plain []byte) error {
 	prev, err := os.ReadFile(vaultPath)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	// Ground truth for "should this be encrypted?" is the presence of .sops.yaml
+	// next to the vault file. This lets bootstrap-from-empty write encrypted
+	// output without needing a prior encrypted vault to look at.
+	dir := filepath.Dir(vaultPath)
+	haveSopsConfig := false
+	if _, err := os.Stat(filepath.Join(dir, ".sops.yaml")); err == nil {
+		haveSopsConfig = true
+	}
 	// Fast path: plaintext workflow (tests) — just overwrite.
-	if !isSOPS(prev) {
+	if !haveSopsConfig && !isSOPS(prev) {
 		return os.WriteFile(vaultPath, plain, 0o600)
 	}
 
 	// Encrypted path: stage plaintext to tempfile in the same directory so
 	// sops picks up the same .sops.yaml, then sops --encrypt --output over
-	// the original.
-	dir := filepath.Dir(vaultPath)
+	// the original. `dir` was already computed above.
 	tmp, err := os.CreateTemp(dir, ".dop-vault-*.yaml")
 	if err != nil {
 		return err

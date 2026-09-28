@@ -71,7 +71,11 @@ func newRootModel() (*rootModel, error) {
 	vp := ""
 	if paths != nil {
 		candidate := paths.Vault + "/vault.yaml"
-		if fileExists(candidate) {
+		// If the vault dir exists (i.e. `dop init --vault` was run), we
+		// point at vault.yaml even when the file doesn't exist yet — the
+		// Add-integration flow will bootstrap it on first save. The dir
+		// having a `.sops.yaml` is enough to know we're encrypting.
+		if fileExists(candidate) || fileExists(paths.Vault+"/.sops.yaml") {
 			vp = candidate
 		}
 	}
