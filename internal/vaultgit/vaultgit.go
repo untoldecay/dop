@@ -194,6 +194,86 @@ func installMergeDriver(dest string, out io.Writer) error {
 	return nil
 }
 
+// InitialCommitAndPush is used when the vault is being seeded on a
+// brand-new empty remote. It stages every dop-managed file, commits, and
+// pushes to `origin main`. Idempotent-ish: if there's nothing to commit
+// (empty diff), swallows git's exit=1 on `git commit` but keeps pushing.
+func InitialCommitAndPush(dest string, out io.Writer) error {
+	if err := runGit(out, dest, "add", "-A"); err != nil {
+		return err
+	}
+	// git commit returns exit=1 with a clean tree — accept it.
+	_ = runGitAllowExit(out, dest, []int{0, 1}, "commit", "-m", "dop: initial vault setup")
+	// Push, setting upstream if not already tracked.
+	if err := runGit(out, dest, "push", "-u", "origin", "HEAD:main"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// CreateGithubRepo shells out to `gh repo create` to make a new private
+// repo owned by the current gh user. Returns the clone URL (HTTPS form).
+//
+// Requires gh on $PATH and prior `gh auth login`.
+func CreateGithubRepo(name string, private bool, description string, out io.Writer) (string, error) {
+	if _, err := exec.LookPath("gh"); err != nil {
+		return "", errors.New("`gh` binary not on $PATH — install github.com/cli/cli or use a different vault-creation method")
+	}
+	args := []string{"repo", "create", name, "--description", description}
+	if private {
+		args = append(args, "--private")
+	} else {
+		args = append(args, "--public")
+	}
+	// --confirm was renamed to just accepting the args in modern gh. --disable-wiki keeps the repo minimal.
+	args = append(args, "--disable-wiki")
+
+	cmd := exec.Command("gh", args...)
+	cmd.Stdout = out
+	cmd.Stderr = out
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("gh repo create: %w", err)
+	}
+	// gh prints the URL as its last line. We could parse cmd.Output, but
+	// simpler: re-query via `gh repo view`.
+	viewCmd := exec.Command("gh", "repo", "view", name, "--json", "url", "--jq", ".url")
+	urlBytes, err := viewCmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("gh repo view %s: %w", name, err)
+	}
+	repoURL := strings.TrimSpace(string(urlBytes))
+	if repoURL == "" {
+		return "", errors.New("gh repo view returned empty URL")
+	}
+	// Ensure we return the .git-suffixed clone URL — gh returns the web URL.
+	if !strings.HasSuffix(repoURL, ".git") {
+		repoURL += ".git"
+	}
+	return repoURL, nil
+}
+
+// runGitAllowExit is like runGit but tolerates a list of exit codes as success.
+func runGitAllowExit(out io.Writer, dir string, allowed []int, args ...string) error {
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Stdout = out
+	cmd.Stderr = out
+	err := cmd.Run()
+	if err == nil {
+		return nil
+	}
+	if ee, ok := err.(*exec.ExitError); ok {
+		for _, a := range allowed {
+			if ee.ExitCode() == a {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+}
+
 func runGit(out io.Writer, dir string, args ...string) error {
 	cmd := exec.Command("git", args...)
 	if dir != "" {
