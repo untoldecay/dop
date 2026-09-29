@@ -559,10 +559,20 @@ func (v *issueView) View() string {
 			b.WriteString("Bearer + PIN (shown ONCE — copy now):\n")
 			b.WriteString("  " + lipgloss.NewStyle().Bold(true).Render(v.bearer) + "\n")
 			b.WriteString("  " + lipgloss.NewStyle().Bold(true).Render(v.pin) + "\n\n")
-			handoff := "Tell your agent:\n  DOP_TOKEN=" + v.bearer + " dop claim " + v.pin
+			// v1.9.3: agent-optimized clipboard — direct instructions
+			// the agent can act on without back-and-forth.
+			handoff := "You have been given scoped credential access via DOP.\n\n" +
+				"To bind it to your identity, run this in your shell:\n\n" +
+				"  DOP_TOKEN=" + v.bearer + " dop claim " + v.pin + "\n\n" +
+				"The command will save a QR code image to a file and print its path\n" +
+				"like `QR image: /path/to/foo.qr.png`.\n\n" +
+				"Attach that image in this chat so the user can see + scan it, and\n" +
+				"also share the `Public URL` line as text. The user will scan the QR\n" +
+				"or open the URL on their phone to approve the binding.\n\n" +
+				"Do NOT retry the claim command — it blocks until approval."
 			b.WriteString(mutedSt.Render(handoff) + "\n\n")
 			if copyToClipboard(handoff) {
-				b.WriteString(okSt.Render("handoff copied to clipboard") + "\n")
+				b.WriteString(okSt.Render("agent handoff copied to clipboard — paste into the agent chat") + "\n")
 			}
 		} else {
 			b.WriteString("Bearer (shown ONCE — copy now):\n")

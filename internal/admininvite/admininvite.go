@@ -39,6 +39,9 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/chacha20poly1305"
+
 	"github.com/fray/dop/internal/config"
 )
 
@@ -54,6 +57,77 @@ type Invite struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 	CreatedByPub string    `json:"created_by_pub"` // M1's ed25519 pubkey (audit)
 	Kind         string    `json:"kind,omitempty"` // "device" or "team_member" (cosmetic)
+	// ShareIdentity (v1.9.3 — Flavor Y): when true, M1 also stages a
+	// PIN-encrypted blob (see IdentityBlobPath) carrying its wrapped
+	// admin key + approval hash. M2 installs those instead of generating
+	// its own → SAME admin, one entry, one revocation surface across
+	// devices. Only sensible for "another of MY devices"; NOT for
+	// teammates.
+	ShareIdentity bool `json:"share_identity,omitempty"`
+}
+
+// IdentityBlobPath is where M1 stages the encrypted admin-identity
+// bundle when ShareIdentity=true. Empty when the invite is per-device.
+func IdentityBlobPath(paths *config.Paths, id string) string {
+	return filepath.Join(dirPath(paths), id+".identity-blob")
+}
+
+// EncryptIdentityBlob wraps (adminKeyBytes, approvalHashBytes) with
+// XChaCha20-Poly1305 using a key derived from (PIN, invite_id) via
+// argon2id. Format: nonce(24) || ciphertext.
+func EncryptIdentityBlob(pin, inviteID string, adminKey, approvalHash []byte) ([]byte, error) {
+	blob := struct {
+		AdminKey     []byte `json:"admin_key"`
+		ApprovalHash []byte `json:"approval_hash"`
+	}{AdminKey: adminKey, ApprovalHash: approvalHash}
+	plain, err := json.Marshal(blob)
+	if err != nil {
+		return nil, err
+	}
+	key := deriveBlobKey(pin, inviteID)
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	ct := aead.Seal(nil, nonce, plain, []byte(inviteID))
+	return append(nonce, ct...), nil
+}
+
+// DecryptIdentityBlob is the reverse — M2 runs this after fetching the
+// blob and reading the PIN from the caller.
+func DecryptIdentityBlob(pin, inviteID string, blob []byte) (adminKey, approvalHash []byte, err error) {
+	if len(blob) < 24 {
+		return nil, nil, errors.New("identity blob: too short")
+	}
+	key := deriveBlobKey(pin, inviteID)
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	nonce := blob[:aead.NonceSize()]
+	ct := blob[aead.NonceSize():]
+	plain, err := aead.Open(nil, nonce, ct, []byte(inviteID))
+	if err != nil {
+		return nil, nil, fmt.Errorf("identity blob: decrypt (wrong PIN?): %w", err)
+	}
+	var out struct {
+		AdminKey     []byte `json:"admin_key"`
+		ApprovalHash []byte `json:"approval_hash"`
+	}
+	if err := json.Unmarshal(plain, &out); err != nil {
+		return nil, nil, err
+	}
+	return out.AdminKey, out.ApprovalHash, nil
+}
+
+// deriveBlobKey — argon2id(pin, salt=invite_id, t=3, m=64MiB, p=4, len=32).
+// Same cost profile as the approval passphrase gate.
+func deriveBlobKey(pin, inviteID string) []byte {
+	return argon2.IDKey([]byte(normalizePIN(pin)), []byte(inviteID), 3, 64*1024, 4, 32)
 }
 
 // Response is what M2 writes to complete the handshake.

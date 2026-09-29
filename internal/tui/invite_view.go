@@ -33,12 +33,13 @@ type inviteView struct {
 	paths *config.Paths
 	kind  inviteKind
 
-	step     int // 0 = name, 1 = passphrase, 2 = running, 3 = done
-	nameBuf  strings.Builder
-	passBuf  strings.Builder
-	err      string
-	done     bool
-	flash    string
+	step          int // 0 = name, 1 = passphrase, 2 = running, 3 = done
+	nameBuf       strings.Builder
+	passBuf       strings.Builder
+	err           string
+	done          bool
+	flash         string
+	shareIdentity bool // v1.9.3 — toggle at name step with 's'
 
 	// Runtime state — set once we spawn the subprocess.
 	cmd       *exec.Cmd
@@ -110,6 +111,12 @@ func (v *inviteView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				buf.Reset()
 				buf.WriteString(s[:len(s)-1])
 			}
+		case "ctrl+s":
+			// v1.9.3 — Flavor Y toggle. Only for "device" kind
+			// (share-identity with a teammate is a security anti-pattern).
+			if v.kind == inviteKindDevice && v.step < 2 {
+				v.shareIdentity = !v.shareIdentity
+			}
 		default:
 			if len(mm.Runes) > 0 && v.step < 2 {
 				v.currentBuf().WriteString(string(mm.Runes))
@@ -159,11 +166,15 @@ func (v *inviteView) launch() tea.Cmd {
 			return inviteDone{rc: 1, err: err.Error()}
 		}
 		name := strings.TrimSpace(v.nameBuf.String())
-		v.cmd = exec.Command(self, "team", "invite",
+		args := []string{"team", "invite",
 			"--passphrase-stdin",
 			"--name", name,
 			"--kind", string(v.kind),
-		)
+		}
+		if v.shareIdentity {
+			args = append(args, "--share-identity")
+		}
+		v.cmd = exec.Command(self, args...)
 		v.cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
 		stdin, err := v.cmd.StdinPipe()
 		if err != nil {
@@ -243,7 +254,18 @@ func (v *inviteView) View() string {
 	if v.kind == inviteKindTeamMember {
 		titleLabel = "Invite team member"
 	}
-	b.WriteString(titleSt.Render(titleLabel) + "\n\n")
+	b.WriteString(titleSt.Render(titleLabel) + "\n")
+	if v.kind == inviteKindDevice {
+		state := "OFF (new independent identity)"
+		if v.shareIdentity {
+			state = "ON (SAME identity as this machine — single revocation surface)"
+		}
+		b.WriteString(mutedSt.Render("share identity: "+state+"   [ctrl-s to toggle]") + "\n")
+		if v.shareIdentity {
+			b.WriteString(failSt.Render("⚠  losing EITHER device leaks the shared admin identity — rotate the whole admin key on loss") + "\n")
+		}
+	}
+	b.WriteString("\n")
 
 	labels := []string{"Device / member label", "Approval passphrase"}
 	for i, l := range labels {
