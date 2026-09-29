@@ -54,21 +54,28 @@ func runAdminJoin(args []string) int {
 	}
 
 	// Step 1: bootstrap admin key if missing.
+	// v1.9.2: adminInitInline now returns the passphrase it wrapped
+	// the key with, so we can reuse it for the unwrap step without a
+	// third prompt (source of the "wrong login" confusion in v1.9.0/1).
+	var pass string
 	if !admin.KeyFileExists(paths) {
 		fmt.Fprintln(os.Stderr, "dop admin join: no admin key on this machine — creating one now.")
-		if rc := adminInitInline(paths, *pfromStdin); rc != 0 {
+		created, rc := adminInitInline(paths, *pfromStdin)
+		if rc != 0 {
 			return rc
 		}
+		pass = created
 	} else {
 		fmt.Fprintln(os.Stderr, "dop admin join: existing admin key detected — using it.")
+		p, err := readPassphrase("Admin passphrase (to unwrap keys): ", *pfromStdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+			return 1
+		}
+		pass = p
 	}
 
 	// Step 2: unwrap the admin key so we can sign the response.
-	pass, err := readPassphrase("Admin passphrase (to unwrap keys): ", *pfromStdin)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
-		return 1
-	}
 	keys, err := admin.LoadAndUnwrap(paths, pass)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
@@ -180,68 +187,67 @@ func runAdminJoin(args []string) int {
 // adminInitInline runs the same interactive admin-init flow that
 // `dop admin init` uses, so `dop admin join` on a fresh machine can
 // bootstrap without a separate command call.
-func adminInitInline(paths *config.Paths, pfromStdin bool) int {
-	pass1, err := readPassphrase("Choose a passphrase for your admin key: ", pfromStdin)
+func adminInitInline(paths *config.Paths, pfromStdin bool) (string, int) {
+	pass1, err := readPassphrase("Choose a passphrase for your admin key (≥ 8 chars): ", pfromStdin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
-		return 1
+		return "", 1
 	}
 	if len(pass1) < 8 {
 		fmt.Fprintln(os.Stderr, "dop admin join: passphrase must be at least 8 characters")
-		return 1
+		return "", 1
 	}
 	if !pfromStdin {
 		pass2, err := readPassphrase("Confirm passphrase: ", false)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
-			return 1
+			return "", 1
 		}
 		if pass1 != pass2 {
 			fmt.Fprintln(os.Stderr, "dop admin join: passphrases do not match")
-			return 1
+			return "", 1
 		}
 	}
 	keys, err := admin.Generate()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
-		return 1
+		return "", 1
 	}
 	wrapped, err := admin.Wrap(keys, pass1)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
-		return 1
+		return "", 1
 	}
 	if err := admin.WriteFile(admin.KeyFile(paths), wrapped); err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
-		return 1
+		return "", 1
 	}
-	// Approval passphrase (matches admin init).
-	appPass1, err := readPassphrase("Choose an approval passphrase: ", pfromStdin)
+	appPass1, err := readPassphrase("Choose an approval passphrase (≥ 10 chars): ", pfromStdin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
-		return 1
+		return "", 1
 	}
 	if len(appPass1) < 10 {
 		fmt.Fprintln(os.Stderr, "dop admin join: approval passphrase must be at least 10 characters")
-		return 1
+		return "", 1
 	}
 	if !pfromStdin {
 		appPass2, err := readPassphrase("Confirm approval passphrase: ", false)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
-			return 1
+			return "", 1
 		}
 		if appPass1 != appPass2 {
 			fmt.Fprintln(os.Stderr, "dop admin join: approval passphrases do not match")
-			return 1
+			return "", 1
 		}
 	}
 	if err := approval.Set(paths, appPass1); err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin join: store approval passphrase: %v\n", err)
-		return 1
+		return "", 1
 	}
 	fmt.Fprintln(os.Stderr, "  ✓ admin key generated")
-	return 0
+	return pass1, 0
 }
 
 var _ = errors.New // keep tidy

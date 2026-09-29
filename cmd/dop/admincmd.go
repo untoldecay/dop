@@ -39,6 +39,8 @@ func runAdmin(args []string) int {
 		return runAdminSetApproval(args[1:])
 	case "join":
 		return runAdminJoin(args[1:])
+	case "reset":
+		return runAdminReset(args[1:])
 	case "__session-daemon":
 		// Internal: fork target from `dop admin login`. Not shown in help.
 		return runAdminSessionDaemon(args[1:])
