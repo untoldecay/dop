@@ -56,12 +56,14 @@ usage:
   dop pending                                    list pending claims
   dop approve <SAS>                              approve a pending claim
   dop reject <SAS>                               reject a pending claim
+  dop approve-remote --subject S | --list        approve a claim staged by dop claim --remote
 
   # Common
   dop pull                                       git pull vault
   dop push                                       git push vault
   dop doctor [--security]                        health check
   dop watch [--since D] [--filter K,K] [--all]   live-tail the audit log
+  dop credential-helper map|list|remove          manage host→grant map for dop-credential-git
 
 env:
   DOP_TOKEN          bearer for exec/whoami/env
@@ -103,6 +105,8 @@ func main() {
 		os.Exit(runClaim(os.Args[2:]))
 	case "approve":
 		os.Exit(runApprove(os.Args[2:]))
+	case "approve-remote":
+		os.Exit(runApproveRemote(os.Args[2:]))
 	case "reject":
 		os.Exit(runReject(os.Args[2:]))
 	case "pending":
@@ -121,6 +125,8 @@ func main() {
 		os.Exit(runDoctor(os.Args[2:]))
 	case "watch":
 		os.Exit(runWatch(os.Args[2:]))
+	case "credential-helper":
+		os.Exit(runCredentialHelper(os.Args[2:]))
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return
