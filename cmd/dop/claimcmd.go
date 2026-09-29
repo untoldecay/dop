@@ -986,14 +986,24 @@ func writeQRPNG(text, path string) error {
 	if err != nil {
 		return err
 	}
-	// v1.9.6 — tighten canvas: bigger modules, minimal quiet zone (2
-	// modules, still scannable by any real reader). Previously the file
-	// was ~40% white margin; now it's tight around the code so the QR
-	// dominates the image in chat previews.
-	const scale = 16
-	sb := c.Image().Bounds()
-	w, h := sb.Dx()*scale, sb.Dy()*scale
-	quiet := 2 * scale
+	// v1.9.9 — cap the total canvas at 500x500 so chat relays that
+	// reject large image dimensions (413 "image dimensions too large")
+	// accept the file. c.Size is the QR module count (per side). Compute
+	// scale dynamically: (modules + 2*quiet) * scale ≤ targetPx. Enforce
+	// a minimum scale of 4 so modules stay chunky enough to scan after
+	// chat compression, even for longer URLs (higher QR version).
+	//
+	// NOTE: c.Image() returns an already-scaled image at (Size+8)*c.Scale
+	// pixels — we do NOT use c.Image().Bounds() for the module count.
+	modules := c.Size
+	const targetPx = 500
+	const quietModules = 2
+	scale := targetPx / (modules + 2*quietModules)
+	if scale < 4 {
+		scale = 4
+	}
+	w, h := modules*scale, modules*scale
+	quiet := quietModules * scale
 	img := image.NewNRGBA(image.Rect(0, 0, w+2*quiet, h+2*quiet))
 	white := color.NRGBA{255, 255, 255, 255}
 	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
@@ -1001,10 +1011,20 @@ func writeQRPNG(text, path string) error {
 			img.Set(x, y, white)
 		}
 	}
-	src := c.Image()
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			img.Set(x+quiet, y+quiet, src.At(x/scale, y/scale))
+	// c.Black(mx, my) samples in module coordinates (0..modules-1).
+	black := color.NRGBA{0, 0, 0, 255}
+	for my := 0; my < modules; my++ {
+		for mx := 0; mx < modules; mx++ {
+			if !c.Black(mx, my) {
+				continue
+			}
+			x0 := quiet + mx*scale
+			y0 := quiet + my*scale
+			for dy := 0; dy < scale; dy++ {
+				for dx := 0; dx < scale; dx++ {
+					img.Set(x0+dx, y0+dy, black)
+				}
+			}
 		}
 	}
 	f, err := os.Create(path)
