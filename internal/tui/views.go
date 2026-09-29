@@ -562,18 +562,8 @@ func (v *issueView) View() string {
 			// v1.9.3: agent-optimized clipboard — direct instructions
 			// the agent can act on without back-and-forth.
 			handoff := "You have been given scoped credential access via DOP.\n\n" +
-				"To bind it to your identity, run this in your shell:\n\n" +
-				"  DOP_TOKEN=" + v.bearer + " dop claim --json " + v.pin + "\n\n" +
-				"With --json, the command emits one JSON line per event on stdout.\n" +
-				"Parse the `pending` event: it has `qr_png` (file path), `public_url`,\n" +
-				"`lan_url`, `sas`, `expires_at`, and `ttl_seconds`. Attach the\n" +
-				"`qr_png` image in this chat so the user can see + scan it, and\n" +
-				"share the `public_url` value as text. The user will scan the QR\n" +
-				"or open the URL on their phone to approve the binding.\n\n" +
-				"Do NOT retry the claim command — it blocks until approval and\n" +
-				"then emits a `result` JSON line. If you need to abort (timeout,\n" +
-				"wrong PIN), run `DOP_TOKEN=" + v.bearer + " dop claim --cancel`\n" +
-				"in another shell — the blocked claim will exit cleanly."
+				"Run this in your shell:\n\n" +
+				"  DOP_TOKEN=" + v.bearer + " dop claim --json " + v.pin
 			b.WriteString(mutedSt.Render(handoff) + "\n\n")
 			if copyToClipboard(handoff) {
 				b.WriteString(okSt.Render("agent handoff copied to clipboard — paste into the agent chat") + "\n")

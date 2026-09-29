@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -123,4 +124,35 @@ func (t *Tunnel) Stop() {
 	_ = t.cmd.Process.Kill()
 	// Reap it so it doesn't linger as a zombie.
 	go func() { _, _ = t.cmd.Process.Wait() }()
+}
+
+// CheckAlive probes the tunnel URL with a short-deadline HEAD request
+// and reports whether it appears to be reachable. Any 2xx / 3xx / 4xx
+// response means cloudflared is proxying; 5xx (especially 530 "origin
+// tunnel connection error") or a network-level failure indicates the
+// tunnel died. Blocks up to the passed timeout.
+//
+// v1.9.6 — added because cloudflared quick tunnels regularly drop
+// mid-claim and there was no way for the caller to notice until the
+// user reported it.
+func CheckAlive(url string, timeout time.Duration) bool {
+	if url == "" {
+		return false
+	}
+	client := &http.Client{Timeout: timeout}
+	req, err := http.NewRequest(http.MethodHead, url, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", "dop-tunnel-healthcheck/1.9.6")
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	// 530 is cloudflared's "no origin" — the canonical dead-tunnel code.
+	if resp.StatusCode >= 500 {
+		return false
+	}
+	return true
 }
