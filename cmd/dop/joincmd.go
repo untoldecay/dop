@@ -53,10 +53,44 @@ func runAdminJoin(args []string) int {
 		return 1
 	}
 
-	// Step 1: bootstrap admin key if missing.
-	// v1.9.2: adminInitInline now returns the passphrase it wrapped
-	// the key with, so we can reuse it for the unwrap step without a
-	// third prompt (source of the "wrong login" confusion in v1.9.0/1).
+	// Clone the vault first so we can read the invite metadata and
+	// know which flavor (X per-device / Y shared identity) the operator
+	// picked.
+	if _, err := os.Stat(filepath.Join(paths.Vault, ".git")); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: cloning vault into %s…\n", paths.Vault)
+		if rc := attachRepo(vaultURL, paths.Vault, false); rc != 0 {
+			return rc
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "dop admin join: vault already attached — pulling.")
+		if err := runGit(io.Discard, paths.Vault, "pull", "--ff-only"); err != nil {
+			fmt.Fprintf(os.Stderr, "dop admin join: pull: %v\n", err)
+			return 1
+		}
+	}
+
+	inv, err := admininvite.FindByPIN(paths, pin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+		return 1
+	}
+	if inv == nil {
+		fmt.Fprintln(os.Stderr, "dop admin join: no matching invite found — did the original admin run `dop team invite` and push?")
+		return 1
+	}
+	if inv.Expired(time.Now()) {
+		fmt.Fprintln(os.Stderr, "dop admin join: this invite has expired — ask for a fresh one")
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "  ✓ invite matched: %q (id %s)\n", inv.Name, inv.InviteID[:8])
+
+	// Flavor Y — shared identity: install M1's keys directly, no new
+	// admin entry to negotiate.
+	if inv.ShareIdentity {
+		return runAdminJoinShared(paths, inv, pin, *pfromStdin)
+	}
+
+	// Flavor X — per-device identity (existing path).
 	var pass string
 	if !admin.KeyFileExists(paths) {
 		fmt.Fprintln(os.Stderr, "dop admin join: no admin key on this machine — creating one now.")
@@ -75,7 +109,6 @@ func runAdminJoin(args []string) int {
 		pass = p
 	}
 
-	// Step 2: unwrap the admin key so we can sign the response.
 	keys, err := admin.LoadAndUnwrap(paths, pass)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
@@ -84,36 +117,6 @@ func runAdminJoin(args []string) int {
 	edPub := keys.Ed25519.Public().(ed25519.PublicKey)
 	pubHex := hex.EncodeToString(edPub)
 	ageRecipient := keys.Age.Recipient().String()
-
-	// Step 3: clone the vault (if not already attached).
-	if _, err := os.Stat(filepath.Join(paths.Vault, ".git")); err != nil {
-		fmt.Fprintf(os.Stderr, "dop admin join: cloning vault into %s…\n", paths.Vault)
-		if rc := attachRepo(vaultURL, paths.Vault, false); rc != 0 {
-			return rc
-		}
-	} else {
-		fmt.Fprintln(os.Stderr, "dop admin join: vault already attached — pulling.")
-		if err := runGit(io.Discard, paths.Vault, "pull", "--ff-only"); err != nil {
-			fmt.Fprintf(os.Stderr, "dop admin join: pull: %v\n", err)
-			return 1
-		}
-	}
-
-	// Step 4: locate the invite by PIN.
-	inv, err := admininvite.FindByPIN(paths, pin)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
-		return 1
-	}
-	if inv == nil {
-		fmt.Fprintln(os.Stderr, "dop admin join: no matching invite found — did the original admin run `dop team invite` and push?")
-		return 1
-	}
-	if inv.Expired(time.Now()) {
-		fmt.Fprintln(os.Stderr, "dop admin join: this invite has expired — ask for a fresh one")
-		return 1
-	}
-	fmt.Fprintf(os.Stderr, "  ✓ invite matched: %q (id %s)\n", inv.Name, inv.InviteID[:8])
 
 	// Step 5: sign + write the response.
 	host, _ := os.Hostname()
@@ -248,6 +251,70 @@ func adminInitInline(paths *config.Paths, pfromStdin bool) (string, int) {
 	}
 	fmt.Fprintln(os.Stderr, "  ✓ admin key generated")
 	return pass1, 0
+}
+
+// runAdminJoinShared handles Flavor Y — the invite carries an
+// encrypted identity blob. M2 refuses to run if it already has an
+// admin key (would silently overwrite), then decrypts the blob with
+// the PIN, installs M1's wrapped key + approval hash, verifies the
+// operator knows M1's admin passphrase (`LoadAndUnwrap`), cleans up
+// the blob, and pushes. No response file, no waiting for M1.
+func runAdminJoinShared(paths *config.Paths, inv *admininvite.Invite, pin string, pfromStdin bool) int {
+	if admin.KeyFileExists(paths) {
+		fmt.Fprintln(os.Stderr, "dop admin join: shared-identity invite refuses to overwrite the existing admin key on this machine.")
+		fmt.Fprintln(os.Stderr, "  run `dop admin reset` first if you really want to replace it.")
+		return 1
+	}
+	blob, err := os.ReadFile(admininvite.IdentityBlobPath(paths, inv.InviteID))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: shared-identity blob missing: %v\n", err)
+		return 1
+	}
+	adminKey, approvalHash, err := admininvite.DecryptIdentityBlob(pin, inv.InviteID, blob)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+		return 1
+	}
+	// Install to local disk.
+	if err := admin.WriteFile(admin.KeyFile(paths), adminKey); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: write admin key: %v\n", err)
+		return 1
+	}
+	approvalPath := filepath.Join(paths.KeysDir, "approval.hash")
+	if err := os.WriteFile(approvalPath, approvalHash, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: write approval hash: %v\n", err)
+		return 1
+	}
+	// Verify the operator can actually unwrap (guards against a corrupt
+	// blob or a bad PIN that decrypted to junk).
+	fmt.Fprintln(os.Stderr, "  ✓ identity installed. Verifying by unwrapping…")
+	pass, err := readPassphrase("Admin passphrase (same one used on the inviting machine): ", pfromStdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+		return 1
+	}
+	if _, err := admin.LoadAndUnwrap(paths, pass); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: unwrap failed: %v\n", err)
+		fmt.Fprintln(os.Stderr, "  (make sure you're typing the SAME passphrase as on the inviting machine.)")
+		fmt.Fprintln(os.Stderr, "  the installed key file remains — retry `dop admin login`, or `dop admin reset` and re-run join.")
+		return 1
+	}
+	fmt.Fprintln(os.Stderr, "  ✓ unwrap OK — this machine is now the SAME admin as the inviting machine.")
+
+	// Clean up the blob + invite so M1's polling loop can exit.
+	if err := admininvite.Delete(paths, inv.InviteID); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: cleanup: %v (non-fatal)\n", err)
+	}
+	_ = os.Remove(admininvite.IdentityBlobPath(paths, inv.InviteID))
+	_ = runGit(io.Discard, paths.Vault, "add", "-A", "pending-admin-invites")
+	_ = runGit(io.Discard, paths.Vault, "commit", "-m",
+		fmt.Sprintf("dop: consume shared-identity invite %s", inv.InviteID[:8]),
+		"--allow-empty")
+	_ = runGit(io.Discard, paths.Vault, "push")
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "  ✓ done. `dop admin login` will accept the same passphrase you used on the inviting machine.")
+	return 0
 }
 
 var _ = errors.New // keep tidy

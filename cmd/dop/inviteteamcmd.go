@@ -33,9 +33,10 @@ func runTeamInvite(args []string) int {
 	fs := flag.NewFlagSet("team invite", flag.ExitOnError)
 	name := fs.String("name", "", "human-readable label for the new admin device (required)")
 	kind := fs.String("kind", "device", "\"device\" (another machine of yours) or \"team_member\"")
-	pfromStdin := fs.Bool("passphrase-stdin", false, "read approval passphrase from stdin (testing only)")
+	pfromStdin := fs.Bool("passphrase-stdin", false, "read passphrase(s) from stdin (testing only)")
 	timeoutStr := fs.String("timeout", "30m", "how long to wait for the response before giving up")
 	pinTTL := fs.String("pin-ttl", "30m", "invite validity window")
+	shareIdentity := fs.Bool("share-identity", false, "give the joining machine THIS machine's admin identity (Flavor Y — single revocation surface across devices)")
 	_ = fs.Parse(args)
 
 	if strings.TrimSpace(*name) == "" {
@@ -84,19 +85,31 @@ func runTeamInvite(args []string) int {
 	}
 	now := time.Now().UTC().Truncate(time.Second)
 	inv := admininvite.Invite{
-		InviteID:     inviteID,
-		Name:         *name,
-		PinHash:      admininvite.HashPIN(inviteID, pin),
-		CreatedAt:    now,
-		ExpiresAt:    now.Add(pinDur),
-		CreatedByPub: st.AdminPubkey,
-		Kind:         *kind,
+		InviteID:      inviteID,
+		Name:          *name,
+		PinHash:       admininvite.HashPIN(inviteID, pin),
+		CreatedAt:     now,
+		ExpiresAt:     now.Add(pinDur),
+		CreatedByPub:  st.AdminPubkey,
+		Kind:          *kind,
+		ShareIdentity: *shareIdentity,
 	}
 	if err := admininvite.WriteInvite(paths, inv); err != nil {
 		fmt.Fprintf(os.Stderr, "dop team invite: write invite: %v\n", err)
 		return 1
 	}
-	if err := gitAddCommitPush(paths.Vault, filepath.Join("pending-admin-invites", inviteID+".invite.json"),
+	// v1.9.3 — Flavor Y: also stage the encrypted identity blob so M2
+	// can install M1's admin keys directly (no new admin entry).
+	if *shareIdentity {
+		if rc := writeShareBlob(paths, inviteID, pin, *pfromStdin); rc != 0 {
+			return rc
+		}
+	}
+	commitPath := filepath.Join("pending-admin-invites", inviteID+".invite.json")
+	if *shareIdentity {
+		commitPath = filepath.Join("pending-admin-invites")
+	}
+	if err := gitAddCommitPush(paths.Vault, commitPath,
 		fmt.Sprintf("dop: open admin invite %s (%s)", inviteID[:8], *name)); err != nil {
 		fmt.Fprintf(os.Stderr, "dop team invite: push invite: %v — run `dop push` manually\n", err)
 		return 1
@@ -147,6 +160,22 @@ func runTeamInvite(args []string) int {
 
 		if err := gitQuiet(paths.Vault, "pull", "--ff-only"); err != nil {
 			continue // transient
+		}
+		// v1.9.3 — shared-identity: M2 consumes the invite by deleting
+		// the invite file after installing the identity locally. No
+		// response file is needed; just detect the disappearance.
+		if *shareIdentity {
+			if _, err := admininvite.ReadInvite(paths, inviteID); os.IsNotExist(err) {
+				fmt.Fprintln(os.Stderr)
+				fmt.Fprintln(os.Stderr, "  ✓ shared-identity join completed on the other machine.")
+				audit.Append(paths, audit.Event{
+					Kind:    audit.EventInviteComplete,
+					Subject: *name,
+					Extra:   map[string]string{"invite_id": inviteID, "shared": "true"},
+				})
+				return 0
+			}
+			continue
 		}
 		resp, err := admininvite.ReadResponse(paths, inviteID)
 		if err != nil {
@@ -253,6 +282,37 @@ func gitAddCommitPush(dir, addPath, msg string) error {
 		return err
 	}
 	return runGit(io.Discard, dir, "push")
+}
+
+// writeShareBlob (v1.9.3) — reads the wrapped admin key + approval hash
+// from disk, encrypts them with a PIN-derived argon2id key, and writes
+// the ciphertext to <invite_id>.identity-blob inside the vault so M2
+// can install M1's identity directly.
+func writeShareBlob(paths *config.Paths, inviteID, pin string, pfromStdin bool) int {
+	_ = pfromStdin
+	adminKeyPath := admin.KeyFile(paths)
+	adminKeyBytes, err := os.ReadFile(adminKeyPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team invite: read admin key: %v\n", err)
+		return 1
+	}
+	approvalPath := filepath.Join(paths.KeysDir, "approval.hash")
+	approvalBytes, err := os.ReadFile(approvalPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team invite: read approval hash: %v\n", err)
+		return 1
+	}
+	blob, err := admininvite.EncryptIdentityBlob(pin, inviteID, adminKeyBytes, approvalBytes)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team invite: encrypt identity blob: %v\n", err)
+		return 1
+	}
+	p := admininvite.IdentityBlobPath(paths, inviteID)
+	if err := os.WriteFile(p, blob, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "dop team invite: write identity blob: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // vault package alias just to keep the imports honest.

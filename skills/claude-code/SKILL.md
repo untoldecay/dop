@@ -22,15 +22,28 @@ DOP holds service credentials in a per-agent scoped vault. Always invoke the tar
 
 ## Onboarding (first time the user hands you access)
 
-If the user gives you a bearer AND a PIN (something like `SP-BZ-SA`), bind first:
+If the user hands you the DOP welcome text (starts with "You have been given scoped credential access via DOP"), it already contains the exact command. Run it verbatim:
 
 ```bash
 DOP_TOKEN=<bearer> dop claim <PIN>
 ```
 
-`dop claim` will print a QR code + a public URL and block. The user scans the QR on their phone (or opens the URL), enters their DOP approval passphrase, and approves. Then `dop claim` records this agent's cryptographic identity and writes a private key to `~/.dop/agent-keys/<lookup_id>.key`. Subsequent `dop exec` calls prove possession of that key automatically.
+`dop claim` will block for up to 5 minutes waiting for the user to approve on their phone. **While it runs, it prints a structured header on stderr with these fields:**
 
-**Wait for the approval — do not cancel and retry.** The approval window is 2 minutes; if it expires, ask the user for a fresh PIN via `dop token repin --subject <name>`.
+```
+QR image: /Users/you/Library/Application Support/dop/pending-claims/<hex>.qr.png
+Public URL: https://random-name.trycloudflare.com/c/<hex>
+LAN URL: http://192.168.1.42:57553/c/<hex>
+```
+
+**What you MUST do next:**
+
+1. **Attach the QR image file to your reply in this chat** (in Claude Code, use your file-display tool such as `SendUserFile` with the exact path from the `QR image:` line). This lets the user see + scan the QR right in the chat without leaving.
+2. **Print the `Public URL` line as text** so the user can copy it and open on their phone if scanning fails.
+3. Tell the user: *"Scan the QR above or open the URL on your phone, then enter your DOP approval passphrase to approve this binding."*
+4. **Then wait — do NOT retry the claim.** It blocks until the user approves. The command will exit successfully on its own.
+
+**Do NOT try to render the QR from ASCII or Unicode blocks yourself.** The terminal will show its own Unicode QR after the structured header — ignore it. The PNG file is the authoritative version.
 
 If the user only gives you a bearer (no PIN), the token was issued with `--no-bind` — skip claim, jump straight to `dop exec`.
 

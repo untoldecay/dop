@@ -32,6 +32,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"net"
 	"net/http"
@@ -42,6 +45,7 @@ import (
 	"time"
 
 	"github.com/mdp/qrterminal/v3"
+	"rsc.io/qr"
 
 	"github.com/fray/dop/internal/approvalserver"
 	"github.com/fray/dop/internal/audit"
@@ -562,16 +566,28 @@ func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex stri
 		},
 	})
 
-	// Print QR + text URL.
+	// v1.9.3: also write a PNG QR so an AI agent can attach it in chat
+	// (Unicode terminal QR is unreliable for anything but a human eye).
+	qrPath := filepath.Join(paths.Root, "pending-claims", lookupID+".qr.png")
+	_ = writeQRPNG(publicURL, qrPath)
+
+	// Structured header — the labelled lines are parseable by an agent
+	// skill so the file + URL can be surfaced back into the chat.
 	fmt.Fprintf(os.Stderr, "\ndop claim: PENDING — approve within %s\n", pendingclaim.TTL)
 	fmt.Fprintf(os.Stderr, "  subject: %s\n", subject)
 	fmt.Fprintf(os.Stderr, "  SAS:     %s\n\n", sas)
-	qrterminal.GenerateHalfBlock(publicURL, qrterminal.L, os.Stderr)
-	fmt.Fprintf(os.Stderr, "\n  scan the QR, or open: %s\n", publicURL)
+	fmt.Fprintf(os.Stderr, "QR image: %s\n", qrPath)
+	fmt.Fprintf(os.Stderr, "Public URL: %s\n", publicURL)
 	if publicURL != localURL {
-		fmt.Fprintf(os.Stderr, "  (LAN fallback: %s)\n", localURL)
+		fmt.Fprintf(os.Stderr, "LAN URL: %s\n", localURL)
 	}
-	fmt.Fprintln(os.Stderr, "  the page asks for your DOP approval passphrase.")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "  → attach the QR image in this chat AND share the Public URL as text.")
+	fmt.Fprintln(os.Stderr, "  → the admin will scan the QR or open the URL on their phone,")
+	fmt.Fprintln(os.Stderr, "    enter the DOP approval passphrase, and this claim will unblock.")
+	fmt.Fprintln(os.Stderr)
+	// Unicode terminal QR — harmless for humans, ignored by agents.
+	qrterminal.GenerateHalfBlock(publicURL, qrterminal.L, os.Stderr)
 
 	// Clean up on Ctrl-C or terminal close. SIGHUP matters when the
 	// user closes the shell hosting `dop claim` — without trapping it
@@ -654,6 +670,43 @@ func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex stri
 			}
 		}
 	}
+}
+
+// writeQRPNG renders a QR code encoding text as a PNG at path (mode
+// 0644). Uses rsc.io/qr for encoding — already vendored via qrterminal.
+// A silent no-op if we can't create the target directory (a warning is
+// fine — the terminal render still works).
+func writeQRPNG(text, path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	c, err := qr.Encode(text, qr.M)
+	if err != nil {
+		return err
+	}
+	const scale = 12
+	sb := c.Image().Bounds()
+	w, h := sb.Dx()*scale, sb.Dy()*scale
+	quiet := 4 * scale
+	img := image.NewNRGBA(image.Rect(0, 0, w+2*quiet, h+2*quiet))
+	white := color.NRGBA{255, 255, 255, 255}
+	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {
+		for x := img.Rect.Min.X; x < img.Rect.Max.X; x++ {
+			img.Set(x, y, white)
+		}
+	}
+	src := c.Image()
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x+quiet, y+quiet, src.At(x/scale, y/scale))
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return png.Encode(f, img)
 }
 
 // displayHost turns the bind address into a URL-friendly host. If the
