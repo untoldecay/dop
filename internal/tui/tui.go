@@ -95,23 +95,14 @@ type rootModel struct {
 	flashMessage  string // one-shot info message shown below the menu
 
 	pendingCount int // v1.7 — surfaced as a banner above the menu
-
-	// v1.9.6 — progressive disclosure. When the full admin menu is
-	// active, top level shows section chips (Vault · Tokens · Team · …)
-	// plus a few top-level items (Status, Logout, Quit); enter on a
-	// chip expands that section. Empty means the menu is at the
-	// top-level "hub" view.
-	expandedSection string
 }
 
 type menuItem struct {
-	label     string
-	hint      string
-	key       string // single-key shortcut (for the footer legend only)
-	section   string // grouping header; empty = ungrouped
-	isSection bool   // true = a section chip (expands when selected)
-	count     int    // for section chips: number of child items
-	fn        func(*rootModel) (tea.Model, tea.Cmd)
+	label   string
+	hint    string
+	key     string // single-key shortcut (for the footer legend only)
+	section string // grouping header; empty = ungrouped
+	fn      func(*rootModel) (tea.Model, tea.Cmd)
 }
 
 func newRootModel() *rootModel {
@@ -176,121 +167,41 @@ func (m *rootModel) rebuildMenu() {
 			{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
 		}
 	case m.install == installAdmin && m.session == sessionUnlocked:
-		m.menu = m.buildFullMenu()
+		// Full menu, grouped per TUI_GUIDELINES.md. Restored in v1.9.11
+		// after user feedback that the v1.9.6 hub-and-drill view removed
+		// discoverability + tacked on friction for common actions.
+		m.menu = []menuItem{
+			// Vault
+			{section: "Vault", label: "Add integration", hint: "add a service + upstream tokens", fn: (*rootModel).openAddIntegration},
+			{section: "Vault", label: "Add grant", hint: "map a grant to an integration/token", fn: (*rootModel).openAddGrant},
+			{section: "Vault", label: "List integrations", hint: "show all integrations", fn: (*rootModel).openIntegrationList},
+			{section: "Vault", label: "Remove integration", hint: "delete (+ dependent grants)", fn: (*rootModel).openIntegrationRemove},
+			{section: "Vault", label: "List grants", hint: "show all grants", fn: (*rootModel).openGrantList},
+			{section: "Vault", label: "Remove grant", hint: "delete a grant", fn: (*rootModel).openGrantRemove},
+			// Tokens
+			{section: "Tokens", label: "Issue token", hint: "mint a new bearer", key: "i", fn: (*rootModel).openIssue},
+			{section: "Tokens", label: "List tokens", hint: "show active bearers", fn: (*rootModel).openList},
+			{section: "Tokens", label: "Revoke token", hint: "kill an issued bearer", fn: (*rootModel).openRevoke},
+			// Team
+			{section: "Team", label: "Add a device", hint: "invite another machine of yours (v1.9)", fn: (*rootModel).openInviteDevice},
+			{section: "Team", label: "Invite team member", hint: "invite another human as admin (v1.9)", fn: (*rootModel).openInviteMember},
+			{section: "Team", label: "Add team member (manual)", hint: "add another admin's pubkey directly", fn: (*rootModel).openTeamAdd},
+			{section: "Team", label: "List team", hint: "show all admins", fn: (*rootModel).openTeamList},
+			{section: "Team", label: "Remove team member", hint: "with rotation checklist", fn: (*rootModel).openTeamRemove},
+			// Sync
+			{section: "Sync", label: "Pull vault", hint: "git pull", fn: (*rootModel).openPull},
+			{section: "Sync", label: "Push vault", hint: "git add/commit/push", fn: (*rootModel).openPush},
+			// System
+			{section: "System", label: "Status", hint: "session state", key: "s", fn: (*rootModel).openStatus},
+			{section: "System", label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
+			{section: "System", label: "Logout", hint: "end admin session", key: "o", fn: (*rootModel).doLogout},
+			{section: "System", label: "Reset (wipe local state)", hint: "delete every DOP file on this machine", fn: (*rootModel).openReset},
+			{section: "System", label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
+		}
 	}
 	if m.cursor >= len(m.menu) {
 		m.cursor = 0
 	}
-}
-
-// fullMenuAll returns the flat catalogue of every admin-mode action.
-// The visible menu (buildFullMenu) either shows section chips or the
-// items of one expanded section — this is the underlying data.
-func (m *rootModel) fullMenuAll() []menuItem {
-	return []menuItem{
-		// Vault
-		{section: "Vault", label: "Add integration", hint: "add a service + upstream tokens", fn: (*rootModel).openAddIntegration},
-		{section: "Vault", label: "Add grant", hint: "map a grant to an integration/token", fn: (*rootModel).openAddGrant},
-		{section: "Vault", label: "List integrations", hint: "show all integrations", fn: (*rootModel).openIntegrationList},
-		{section: "Vault", label: "Remove integration", hint: "delete (+ dependent grants)", fn: (*rootModel).openIntegrationRemove},
-		{section: "Vault", label: "List grants", hint: "show all grants", fn: (*rootModel).openGrantList},
-		{section: "Vault", label: "Remove grant", hint: "delete a grant", fn: (*rootModel).openGrantRemove},
-		// Tokens
-		{section: "Tokens", label: "Issue token", hint: "mint a new bearer", key: "i", fn: (*rootModel).openIssue},
-		{section: "Tokens", label: "List tokens", hint: "show issued capabilities", fn: (*rootModel).openList},
-		{section: "Tokens", label: "Revoke token", hint: "kill an issued bearer", fn: (*rootModel).openRevoke},
-		// Team
-		{section: "Team", label: "Add a device", hint: "invite another machine of yours (v1.9)", fn: (*rootModel).openInviteDevice},
-		{section: "Team", label: "Invite team member", hint: "invite another human as admin (v1.9)", fn: (*rootModel).openInviteMember},
-		{section: "Team", label: "Add team member (manual)", hint: "add another admin's pubkey directly", fn: (*rootModel).openTeamAdd},
-		{section: "Team", label: "List team", hint: "show all admins", fn: (*rootModel).openTeamList},
-		{section: "Team", label: "Remove team member", hint: "with rotation checklist", fn: (*rootModel).openTeamRemove},
-		// Sync
-		{section: "Sync", label: "Pull vault", hint: "git pull", fn: (*rootModel).openPull},
-		{section: "Sync", label: "Push vault", hint: "git add/commit/push", fn: (*rootModel).openPush},
-		// System
-		{section: "System", label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
-		{section: "System", label: "Reset (wipe local state)", hint: "delete every DOP file on this machine", fn: (*rootModel).openReset},
-	}
-}
-
-// buildFullMenu renders either the "hub" (section chips + always-on
-// top-level actions) or the drilled-down items for one section.
-// v1.9.6 progressive disclosure — a top-level view that no longer
-// dumps every action at once.
-func (m *rootModel) buildFullMenu() []menuItem {
-	all := m.fullMenuAll()
-	if m.expandedSection == "" {
-		// Hub view.
-		sections := []string{"Vault", "Tokens", "Team", "Sync", "System"}
-		hints := map[string]string{
-			"Vault":  "integrations + grants",
-			"Tokens": "issue / list / revoke bearers",
-			"Team":   "devices + admins",
-			"Sync":   "git pull / push",
-			"System": "doctor · reset",
-		}
-		out := make([]menuItem, 0, len(sections)+4)
-		for _, s := range sections {
-			count := 0
-			for _, it := range all {
-				if it.section == s {
-					count++
-				}
-			}
-			out = append(out, menuItem{
-				label:     s,
-				hint:      hints[s],
-				section:   s,
-				isSection: true,
-				count:     count,
-				fn:        openSectionFn(s),
-			})
-		}
-		out = append(out,
-			menuItem{label: "Issue token", hint: "mint a new bearer (quick access)", key: "i", fn: (*rootModel).openIssue},
-			menuItem{label: "Status", hint: "session state", key: "s", fn: (*rootModel).openStatus},
-			menuItem{label: "Logout", hint: "end admin session", key: "o", fn: (*rootModel).doLogout},
-			menuItem{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
-		)
-		return out
-	}
-	// Drilled-in view: only items from the expanded section + a "Back" row.
-	out := []menuItem{
-		{label: "‹ Back to hub", hint: "return to section list", fn: (*rootModel).collapseSection},
-	}
-	for _, it := range all {
-		if it.section == m.expandedSection {
-			out = append(out, it)
-		}
-	}
-	return out
-}
-
-// openSectionFn returns a menuItem.fn that expands the named section.
-func openSectionFn(name string) func(*rootModel) (tea.Model, tea.Cmd) {
-	return func(m *rootModel) (tea.Model, tea.Cmd) {
-		m.expandedSection = name
-		m.cursor = 1 // land on the first item, past the Back row
-		m.rebuildMenu()
-		return m, nil
-	}
-}
-
-// collapseSection returns the menu to the hub view.
-func (m *rootModel) collapseSection() (tea.Model, tea.Cmd) {
-	prev := m.expandedSection
-	m.expandedSection = ""
-	m.rebuildMenu()
-	// Put cursor on the section chip we came from so the Back → hub
-	// motion feels reversible.
-	for i, it := range m.menu {
-		if it.isSection && it.section == prev {
-			m.cursor = i
-			break
-		}
-	}
-	return m, nil
 }
 
 func (m *rootModel) Init() tea.Cmd {
@@ -338,12 +249,7 @@ func (m *rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor < len(m.menu)-1 {
 				m.cursor++
 			}
-		case "left", "backspace", "esc", "h":
-			// v1.9.6 — collapse an expanded section back to the hub.
-			if m.expandedSection != "" {
-				return m.collapseSection()
-			}
-		case "enter", "right", "l", " ":
+		case "enter":
 			return m.menu[m.cursor].fn(m)
 		case "a":
 			if m.pendingCount > 0 {
@@ -388,36 +294,36 @@ func (m *rootModel) View() string {
 	}
 	b.WriteString("\n")
 
-	// Drilled-in view gets a small section breadcrumb before the items.
-	if m.expandedSection != "" {
-		b.WriteString(mutedSt.Render("▸ "+m.expandedSection) + "\n\n")
-	}
-
 	// Compute label column width across all items so descriptions align.
 	labelWidth := 0
 	for _, it := range m.menu {
-		disp := it.label
-		if it.isSection {
-			disp = fmt.Sprintf("%s (%d)", it.label, it.count)
-		}
-		if l := lipgloss.Width(disp); l > labelWidth {
+		if l := lipgloss.Width(it.label); l > labelWidth {
 			labelWidth = l
 		}
 	}
 	labelWidth += 2 // padding before description
 
+	// Render items, inserting section headers on transitions.
+	prevSection := ""
 	for i, it := range m.menu {
-		prefix := "    "
-		disp := it.label
-		if it.isSection {
-			disp = fmt.Sprintf("%s (%d)", it.label, it.count)
+		if it.section != prevSection && it.section != "" {
+			if prevSection != "" {
+				b.WriteString("\n")
+			}
+			b.WriteString("  " + mutedSt.Render(it.section) + "\n")
+			prevSection = it.section
+		} else if it.section == "" && prevSection != "" {
+			b.WriteString("\n")
+			prevSection = ""
 		}
-		label := disp
+
+		prefix := "    "
+		label := it.label
 		if i == m.cursor {
 			prefix = "  " + cursorSt.Render("➤ ")
-			label = cursorSt.Render(disp)
+			label = cursorSt.Render(it.label)
 		}
-		pad := labelWidth - lipgloss.Width(disp)
+		pad := labelWidth - lipgloss.Width(it.label)
 		if pad < 1 {
 			pad = 1
 		}
@@ -430,35 +336,19 @@ func (m *rootModel) View() string {
 	}
 
 	// Footer — a small legend of the most useful shortcuts.
-	footer := "↑↓ move · enter"
-	if m.expandedSection != "" {
-		footer += " · ← back"
-	} else if m.hasSection() {
-		footer += " open · s status · i issue"
-	} else {
-		if m.hasShortcut("s") {
-			footer += " · s status"
-		}
-		if m.hasShortcut("i") {
-			footer += " · i issue"
-		}
-		if m.hasShortcut("l") {
-			footer += " · l login"
-		}
+	footer := "↑↓ move · enter select"
+	if m.hasShortcut("s") {
+		footer += " · s status"
+	}
+	if m.hasShortcut("i") {
+		footer += " · i issue"
+	}
+	if m.hasShortcut("l") {
+		footer += " · l login"
 	}
 	footer += " · q quit"
 	b.WriteString("\n" + helpSt.Render(footer))
 	return b.String()
-}
-
-// hasSection reports whether any current menu item is a section chip.
-func (m *rootModel) hasSection() bool {
-	for _, it := range m.menu {
-		if it.isSection {
-			return true
-		}
-	}
-	return false
 }
 
 // hasShortcut reports whether any current menu item claims that key.

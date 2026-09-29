@@ -46,11 +46,12 @@ fi
 [[ "$BEARER" == tok_1* ]] || fail "bad bearer"
 pass "issued: $BEARER"
 
-echo "=== [A3] push to bare"
+echo "=== [A3] push to bare (auto-push may have already run — belt-and-suspenders)"
 cd "$VAULT_A"
 git config user.email "e2e@test" && git config user.name "e2e"
-git add -A && git commit -m "seed + issue" >/dev/null
-git push origin HEAD:main 2>/dev/null || git push -u origin HEAD:main 2>/dev/null
+git add -A 2>/dev/null || true
+git commit -m "seed + issue" >/dev/null 2>&1 || true
+git push origin HEAD:main 2>/dev/null || git push -u origin HEAD:main 2>/dev/null || true
 
 # --- Machine B: agent install ---
 echo "=== [B1] init --cache (no admin key generated)"
