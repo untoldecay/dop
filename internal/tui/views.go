@@ -763,19 +763,46 @@ type listView struct {
 	capabilities []vault.Capability
 	capIDs       []string
 	done         bool
+
+	// v1.10.0 picker state
+	mode          int    // listMode*
+	cursor        int    // index into visible()
+	actionCursor  int    // index into currentActions()
+	pendingAction string // "revoke" while confirming
+	showAll       bool   // false → hide revoked
+	err           string
+	flash         string
 }
+
+// v1.10.0 — the tokens list is now an interactive picker. Modes:
+//
+//	listModeList    ↑↓ pick, enter → action menu, a toggle show-all,
+//	                r quick-revoke, esc back
+//	listModeAction  ↑↓ pick action, enter → run, backspace/esc back
+//	listModeConfirm y/n confirm destructive
+//	listModeRun     subprocess in flight
+//	listModeDetail  full row, esc back
+const (
+	listModeList    = 0
+	listModeAction  = 1
+	listModeConfirm = 2
+	listModeRun     = 3
+	listModeDetail  = 4
+)
 
 func newListView(c *admin.Client, p *config.Paths) *listView {
 	return &listView{client: c, paths: p}
 }
 func (v *listView) Init() tea.Cmd { return v.load }
 func (v *listView) Done() bool    { return v.done }
+func (v *listView) Flash() string { return v.flash }
 
 type listLoadedMsg struct {
 	capabilities []vault.Capability
 	capIDs       []string
 	err          string
 }
+type listActionMsg struct{ err string }
 
 func (v *listView) load() tea.Msg {
 	vp := v.paths.Vault + "/vault.yaml"
@@ -794,14 +821,67 @@ func (v *listView) load() tea.Msg {
 	if err := yaml.Unmarshal(raw, &vv); err != nil {
 		return listLoadedMsg{err: err.Error()}
 	}
-	caps := make([]vault.Capability, 0, len(vv.Capabilities))
-	ids := make([]string, 0, len(vv.Capabilities))
+	// Sort by subject for a stable picker.
+	type kv struct {
+		id string
+		c  vault.Capability
+	}
+	all := make([]kv, 0, len(vv.Capabilities))
 	for id, c := range vv.Capabilities {
-		caps = append(caps, c)
-		ids = append(ids, id)
+		all = append(all, kv{id: id, c: c})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].c.Subject < all[j].c.Subject })
+	caps := make([]vault.Capability, len(all))
+	ids := make([]string, len(all))
+	for i, k := range all {
+		caps[i] = k.c
+		ids[i] = k.id
 	}
 	return listLoadedMsg{capabilities: caps, capIDs: ids}
 }
+
+// visible returns the indexes into v.capabilities that should be shown
+// under the current filter (revoked hidden unless showAll).
+func (v *listView) visible() []int {
+	out := []int{}
+	for i, c := range v.capabilities {
+		if !v.showAll && c.Status != capability.RecordStatusActive {
+			continue
+		}
+		out = append(out, i)
+	}
+	return out
+}
+
+func (v *listView) selectedIndex() int {
+	vis := v.visible()
+	if v.cursor < 0 || v.cursor >= len(vis) {
+		return -1
+	}
+	return vis[v.cursor]
+}
+
+// currentActions returns the actions allowed for the cursor's row.
+func (v *listView) currentActions() []listAction {
+	idx := v.selectedIndex()
+	if idx < 0 {
+		return nil
+	}
+	c := v.capabilities[idx]
+	acts := []listAction{{label: "View details", key: "d"}}
+	if c.Status == capability.RecordStatusActive {
+		acts = append(acts, listAction{label: "Revoke", key: "r", destructive: true})
+	}
+	acts = append(acts, listAction{label: "Back to list", key: "b"})
+	return acts
+}
+
+type listAction struct {
+	label       string
+	key         string
+	destructive bool
+}
+
 func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch mm := msg.(type) {
 	case listLoadedMsg:
@@ -809,42 +889,297 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.capabilities = mm.capabilities
 		v.capIDs = mm.capIDs
 		v.loadErr = mm.err
+	case listActionMsg:
+		if mm.err != "" {
+			v.err = mm.err
+			v.mode = listModeAction
+			return v, nil
+		}
+		v.flash = "revoked — reloading list"
+		v.mode = listModeList
+		v.err = ""
+		return v, v.load
 	case tea.KeyMsg:
-		if v.loaded {
-			v.done = true
+		if !v.loaded {
+			if mm.String() == "esc" || mm.String() == "ctrl+c" {
+				v.done = true
+			}
+			return v, nil
+		}
+		switch v.mode {
+		case listModeList:
+			return v.updateListMode(mm)
+		case listModeAction:
+			return v.updateActionMode(mm)
+		case listModeConfirm:
+			return v.updateConfirmMode(mm)
+		case listModeDetail:
+			// any key → back to list
+			v.mode = listModeList
 		}
 	}
 	return v, nil
 }
+
+func (v *listView) updateListMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	vis := v.visible()
+	switch mm.String() {
+	case "esc", "ctrl+c", "q":
+		v.done = true
+	case "up", "k":
+		if v.cursor > 0 {
+			v.cursor--
+		}
+	case "down", "j":
+		if v.cursor < len(vis)-1 {
+			v.cursor++
+		}
+	case "a":
+		v.showAll = !v.showAll
+		v.cursor = 0
+	case "enter":
+		if len(vis) == 0 {
+			return v, nil
+		}
+		v.mode = listModeAction
+		v.actionCursor = 0
+	case "r":
+		// quick-revoke shortcut when the row is active.
+		idx := v.selectedIndex()
+		if idx < 0 {
+			return v, nil
+		}
+		if v.capabilities[idx].Status != capability.RecordStatusActive {
+			return v, nil
+		}
+		v.mode = listModeConfirm
+		v.pendingAction = "revoke"
+	case "d":
+		if v.selectedIndex() >= 0 {
+			v.mode = listModeDetail
+		}
+	}
+	return v, nil
+}
+
+func (v *listView) updateActionMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	acts := v.currentActions()
+	switch mm.String() {
+	case "esc", "backspace":
+		v.mode = listModeList
+	case "up", "k":
+		if v.actionCursor > 0 {
+			v.actionCursor--
+		}
+	case "down", "j":
+		if v.actionCursor < len(acts)-1 {
+			v.actionCursor++
+		}
+	case "enter":
+		if v.actionCursor < 0 || v.actionCursor >= len(acts) {
+			return v, nil
+		}
+		return v.runAction(acts[v.actionCursor])
+	default:
+		// Shortcut keys.
+		for _, a := range acts {
+			if a.key == mm.String() {
+				return v.runAction(a)
+			}
+		}
+	}
+	return v, nil
+}
+
+func (v *listView) runAction(a listAction) (tea.Model, tea.Cmd) {
+	switch a.key {
+	case "d":
+		v.mode = listModeDetail
+	case "r":
+		v.mode = listModeConfirm
+		v.pendingAction = "revoke"
+	case "b":
+		v.mode = listModeList
+	}
+	return v, nil
+}
+
+func (v *listView) updateConfirmMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch mm.String() {
+	case "y", "Y", "enter":
+		if v.pendingAction == "revoke" {
+			v.mode = listModeRun
+			return v, v.doRevoke()
+		}
+	case "n", "N", "esc":
+		v.mode = listModeAction
+		v.pendingAction = ""
+	}
+	return v, nil
+}
+
+func (v *listView) doRevoke() tea.Cmd {
+	idx := v.selectedIndex()
+	if idx < 0 {
+		return func() tea.Msg { return listActionMsg{err: "no selection"} }
+	}
+	subject := v.capabilities[idx].Subject
+	return func() tea.Msg {
+		self, _ := os.Executable()
+		cmd := exec.Command(self, "token", "revoke", subject)
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return listActionMsg{err: strings.TrimSpace(stderr.String())}
+		}
+		return listActionMsg{}
+	}
+}
+
 func (v *listView) View() string {
 	var b strings.Builder
-	b.WriteString(titleSt.Render("Capabilities") + "\n\n")
+	b.WriteString(titleSt.Render("Tokens") + "\n\n")
 	if !v.loaded {
 		b.WriteString("loading…")
 		return b.String()
 	}
 	if v.loadErr != "" {
 		b.WriteString(failSt.Render(v.loadErr))
-		b.WriteString("\n\n" + helpSt.Render("any key to go back"))
+		b.WriteString("\n\n" + helpSt.Render("esc back"))
 		return b.String()
 	}
-	if len(v.capabilities) == 0 {
-		b.WriteString(mutedSt.Render("(no capabilities issued yet)"))
+
+	switch v.mode {
+	case listModeDetail:
+		return v.viewDetail()
+	case listModeConfirm:
+		return v.viewConfirm()
+	case listModeRun:
+		return v.viewRun()
 	}
-	for i, c := range v.capabilities {
+
+	vis := v.visible()
+	if len(vis) == 0 {
+		if v.showAll {
+			b.WriteString(mutedSt.Render("(no capabilities issued)"))
+		} else {
+			b.WriteString(mutedSt.Render("(no active capabilities — press `a` to include revoked)"))
+		}
+	}
+	for i, capIdx := range vis {
+		c := v.capabilities[capIdx]
 		statusStyle := okSt
 		if c.Status == capability.RecordStatusRevoked {
 			statusStyle = failSt
 		}
-		b.WriteString(fmt.Sprintf("  %s  %s  %s  gen=%d  expires=%s\n",
-			mutedSt.Render(v.capIDs[i][:12]),
-			c.Subject,
+		prefix := "    "
+		subj := c.Subject
+		if i == v.cursor && v.mode == listModeList {
+			prefix = "  " + cursorSt.Render("➤ ")
+			subj = cursorSt.Render(subj)
+		}
+		b.WriteString(fmt.Sprintf("%s%-24s  %s  gen=%d  expires=%s\n",
+			prefix, subj,
 			statusStyle.Render(c.Status),
 			c.Generation,
 			c.ExpiresAt.Format("2006-01-02")))
 	}
-	b.WriteString("\n" + helpSt.Render("any key to go back"))
+
+	hidden := len(v.capabilities) - len(vis)
+	if hidden > 0 && !v.showAll {
+		b.WriteString(mutedSt.Render(fmt.Sprintf("\n  (%d revoked hidden — press `a` to show)\n", hidden)))
+	}
+
+	if v.err != "" {
+		b.WriteString("\n" + failSt.Render(v.err) + "\n")
+	}
+	if v.flash != "" {
+		b.WriteString("\n" + okSt.Render(v.flash) + "\n")
+		v.flash = ""
+	}
+
+	if v.mode == listModeAction {
+		b.WriteString("\n" + v.renderActionMenu())
+	} else {
+		b.WriteString("\n" + helpSt.Render("↑↓ move · enter actions · d details · r revoke · a all · esc back"))
+	}
 	return b.String()
+}
+
+func (v *listView) renderActionMenu() string {
+	idx := v.selectedIndex()
+	if idx < 0 {
+		return ""
+	}
+	c := v.capabilities[idx]
+	var b strings.Builder
+	b.WriteString(mutedSt.Render(fmt.Sprintf("─── actions for %q ───", c.Subject)) + "\n")
+	for i, a := range v.currentActions() {
+		prefix := "    "
+		lbl := a.label
+		if i == v.actionCursor {
+			prefix = "  " + cursorSt.Render("➤ ")
+			lbl = cursorSt.Render(lbl)
+			if a.destructive {
+				lbl = failSt.Render(a.label)
+			}
+		} else if a.destructive {
+			lbl = failSt.Render(a.label)
+		}
+		b.WriteString(fmt.Sprintf("%s%s\n", prefix, lbl))
+	}
+	b.WriteString("\n" + helpSt.Render("↑↓ move · enter run · backspace back"))
+	return b.String()
+}
+
+func (v *listView) viewDetail() string {
+	idx := v.selectedIndex()
+	if idx < 0 {
+		return "no selection\n\n" + helpSt.Render("esc back")
+	}
+	c := v.capabilities[idx]
+	id := v.capIDs[idx]
+	var b strings.Builder
+	b.WriteString(titleSt.Render("Token: "+c.Subject) + "\n\n")
+	b.WriteString(fmt.Sprintf("  capability_id: %s\n", id))
+	b.WriteString(fmt.Sprintf("  status:        %s\n", c.Status))
+	b.WriteString(fmt.Sprintf("  generation:    %d\n", c.Generation))
+	b.WriteString(fmt.Sprintf("  grants:        %v\n", c.Grants))
+	b.WriteString(fmt.Sprintf("  created_at:    %s\n", c.CreatedAt.Format("2006-01-02 15:04 MST")))
+	b.WriteString(fmt.Sprintf("  expires_at:    %s\n", c.ExpiresAt.Format("2006-01-02 15:04 MST")))
+	b.WriteString(fmt.Sprintf("  issued_by:     %s\n", c.IssuedBy))
+	if c.Binding != nil {
+		b.WriteString(fmt.Sprintf("  binding:       %s\n", c.Binding.Kind))
+		if c.Binding.Pubkey != "" {
+			b.WriteString(fmt.Sprintf("  bound pubkey:  %s…\n", c.Binding.Pubkey[:24]))
+		} else if c.Binding.Kind == "pin" {
+			b.WriteString(mutedSt.Render("  (unclaimed — the agent hasn't run `dop claim` yet)\n"))
+		}
+	}
+	b.WriteString(mutedSt.Render("\n  Grants are baked into the bundle at issue time.\n"))
+	b.WriteString(mutedSt.Render("  To change grants → revoke + reissue.\n"))
+	b.WriteString(mutedSt.Render("  To change projects/tags on a grant → use `List grants`.\n"))
+	b.WriteString("\n" + helpSt.Render("any key back"))
+	return b.String()
+}
+
+func (v *listView) viewConfirm() string {
+	idx := v.selectedIndex()
+	if idx < 0 {
+		return "no selection"
+	}
+	c := v.capabilities[idx]
+	var b strings.Builder
+	b.WriteString(titleSt.Render("Revoke token?") + "\n\n")
+	b.WriteString(fmt.Sprintf("  subject: %s\n  grants:  %v\n\n", c.Subject, c.Grants))
+	b.WriteString(failSt.Render("This is immediate — the bearer will fail on next exec.") + "\n")
+	b.WriteString("\n" + helpSt.Render("y confirm · n cancel"))
+	return b.String()
+}
+
+func (v *listView) viewRun() string {
+	return titleSt.Render("Revoking…") + "\n\n" + mutedSt.Render("running dop token revoke…")
 }
 
 // silence unused imports pinned to future views
