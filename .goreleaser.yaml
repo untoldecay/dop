@@ -27,10 +27,27 @@ builds:
       - -X main.version={{.Version}}
       - -X main.commit={{.Commit}}
       - -X main.date={{.Date}}
+  - id: dop-credential-git
+    main: ./cmd/dop-credential-git
+    binary: dop-credential-git
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
 
 archives:
   - id: dop
     formats: [tar.gz]
+    # Bundle both binaries into one archive per (os, arch).
+    ids:
+      - dop
+      - dop-credential-git
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     format_overrides:
