@@ -149,6 +149,7 @@ func (m *rootModel) rebuildMenu() {
 		m.menu = []menuItem{
 			{label: "Setup admin", hint: "generate + wrap admin keys", key: "S", fn: (*rootModel).openSetupAdmin},
 			{label: "Attach vault", hint: "join an existing vault as agent", key: "a", fn: (*rootModel).openAttachAgent},
+			{label: "Join existing vault", hint: "become an admin device via invite PIN (v1.9)", key: "j", fn: (*rootModel).openJoin},
 			{label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
 			{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
 		}
@@ -180,7 +181,9 @@ func (m *rootModel) rebuildMenu() {
 			{section: "Tokens", label: "List tokens", hint: "show issued capabilities", fn: (*rootModel).openList},
 			{section: "Tokens", label: "Revoke token", hint: "kill an issued bearer", fn: (*rootModel).openRevoke},
 			// Team
-			{section: "Team", label: "Add team member", hint: "add another admin's pubkey", fn: (*rootModel).openTeamAdd},
+			{section: "Team", label: "Add a device", hint: "invite another machine of yours (v1.9)", fn: (*rootModel).openInviteDevice},
+			{section: "Team", label: "Invite team member", hint: "invite another human as admin (v1.9)", fn: (*rootModel).openInviteMember},
+			{section: "Team", label: "Add team member (manual)", hint: "add another admin's pubkey directly", fn: (*rootModel).openTeamAdd},
 			{section: "Team", label: "List team", hint: "show all admins", fn: (*rootModel).openTeamList},
 			{section: "Team", label: "Remove team member", hint: "with rotation checklist", fn: (*rootModel).openTeamRemove},
 			// Sync
@@ -465,6 +468,18 @@ func (m *rootModel) openRevoke() (tea.Model, tea.Cmd) {
 }
 func (m *rootModel) openTeamAdd() (tea.Model, tea.Cmd) {
 	m.child = newTeamAddView(m.adminClient, m.paths)
+	return m, m.child.Init()
+}
+func (m *rootModel) openInviteDevice() (tea.Model, tea.Cmd) {
+	m.child = newInviteView(m.paths, inviteKindDevice)
+	return m, m.child.Init()
+}
+func (m *rootModel) openInviteMember() (tea.Model, tea.Cmd) {
+	m.child = newInviteView(m.paths, inviteKindTeamMember)
+	return m, m.child.Init()
+}
+func (m *rootModel) openJoin() (tea.Model, tea.Cmd) {
+	m.child = newJoinView(m.paths)
 	return m, m.child.Init()
 }
 func (m *rootModel) openTeamList() (tea.Model, tea.Cmd) {
