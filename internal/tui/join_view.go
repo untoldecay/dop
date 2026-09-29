@@ -199,13 +199,14 @@ func (v *joinView) launch() tea.Cmd {
 			return inviteDone{rc: 1, err: err.Error()}
 		}
 		// Feed passphrases into stdin.
-		//   - If key exists: single admin-pass line.
-		//   - If not: newAdmin1 + newApproval + adminPass=newAdmin1 (for unwrap).
+		//   - If key exists: single admin-pass line (unwrap only).
+		//   - If not: newAdmin1 + newApproval (v1.9.2: adminInitInline caches
+		//     newAdmin1 and reuses it for the unwrap — no third read).
 		var lines []string
 		if v.keyExists {
 			lines = []string{v.adminPass.String()}
 		} else {
-			lines = []string{v.newAdmin1.String(), v.newApproval.String(), v.newAdmin1.String()}
+			lines = []string{v.newAdmin1.String(), v.newApproval.String()}
 		}
 		for _, ln := range lines {
 			_, _ = stdin.Write([]byte(ln + "\n"))
@@ -249,7 +250,10 @@ func (v *joinView) View() string {
 	if v.keyExists {
 		b.WriteString(mutedSt.Render("this machine already has an admin key — will use it") + "\n\n")
 	} else {
-		b.WriteString(mutedSt.Render("no admin key yet — will create one during join") + "\n\n")
+		b.WriteString(mutedSt.Render("no admin key yet — we'll create one now.") + "\n")
+		b.WriteString(mutedSt.Render("you'll set TWO secrets (see hints inline).") + "\n")
+		b.WriteString(mutedSt.Render("tip: reuse the passphrases from your other machine ") +
+			mutedSt.Render("— identity is per-device but passphrases can be shared.") + "\n\n")
 	}
 
 	rows := []struct {
@@ -271,21 +275,40 @@ func (v *joinView) View() string {
 			label string
 			val   string
 			mask  bool
-		}{"NEW admin passphrase", v.newAdmin1.String(), true})
+		}{"NEW admin passphrase (≥ 8 chars) — unwraps your local keys", v.newAdmin1.String(), true})
 		rows = append(rows, struct {
 			label string
 			val   string
 			mask  bool
-		}{"NEW approval passphrase", v.newApproval.String(), true})
+		}{"NEW approval passphrase (≥ 10 chars) — confirms phone approvals", v.newApproval.String(), true})
+	}
+
+	// v1.9.2: map v.step → row index. When keyExists=false we use steps
+	// 0,1,3,4 (skipping 2 which is the keyExists-only unwrap prompt), so
+	// treating step as the row index directly is off-by-one.
+	activeRow := -1
+	switch v.step {
+	case 0:
+		activeRow = 0
+	case 1:
+		activeRow = 1
+	case 2:
+		activeRow = 2 // keyExists: admin-unwrap
+	case 3:
+		activeRow = 2 // !keyExists: NEW admin passphrase
+	case 4:
+		activeRow = 3 // !keyExists: NEW approval passphrase
 	}
 
 	for i, r := range rows {
 		style := mutedSt
-		if i == v.step {
+		if i == activeRow {
 			style = cursorSt
 		}
-		if v.step > i || v.step == 5 || v.step == 6 {
-			// past/completed step
+		if activeRow >= 0 && i < activeRow {
+			style = mutedSt // past step
+		}
+		if v.step == 5 || v.step == 6 {
 			style = mutedSt
 		}
 		b.WriteString(style.Render(r.label) + ": ")
@@ -294,7 +317,7 @@ func (v *joinView) View() string {
 			v2 = strings.Repeat("•", len(r.val))
 		}
 		b.WriteString(v2)
-		if i == v.step {
+		if i == activeRow && v.step < 5 {
 			b.WriteString(cursorSt.Render("▎"))
 		}
 		b.WriteString("\n")

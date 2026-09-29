@@ -193,6 +193,7 @@ func (m *rootModel) rebuildMenu() {
 			{section: "System", label: "Status", hint: "session state", key: "s", fn: (*rootModel).openStatus},
 			{section: "System", label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
 			{section: "System", label: "Logout", hint: "end admin session", key: "o", fn: (*rootModel).doLogout},
+			{section: "System", label: "Reset (wipe local state)", hint: "delete every DOP file on this machine (v1.9.2)", fn: (*rootModel).openReset},
 			{section: "System", label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
 		}
 	}
@@ -480,6 +481,10 @@ func (m *rootModel) openInviteMember() (tea.Model, tea.Cmd) {
 }
 func (m *rootModel) openJoin() (tea.Model, tea.Cmd) {
 	m.child = newJoinView(m.paths)
+	return m, m.child.Init()
+}
+func (m *rootModel) openReset() (tea.Model, tea.Cmd) {
+	m.child = newResetView(m.paths)
 	return m, m.child.Init()
 }
 func (m *rootModel) openTeamList() (tea.Model, tea.Cmd) {
