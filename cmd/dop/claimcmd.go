@@ -41,6 +41,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -718,17 +719,27 @@ func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex stri
 
 	if asJSON {
 		payload := map[string]any{
-			"event":         "pending",
-			"state":         "pending",
-			"subject":       subject,
-			"sas":           sas,
-			"lookup_id":     lookupID,
-			"public_url":    publicURL,
-			"lan_url":       localURL,
-			"qr_png":        qrPath,
-			"expires_at":    rec.ExpiresAt.Format(time.RFC3339),
-			"ttl_seconds":   int(pendingclaim.TTL / time.Second),
-			"cancel_hint":   "dop claim --cancel",
+			"event":       "pending",
+			"state":       "pending",
+			"subject":     subject,
+			"sas":         sas,
+			"lookup_id":   lookupID,
+			"public_url":  publicURL,
+			"lan_url":     localURL,
+			"qr_png":      qrPath,
+			"expires_at":  rec.ExpiresAt.Format(time.RFC3339),
+			"ttl_seconds": int(pendingclaim.TTL / time.Second),
+			"cancel_hint": "dop claim --cancel",
+			// v1.9.6 — agent-facing playbook. The clipboard message shown
+			// to the user is now just the run command; the agent gets its
+			// full brief here so nothing has to leak into the user's chat.
+			"agent_instructions": []string{
+				"attach the qr_png file to this chat with your file-display tool (e.g. SendUserFile) so the user can scan it inline",
+				"share public_url as plain text so the user can also open it on their phone",
+				"tell the user: scan the QR or open the URL, then enter your DOP approval passphrase",
+				"do NOT retry this command — it blocks until approval and then emits a `result` event on stdout",
+				"if you need to abort (timeout, wrong PIN, user changed their mind): run `DOP_TOKEN=<same> dop claim --cancel` in another shell",
+			},
 		}
 		emitJSON(payload)
 	} else {
@@ -758,6 +769,19 @@ func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex stri
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigCh)
+
+	// v1.9.6 — tunnel health-check + one-shot auto-restart. Quick
+	// tunnels die often enough that a user's phone-side approval was
+	// hitting HTTP 530 with no way to notice. Every 20s we HEAD the
+	// public URL; after two consecutive failures we tear the tunnel
+	// down + bring up a fresh one, push the new URL through JSON, and
+	// keep going. The LAN URL never changes and remains a reliable
+	// fallback the whole time.
+	stopHealth := make(chan struct{})
+	defer close(stopHealth)
+	if tun != nil && !noTunnel {
+		go tunnelHealthLoop(&tun, srv, subject, sas, lookupID, qrPath, rec, localURL, asJSON, stopHealth)
+	}
 
 	// Wait on: (1) the web server signaling a decision, (2) the pending
 	// file's on-disk state (CLI `dop approve <SAS>` flow), (3) TTL, (4)
@@ -845,6 +869,111 @@ func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex stri
 	}
 }
 
+// tunnelHealthLoop polls the current tunnel URL every 20s and, on two
+// consecutive failures, tears down the dead tunnel and starts a fresh
+// one. The srv's PublicURL and the caller's tun pointer are both
+// updated so subsequent JSON events (and the approval page) reflect
+// the new URL. Emits stderr + JSON warnings so agents / humans can
+// see what happened.
+//
+// The LAN URL never changes; if cloudflared is permanently unreachable
+// we give up trying to restart after one attempt and leave the LAN
+// path as the fallback.
+func tunnelHealthLoop(tunPtr **tunnel.Tunnel, srv *approvalserver.Server,
+	subject, sas, lookupID, qrPath string, rec pendingclaim.Record,
+	localURL string, asJSON bool, stop <-chan struct{}) {
+
+	tick := time.NewTicker(20 * time.Second)
+	defer tick.Stop()
+	consecutiveFail := 0
+	restartAttempted := false
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+		}
+		if *tunPtr == nil {
+			return
+		}
+		cur := (*tunPtr).URL
+		if !tunnel.CheckAlive(cur, 5*time.Second) {
+			consecutiveFail++
+			if consecutiveFail < 2 {
+				continue
+			}
+			if restartAttempted {
+				fmt.Fprintln(os.Stderr, "\ndop claim: tunnel remains unreachable — use the LAN URL if you're on the same network.")
+				return
+			}
+			restartAttempted = true
+			fmt.Fprintf(os.Stderr, "\ndop claim: ⚠  tunnel appears dead — restarting cloudflared…\n")
+			(*tunPtr).Stop()
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			t, err := tunnel.Start(ctx, srvPort(srv, localURL), 15*time.Second)
+			cancel()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "dop claim: tunnel restart failed: %v — falling back to LAN URL: %s\n", err, localURL)
+				*tunPtr = nil
+				return
+			}
+			*tunPtr = t
+			// srv.DisplayToken was baked into the URL path when the
+			// approval page was set up — reuse it so the new tunnel URL
+			// still routes to /c/<token>.
+			newPublic := t.URL + "/c/" + srv.DisplayToken
+			srv.PublicURL = newPublic
+			fmt.Fprintf(os.Stderr, "dop claim: ✓ tunnel back up — new public URL: %s\n", newPublic)
+			if asJSON {
+				emitJSON(map[string]any{
+					"event":      "tunnel_reset",
+					"state":      "pending",
+					"subject":    subject,
+					"sas":        sas,
+					"lookup_id":  lookupID,
+					"public_url": newPublic,
+					"lan_url":    localURL,
+					"qr_png":     qrPath,
+					"expires_at": rec.ExpiresAt.Format(time.RFC3339),
+					"note":       "the previous public_url is dead — reshare THIS one",
+				})
+			}
+			consecutiveFail = 0
+		} else {
+			consecutiveFail = 0
+		}
+	}
+}
+
+// srvPort extracts the local listener port from the LAN URL we already
+// built for display. The URL looks like http://<host>:<port>/c/<token>.
+// Kept trivial — we only need this on the sad path.
+func srvPort(_ *approvalserver.Server, localURL string) int {
+	// Find "://<host>:<port>/". Trust the input shape.
+	i := strings.Index(localURL, "://")
+	if i < 0 {
+		return 0
+	}
+	rest := localURL[i+3:]
+	colon := strings.IndexByte(rest, ':')
+	if colon < 0 {
+		return 0
+	}
+	after := rest[colon+1:]
+	slash := strings.IndexByte(after, '/')
+	if slash < 0 {
+		slash = len(after)
+	}
+	p := 0
+	for _, r := range after[:slash] {
+		if r < '0' || r > '9' {
+			return 0
+		}
+		p = p*10 + int(r-'0')
+	}
+	return p
+}
+
 // writeQRPNG renders a QR code encoding text as a PNG at path (mode
 // 0644). Uses rsc.io/qr for encoding — already vendored via qrterminal.
 // A silent no-op if we can't create the target directory (a warning is
@@ -857,10 +986,14 @@ func writeQRPNG(text, path string) error {
 	if err != nil {
 		return err
 	}
-	const scale = 12
+	// v1.9.6 — tighten canvas: bigger modules, minimal quiet zone (2
+	// modules, still scannable by any real reader). Previously the file
+	// was ~40% white margin; now it's tight around the code so the QR
+	// dominates the image in chat previews.
+	const scale = 16
 	sb := c.Image().Bounds()
 	w, h := sb.Dx()*scale, sb.Dy()*scale
-	quiet := 4 * scale
+	quiet := 2 * scale
 	img := image.NewNRGBA(image.Rect(0, 0, w+2*quiet, h+2*quiet))
 	white := color.NRGBA{255, 255, 255, 255}
 	for y := img.Rect.Min.Y; y < img.Rect.Max.Y; y++ {

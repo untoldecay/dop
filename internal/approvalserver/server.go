@@ -312,6 +312,16 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
     background: var(--input-bg); padding: .2rem .5rem; border-radius: 6px;
     white-space: nowrap;
   }
+  .id {
+    margin: -.5rem 0 1rem;
+    padding: .75rem .85rem;
+    background: color-mix(in srgb, var(--brand) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--brand) 30%, transparent);
+    border-radius: 8px;
+    font-size: .95rem;
+  }
+  .id .who { font-weight: 600; color: var(--text); }
+  .id .meta { color: var(--muted); font-size: .82rem; margin-top: .2rem; }
   dl { margin: 0 0 1.25rem; font-size: .95rem; }
   dt { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; margin-top: .75rem; }
   dt:first-child { margin-top: 0; }
@@ -372,8 +382,11 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
       <h1>DOP · pending claim</h1>
       <span class="ttl">{{.TTLLeft}} left</span>
     </div>
+    <div class="id">
+      You are approving <span class="who">{{.Subject}}</span> on <span class="who">{{.Host}}</span>
+      <div class="meta">started {{.StartedAt}} · SAS {{.SAS}}</div>
+    </div>
     <dl>
-      <dt>Subject</dt><dd>{{.Subject}}</dd>
       <dt>Agent pubkey</dt><dd>{{.PubkeyShort}}</dd>
       <dt>SAS code</dt><dd class="sas">{{.SAS}}</dd>
     </dl>
@@ -400,8 +413,14 @@ func (s *Server) renderPage(w http.ResponseWriter, errMsg, _ string) {
 	if len(pubShort) > 24 {
 		pubShort = pubShort[:24] + "…"
 	}
+	host := s.Pending.Host
+	if host == "" {
+		host = "(unknown host)"
+	}
 	data := struct {
 		Subject     string
+		Host        string
+		StartedAt   string
 		PubkeyShort string
 		SAS         string
 		TTLLeft     string
@@ -409,6 +428,8 @@ func (s *Server) renderPage(w http.ResponseWriter, errMsg, _ string) {
 		Token       string
 	}{
 		Subject:     s.Pending.Subject,
+		Host:        host,
+		StartedAt:   s.Pending.StartedAt.Format("15:04:05 UTC"),
 		PubkeyShort: pubShort,
 		SAS:         s.Pending.SAS,
 		TTLLeft:     time.Until(s.Pending.ExpiresAt).Round(time.Second).String(),

@@ -82,7 +82,12 @@ func runAdminJoin(args []string) int {
 		fmt.Fprintln(os.Stderr, "dop admin join: this invite has expired — ask for a fresh one")
 		return 1
 	}
+	mode := "per-device identity (Flavor X)"
+	if inv.ShareIdentity {
+		mode = "SHARED identity (Flavor Y) — same admin key as the inviting machine"
+	}
 	fmt.Fprintf(os.Stderr, "  ✓ invite matched: %q (id %s)\n", inv.Name, inv.InviteID[:8])
+	fmt.Fprintf(os.Stderr, "    mode: %s\n", mode)
 
 	// Flavor Y — shared identity: install M1's keys directly, no new
 	// admin entry to negotiate.
@@ -268,6 +273,9 @@ func runAdminJoinShared(paths *config.Paths, inv *admininvite.Invite, pin string
 	blob, err := os.ReadFile(admininvite.IdentityBlobPath(paths, inv.InviteID))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin join: shared-identity blob missing: %v\n", err)
+		fmt.Fprintln(os.Stderr, "  the invite is marked share_identity=true but no *.identity-blob file exists in pending-admin-invites/.")
+		fmt.Fprintln(os.Stderr, "  both machines must be on dop v1.9.3 or newer for this to work — check `dop version` on the inviting machine.")
+		fmt.Fprintln(os.Stderr, "  fix: on M1, cancel this invite + re-run `dop team invite` with the newer binary.")
 		return 1
 	}
 	adminKey, approvalHash, err := admininvite.DecryptIdentityBlob(pin, inv.InviteID, blob)
@@ -287,8 +295,9 @@ func runAdminJoinShared(paths *config.Paths, inv *admininvite.Invite, pin string
 	}
 	// Verify the operator can actually unwrap (guards against a corrupt
 	// blob or a bad PIN that decrypted to junk).
-	fmt.Fprintln(os.Stderr, "  ✓ identity installed. Verifying by unwrapping…")
-	pass, err := readPassphrase("Admin passphrase (same one used on the inviting machine): ", pfromStdin)
+	fmt.Fprintln(os.Stderr, "  ✓ identity installed. Now CONFIRM by typing the SAME admin passphrase you set on the inviting machine.")
+	fmt.Fprintln(os.Stderr, "    (this is a check, not a new passphrase — no confirmation prompt will follow.)")
+	pass, err := readPassphrase("Confirm the admin passphrase from the inviting machine: ", pfromStdin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
 		return 1
