@@ -4,7 +4,9 @@
 package main
 
 import (
+	"bufio"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -15,9 +17,13 @@ import (
 	"time"
 
 	"github.com/fray/dop/internal/admin"
+	"github.com/fray/dop/internal/approval"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/pendingclaim"
+	"github.com/fray/dop/internal/trust"
+	"github.com/fray/dop/internal/tunnel"
 	"github.com/fray/dop/internal/vault"
 )
 
@@ -277,6 +283,36 @@ func runDoctor(args []string) int {
 		line("⋯", "admin:session", "locked")
 	}
 
+	// --- v1.7 doctor: additional runtime + on-disk health checks ---
+	// (always-on; the --security section below adds paranoia-mode)
+	if _, err := exec.LookPath("cloudflared"); err != nil {
+		line("!", "binary:cloudflared", "not on $PATH — web approval falls back to LAN")
+	} else {
+		line("✓", "binary:cloudflared", "on $PATH")
+	}
+	if approval.Configured(paths) {
+		line("✓", "admin:approval-passphrase", "configured")
+	} else if adminOK {
+		line("✗", "admin:approval-passphrase", "not set — run `dop admin set-approval`")
+	}
+	trustPath := trust.Path(paths)
+	if trusted, err := trust.Load(paths); err == nil && len(trusted) > 0 {
+		line("✓", "vault:trust", fmt.Sprintf("%s (%d admin(s) trusted)", trustPath, len(trusted)))
+		if c.SessionActive() {
+			if st, _ := c.Status(); st != nil {
+				if !trusted[strings.ToLower(st.AdminPubkey)] && !trusted[st.AdminPubkey] {
+					line("!", "vault:trust-self", "current admin's pubkey is NOT in admins.trust — agents will reject your records")
+				}
+			}
+		}
+	} else if adminOK {
+		line("!", "vault:trust", "no admins.trust yet — issue at least one token to seed it")
+	}
+	dopCheckSidecarConsistency(paths, line)
+	dopCheckAuditLog(paths, line)
+	dopCheckGenCache(paths, line)
+	dopCheckPendingClaims(paths, line)
+
 	// --- security ---
 	if *securityMode {
 		fmt.Println("\n  --- security ---")
@@ -343,6 +379,151 @@ func exists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
 }
+
+// dopCheckSidecarConsistency warns about orphan bundles or records.
+// Every active capability MUST have both a `.bundle` and a `.record` next
+// to each other. Mismatches indicate a crash during issue/claim.
+func dopCheckSidecarConsistency(paths *config.Paths, line func(status, name, detail string)) {
+	dir := filepath.Join(paths.Vault, "capabilities")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	bundles := map[string]bool{}
+	records := map[string]bool{}
+	for _, e := range entries {
+		n := e.Name()
+		switch {
+		case strings.HasSuffix(n, ".bundle"):
+			bundles[strings.TrimSuffix(n, ".bundle")] = true
+		case strings.HasSuffix(n, ".record"):
+			records[strings.TrimSuffix(n, ".record")] = true
+		}
+	}
+	orphanBundles := 0
+	for k := range bundles {
+		if !records[k] {
+			orphanBundles++
+		}
+	}
+	orphanRecords := 0
+	for k := range records {
+		if !bundles[k] {
+			orphanRecords++
+		}
+	}
+	switch {
+	case orphanBundles == 0 && orphanRecords == 0:
+		line("✓", "vault:sidecars", fmt.Sprintf("%d capabilities with matched bundle+record", len(bundles)))
+	case orphanBundles > 0:
+		line("!", "vault:sidecars", fmt.Sprintf("%d bundle(s) without a signed record — exec will reject them", orphanBundles))
+	case orphanRecords > 0:
+		line("!", "vault:sidecars", fmt.Sprintf("%d record(s) without a bundle — leftover from crashed operations", orphanRecords))
+	}
+}
+
+// dopCheckAuditLog reports on log presence + size + freshness.
+func dopCheckAuditLog(paths *config.Paths, line func(status, name, detail string)) {
+	p := audit.Path(paths)
+	fi, err := os.Stat(p)
+	if err != nil {
+		line("⋯", "audit:log", "no audit log yet (fine for a fresh install)")
+		return
+	}
+	// Sample last line for parse health + freshness.
+	f, err := os.Open(p)
+	if err != nil {
+		line("!", "audit:log", "log exists but can't be read: "+err.Error())
+		return
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024), 64*1024)
+	var last []byte
+	count := 0
+	badLines := 0
+	for scanner.Scan() {
+		last = append(last[:0], scanner.Bytes()...)
+		count++
+		var e audit.Event
+		if json.Unmarshal(last, &e) != nil {
+			badLines++
+		}
+	}
+	sizeKB := float64(fi.Size()) / 1024.0
+	freshness := "no events"
+	if len(last) > 0 {
+		var e audit.Event
+		if json.Unmarshal(last, &e) == nil && !e.TS.IsZero() {
+			freshness = time.Since(e.TS).Round(time.Second).String() + " ago"
+		}
+	}
+	msg := fmt.Sprintf("%.1f KB, %d events, last %s", sizeKB, count, freshness)
+	if badLines > 0 {
+		msg += fmt.Sprintf(" (%d malformed lines)", badLines)
+		line("!", "audit:log", msg)
+	} else {
+		line("✓", "audit:log", msg)
+	}
+}
+
+// dopCheckGenCache surfaces parse errors and any missing-file races.
+func dopCheckGenCache(paths *config.Paths, line func(status, name, detail string)) {
+	dir := filepath.Join(paths.Root, "gen-cache")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return // no cache yet is fine
+	}
+	corrupt := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			corrupt++
+			continue
+		}
+		var v uint64
+		n, _ := fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &v)
+		if n != 1 {
+			corrupt++
+		}
+	}
+	total := len(entries)
+	if corrupt > 0 {
+		line("!", "cache:generation", fmt.Sprintf("%d/%d entries corrupt (will fall back to 0)", corrupt, total))
+	} else if total > 0 {
+		line("✓", "cache:generation", fmt.Sprintf("%d entry(ies)", total))
+	}
+}
+
+// dopCheckPendingClaims warns about stale pending claims.
+func dopCheckPendingClaims(paths *config.Paths, line func(status, name, detail string)) {
+	all, err := pendingclaim.List(paths)
+	if err != nil || len(all) == 0 {
+		return
+	}
+	now := time.Now()
+	live, stale := 0, 0
+	for _, r := range all {
+		if r.Expired(now) {
+			stale++
+		} else {
+			live++
+		}
+	}
+	msg := fmt.Sprintf("%d live", live)
+	if stale > 0 {
+		msg += fmt.Sprintf(", %d stale (should have been cleaned up)", stale)
+		line("!", "pending:claims", msg)
+	} else if live > 0 {
+		line("⋯", "pending:claims", msg)
+	}
+}
+
+// Tie in tunnel package so it's not unused.
+var _ = tunnel.Available
 
 func remainingTTL(ttlSec int64, refUnix int64) string {
 	remaining := time.Until(time.Unix(refUnix, 0).Add(time.Duration(ttlSec) * time.Second))

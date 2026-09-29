@@ -18,6 +18,7 @@ import (
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/pendingclaim"
 )
 
 // Run is the TUI entry point. Blocks until the user quits.
@@ -75,6 +76,7 @@ const (
 	screenDoctor
 	screenIssue
 	screenList
+	screenPending // v1.7: inline pending-claim approve panel
 )
 
 type rootModel struct {
@@ -91,6 +93,8 @@ type rootModel struct {
 	width, height int
 	quitting      bool
 	flashMessage  string // one-shot info message shown below the menu
+
+	pendingCount int // v1.7 — surfaced as a banner above the menu
 }
 
 type menuItem struct {
@@ -124,6 +128,16 @@ func (m *rootModel) refreshState() {
 		m.session = sessionUnlocked
 	} else {
 		m.session = sessionLocked
+	}
+	// v1.7 — pending-claim banner. Only counts non-expired entries.
+	m.pendingCount = 0
+	if all, err := pendingclaim.List(paths); err == nil {
+		now := time.Now()
+		for _, r := range all {
+			if !r.Expired(now) {
+				m.pendingCount++
+			}
+		}
 	}
 }
 
@@ -231,6 +245,16 @@ func (m *rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			return m.menu[m.cursor].fn(m)
+		case "a":
+			if m.pendingCount > 0 {
+				return m.openPendingApprove()
+			}
+			// fall through to menu shortcuts
+			for _, it := range m.menu {
+				if km.String() == it.key {
+					return it.fn(m)
+				}
+			}
 		default:
 			// Shortcut key
 			for _, it := range m.menu {
@@ -254,7 +278,15 @@ func (m *rootModel) View() string {
 
 	// Header — title + one-line state.
 	b.WriteString(titleSt.Render("dop — Doors of Perception") + "\n")
-	b.WriteString(mutedSt.Render(m.stateLine()) + "\n\n")
+	b.WriteString(mutedSt.Render(m.stateLine()) + "\n")
+
+	// v1.7 — pending-claim banner. Draws attention when an agent is
+	// waiting for approval; `a` from the menu opens the inline approver.
+	if m.pendingCount > 0 {
+		banner := fmt.Sprintf("⚠  %d pending claim(s) — press 'a' to review", m.pendingCount)
+		b.WriteString(lipgloss.NewStyle().Foreground(brand).Bold(true).Render(banner) + "\n")
+	}
+	b.WriteString("\n")
 
 	// Compute label column width across all items so descriptions align.
 	labelWidth := 0

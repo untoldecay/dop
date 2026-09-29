@@ -23,13 +23,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -45,6 +48,7 @@ import (
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/pendingclaim"
+	"github.com/fray/dop/internal/remoteclaim"
 	"github.com/fray/dop/internal/tunnel"
 	"github.com/fray/dop/internal/vault"
 )
@@ -56,6 +60,7 @@ func runClaim(args []string) int {
 	skipApproval := fs.Bool("skip-approval", false, "finalize immediately without out-of-band approval (unsafe for chat handoff)")
 	noTunnel := fs.Bool("no-tunnel", false, "serve the approval page on LAN only (no Cloudflare tunnel)")
 	bindAddr := fs.String("bind", "", "interface to bind the approval server (default: 127.0.0.1 with tunnel, 0.0.0.0 with --no-tunnel)")
+	remote := fs.Bool("remote", false, "no admin daemon on this host — stage the claim in the vault repo, admin approves + syncs via `dop approve-remote`")
 	_ = fs.Parse(args)
 
 	// Default bind depends on tunnel mode: 127.0.0.1 is fine when the
@@ -82,6 +87,12 @@ func runClaim(args []string) int {
 	}
 
 	paths, _ := config.Resolve()
+
+	// --remote path: no daemon required, stage the claim in the vault.
+	if *remote {
+		return runClaimRemote(paths, *tokenFile, fs.Arg(0))
+	}
+
 	client, err := requireAdminSession(paths)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop claim: %v — an active admin session is required to record the binding\n", err)
@@ -286,6 +297,183 @@ func runClaim(args []string) int {
 	fmt.Fprintf(os.Stderr, "  agent key: %s\n", keyPath)
 	fmt.Fprintf(os.Stderr, "  run: dop exec --agent-name %s -- <cmd>\n", env.Subject)
 	return 0
+}
+
+// runClaimRemote is the agent-side of the remote-claim flow. It runs
+// on a host that has NO admin daemon (CI runner, remote server) but
+// does have the vault git-cloned via `dop init --cache` and a bearer
+// via $DOP_TOKEN.
+//
+// Flow:
+//   1. Verify the PIN locally against the on-disk bundle.
+//   2. Read the existing signed record sidecar for the current gen.
+//   3. Generate an ed25519 keypair.
+//   4. Prepare a NEW bundle in memory carrying the pubkey binding.
+//   5. Write the new bundle to `pending-remote-claims/<lookup_id>.bundle`
+//      alongside a signed metadata file.
+//   6. Persist the agent private key at `<Root>/agent-keys/<lookup_id>.key`.
+//   7. Git commit + push (best-effort — user can push manually).
+//
+// The admin then runs `dop approve-remote` on their machine to accept
+// the pubkey and finalize the record.
+func runClaimRemote(paths *config.Paths, tokenFile, pinArg string) int {
+	bearer, err := readBearer(tokenFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim --remote: %v\n", err)
+		return 1
+	}
+	if pinArg == "" {
+		fmt.Fprintln(os.Stderr, "dop claim --remote: PIN required")
+		return 2
+	}
+
+	ctxPath := filepath.Join(paths.Vault, "vault-context.bin")
+	vaultCtx, err := os.ReadFile(ctxPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim --remote: no vault_context (%s): %v\n", ctxPath, err)
+		return 1
+	}
+	lookupID := capability.LookupID(vaultCtx, bearer)
+	bundlePath := filepath.Join(paths.Vault, "capabilities", lookupID+".bundle")
+	oldBundleBytes, err := os.ReadFile(bundlePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "dop claim --remote: unknown bearer (bundle not found — did you `dop pull`?)")
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "dop claim --remote: %v\n", err)
+		return 1
+	}
+	env, hdr, err := capability.Read(oldBundleBytes, capability.ReadOpts{Bearer: bearer})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim --remote: decrypt bundle: %v\n", err)
+		return 1
+	}
+	if env.Binding == nil || env.Binding.Kind != vault.BindingKindPIN {
+		fmt.Fprintln(os.Stderr, "dop claim --remote: this bearer is not PIN-bound")
+		return 1
+	}
+	if env.Binding.Pubkey != "" {
+		fmt.Fprintln(os.Stderr, "dop claim --remote: this bearer is already claimed")
+		return 1
+	}
+	if env.Binding.PinExpiry > 0 && time.Now().Unix() > env.Binding.PinExpiry {
+		fmt.Fprintln(os.Stderr, "dop claim --remote: PIN expired — ask admin to `dop token repin`")
+		return 1
+	}
+	if !capability.VerifyPIN(bearer, pinArg, env.Binding.PinHash) {
+		fmt.Fprintln(os.Stderr, "dop claim --remote: PIN does not match")
+		return 1
+	}
+
+	// Read the existing signed record to know the current generation.
+	recPath := filepath.Join(paths.Vault, "capabilities", lookupID+".record")
+	recBlob, err := os.ReadFile(recPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim --remote: no .record sidecar (%s): %v\n", recPath, err)
+		return 1
+	}
+	var existing capability.Record
+	if err := json.Unmarshal(recBlob, &existing); err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim --remote: record json: %v\n", err)
+		return 1
+	}
+
+	// Generate keypair + build new bundle in memory.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim --remote: keygen: %v\n", err)
+		return 1
+	}
+	pubHex := hex.EncodeToString(pub)
+	newGen := existing.Generation + 1
+	newBinding := &capability.EnvelopeBinding{
+		Kind:   vault.BindingKindPIN,
+		Pubkey: pubHex,
+	}
+	var newBundleBuf bytes.Buffer
+	newBundleBytes, err := capability.Write(&newBundleBuf, capability.WriteOpts{
+		CapabilityID: hdr.CapabilityID,
+		Bearer:       bearer,
+		Generation:   newGen,
+		ExpiresAt:    time.Unix(hdr.ExpiresAtUnix, 0).UTC(),
+		Subject:      env.Subject,
+		Env:          env.Env,
+		Binding:      newBinding,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim --remote: build new bundle: %v\n", err)
+		return 1
+	}
+
+	// Persist the private key BEFORE staging in the vault. If push
+	// fails, admin can retry approve — but they need the pubkey, which
+	// only the agent's local key produces.
+	keyPath, err := writeAgentKey(paths, lookupID, priv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim --remote: persist key: %v\n", err)
+		return 1
+	}
+
+	host, _ := os.Hostname()
+	req := remoteclaim.Request{
+		LookupID:      lookupID,
+		CapabilityID:  hex.EncodeToString(hdr.CapabilityID[:]),
+		Subject:       env.Subject,
+		Pubkey:        pubHex,
+		Host:          host,
+		RequestedAt:   time.Now().UTC().Truncate(time.Second),
+		ExpiresAt:     time.Now().Add(remoteclaim.TTL).UTC().Truncate(time.Second),
+		NewGeneration: newGen,
+		NewBundleHash: capability.HashBundle(newBundleBytes),
+	}
+	if err := req.Sign(priv); err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim --remote: sign request: %v\n", err)
+		return 1
+	}
+	if err := remoteclaim.Write(paths, req, newBundleBytes); err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim --remote: stage claim: %v\n", err)
+		return 1
+	}
+
+	// Best-effort git push. If it fails, user gets a clear next-step.
+	pushErr := gitCommitPushRemoteClaim(paths, lookupID)
+
+	audit.Append(paths, audit.Event{
+		Kind:     audit.EventClaimPending,
+		Subject:  env.Subject,
+		LookupID: lookupID,
+		Extra: map[string]string{
+			"remote": "true",
+			"host":   host,
+			"pubkey": pubHex,
+		},
+	})
+
+	fmt.Fprintf(os.Stderr, "dop claim --remote: staged %s for approval\n", env.Subject)
+	fmt.Fprintf(os.Stderr, "  agent key: %s\n", keyPath)
+	fmt.Fprintf(os.Stderr, "  admin runs: dop approve-remote --subject %s\n", env.Subject)
+	if pushErr != nil {
+		fmt.Fprintf(os.Stderr, "  ! git push failed (%v) — run `dop push` after resolving\n", pushErr)
+	} else {
+		fmt.Fprintln(os.Stderr, "  pushed to vault repo. After admin approves + pushes, run `dop pull` + retry your exec.")
+	}
+	return 0
+}
+
+// gitCommitPushRemoteClaim adds the two pending-remote-claim files and
+// pushes them. Kept close to the callsite because it's a one-shot dance.
+func gitCommitPushRemoteClaim(paths *config.Paths, lookupID string) error {
+	dir := paths.Vault
+	rel := filepath.Join("pending-remote-claims", lookupID)
+	if err := runGit(io.Discard, dir, "add", rel+".bundle", rel+".json"); err != nil {
+		return err
+	}
+	if err := runGit(io.Discard, dir, "commit", "-m",
+		fmt.Sprintf("dop: remote claim %s (unapproved)", lookupID[:12])); err != nil {
+		return err
+	}
+	return runGit(io.Discard, dir, "push")
 }
 
 // awaitApproval spins up:
