@@ -259,7 +259,15 @@ func runClaim(args []string) int {
 		return 1
 	}
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
-		fmt.Fprintf(os.Stderr, "dop claim: save vault (bundle+sidecar are consistent — retry with `dop admin login`): %v\n", err)
+		// v1.6.4 — bundle + sidecar + agent key are all on disk and
+		// exec will keep working. Only the vault view (generation
+		// counter, claimed_at) is stale. Warn loudly with a subject-
+		// specific recovery: the operator should `dop admin login` +
+		// `dop token revoke %s` + `dop token issue` to bring vault
+		// back into agreement, or leave it be until next issue.
+		fmt.Fprintf(os.Stderr, "dop claim: save vault failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  exec-plane state (bundle, sidecar, agent key) is intact for subject %q.\n", env.Subject)
+		fmt.Fprintf(os.Stderr, "  next `dop token issue --name %s` may collide on generation until you `dop token revoke %s` + reissue.\n", env.Subject, env.Subject)
 		return 1
 	}
 

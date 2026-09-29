@@ -246,11 +246,19 @@ func runTokenIssue(args []string) int {
 	v.Capabilities[capIDHex] = capability2VaultCapability(rec)
 
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
-		fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+		// v1.6.4: clean the orphan bundle so the on-disk state stays
+		// consistent with the un-saved vault. Without this, the next
+		// issue for the same subject would bump the generation from
+		// the stale vault count and collide with this bundle's gen.
+		_ = os.Remove(bundlePath)
+		fmt.Fprintf(os.Stderr, "dop token issue: %v (rolled back bundle)\n", err)
 		return 1
 	}
 	if err := writeRecordSidecar(paths, rec); err != nil {
-		fmt.Fprintf(os.Stderr, "dop token issue: write record: %v\n", err)
+		// Vault has the record but sidecar failed. Roll bundle back
+		// too — without the sidecar, exec would reject anyway.
+		_ = os.Remove(bundlePath)
+		fmt.Fprintf(os.Stderr, "dop token issue: write record: %v (rolled back bundle; vault out of sync — run `dop token revoke %s`)\n", err, subject)
 		return 1
 	}
 
@@ -745,8 +753,15 @@ func syncSidecars(client *admin.Client, paths *config.Paths, v *vault.Vault) err
 }
 
 // sidecarMatches returns true if the on-disk sidecar matches every
-// field a re-sign would change. Cheap comparison — avoids an argon2id-
-// like signing cost per save when nothing drifted.
+// field a re-sign would change. Cheap comparison — avoids an
+// ed25519-sign RPC round-trip per active cap on saves that touched
+// only unrelated state.
+//
+// Coverage must include every field of `capability.Record` that a
+// legitimate admin could edit via `dop vault edit`. Missing a field
+// here means the sidecar silently goes out of sync with the vault
+// (v1.6.3 originally missed Subject, Grants, IssuedBy, CreatedAt,
+// PinExpiry, ClaimedAt — surfaced in third-pass review).
 func sidecarMatches(path string, c vault.Capability) bool {
 	blob, err := os.ReadFile(path)
 	if err != nil {
@@ -756,20 +771,38 @@ func sidecarMatches(path string, c vault.Capability) bool {
 	if err := json.Unmarshal(blob, &existing); err != nil {
 		return false
 	}
-	if existing.Generation != c.Generation ||
+	if existing.Subject != c.Subject ||
+		existing.Generation != c.Generation ||
 		existing.BundleHash != c.BundleHash ||
 		existing.Status != c.Status ||
-		!existing.ExpiresAt.Equal(c.ExpiresAt) {
+		existing.IssuedBy != c.IssuedBy ||
+		!existing.ExpiresAt.Equal(c.ExpiresAt) ||
+		!existing.CreatedAt.Equal(c.CreatedAt) {
 		return false
 	}
-	// Binding drift — compare kind + pubkey (the fields that matter to
-	// exec's binding check).
+	if !stringSlicesEqual(existing.Grants, c.Grants) {
+		return false
+	}
 	if (existing.Binding == nil) != (c.Binding == nil) {
 		return false
 	}
 	if existing.Binding != nil && c.Binding != nil {
 		if existing.Binding.Kind != c.Binding.Kind ||
-			existing.Binding.Pubkey != c.Binding.Pubkey {
+			existing.Binding.Pubkey != c.Binding.Pubkey ||
+			!existing.Binding.PinExpiry.Equal(c.Binding.PinExpiry) ||
+			!existing.Binding.ClaimedAt.Equal(c.Binding.ClaimedAt) {
+			return false
+		}
+	}
+	return true
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}

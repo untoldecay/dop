@@ -77,7 +77,11 @@ func runTeamRemove(args []string) int {
 		return 1
 	}
 	st, serr := client.Status()
-	if serr == nil && strings.EqualFold(victimEntry.Ed25519Pubkey, st.AdminPubkey) {
+	if serr != nil {
+		fmt.Fprintf(os.Stderr, "dop team remove: refusing — cannot verify current admin identity (session status: %v)\n", serr)
+		return 1
+	}
+	if strings.EqualFold(victimEntry.Ed25519Pubkey, st.AdminPubkey) {
 		fmt.Fprintln(os.Stderr, "dop team remove: refusing to remove yourself.")
 		fmt.Fprintln(os.Stderr, "  Ask another admin to run `dop team remove --name <you> --force` from their machine.")
 		return 1

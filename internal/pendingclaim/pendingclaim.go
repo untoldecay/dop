@@ -28,6 +28,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/fray/dop/internal/config"
 )
 
@@ -150,7 +152,7 @@ func readFile(p string) (*Record, error) {
 	return &r, nil
 }
 
-// Delete removes a pending-claim file by lookup_id.
+// Delete removes a pending-claim file (and its lockfile) by lookup_id.
 func Delete(paths *config.Paths, lookupID string) error {
 	d, err := dir(paths)
 	if err != nil {
@@ -160,6 +162,8 @@ func Delete(paths *config.Paths, lookupID string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	// Best-effort: sweep the lockfile too so it doesn't linger.
+	_ = os.Remove(filepath.Join(d, lookupID+".lock"))
 	return nil
 }
 
@@ -178,6 +182,9 @@ func List(paths *config.Paths) ([]*Record, error) {
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
+		}
+		if strings.HasPrefix(e.Name(), ".dop-pending-") {
+			continue // in-flight tempfile
 		}
 		r, err := readFile(filepath.Join(d, e.Name()))
 		if err != nil {
@@ -205,21 +212,48 @@ func FindBySAS(paths *config.Paths, sas string) (*Record, error) {
 }
 
 // SetState atomically updates the on-disk record's state (approved or
-// rejected). Writes via a tempfile + rename to prevent partial reads
-// by a concurrent agent poll.
+// rejected). Wraps read-modify-write in an flock so it composes safely
+// with BumpFailure and with itself under concurrent web+CLI approve.
 func SetState(paths *config.Paths, lookupID, state string) error {
 	d, err := dir(paths)
 	if err != nil {
 		return err
 	}
-	p := filepath.Join(d, lookupID+".json")
-	r, err := readFile(p)
+	return withLock(d, lookupID, func() error {
+		p := filepath.Join(d, lookupID+".json")
+		r, err := readFile(p)
+		if err != nil {
+			return err
+		}
+		r.State = state
+		r.DecidedAt = time.Now().UTC().Truncate(time.Second)
+		return writeRecord(d, p, r)
+	})
+}
+
+// withLock takes an advisory exclusive lock on a per-claim lockfile
+// and runs fn while holding it. Two racers on the same claim serialize;
+// racers on different claims don't contend. Uses BSD-flock (LOCK_EX)
+// which is honored by Linux and macOS. Lockfile lives next to the
+// pending-claim json so cleanup happens naturally when the pending
+// dir gets nuked.
+func withLock(dir, lookupID string, fn func() error) error {
+	lockPath := filepath.Join(dir, lookupID+".lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
-	r.State = state
-	r.DecidedAt = time.Now().UTC().Truncate(time.Second)
-	tmp, err := os.CreateTemp(d, ".dop-pending-*")
+	defer f.Close()
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		return fmt.Errorf("flock: %w", err)
+	}
+	defer unix.Flock(int(f.Fd()), unix.LOCK_UN)
+	return fn()
+}
+
+// writeRecord serializes r to path via a temp-file + rename, mode 0600.
+func writeRecord(dir, path string, r *Record) error {
+	tmp, err := os.CreateTemp(dir, ".dop-pending-*")
 	if err != nil {
 		return err
 	}
@@ -234,7 +268,7 @@ func SetState(paths *config.Paths, lookupID, state string) error {
 		os.Remove(tmpPath)
 		return err
 	}
-	return os.Rename(tmpPath, p)
+	return os.Rename(tmpPath, path)
 }
 
 // Expired returns true if the pending claim's ExpiresAt has passed.
@@ -245,39 +279,30 @@ func (r *Record) Expired(now time.Time) bool {
 // BumpFailure atomically increments the on-disk failure counter for
 // the pending claim with this lookup_id. Returns the new count and
 // whether the pending claim has been auto-rejected (count >= Max).
+//
+// Locking: flock-wrapped so two racers (web + CLI, or two CLI) can't
+// each read count=6 and each write count=7. Under argon2id parallelism
+// on a warm system this race was small in practice (~40 vs 8), but
+// still shipped as a soft cap in v1.6.3.
 func BumpFailure(paths *config.Paths, lookupID string) (count int, autoRejected bool, err error) {
-	d, err := dir(paths)
-	if err != nil {
-		return 0, false, err
+	d, dErr := dir(paths)
+	if dErr != nil {
+		return 0, false, dErr
 	}
 	p := filepath.Join(d, lookupID+".json")
-	r, err := readFile(p)
-	if err != nil {
-		return 0, false, err
-	}
-	r.FailureCount++
-	if r.FailureCount >= MaxFailures {
-		r.State = StateRejected
-		r.DecidedAt = time.Now().UTC().Truncate(time.Second)
-		autoRejected = true
-	}
-	tmp, err := os.CreateTemp(d, ".dop-pending-*")
-	if err != nil {
-		return 0, false, err
-	}
-	tmpPath := tmp.Name()
-	if err := json.NewEncoder(tmp).Encode(r); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return 0, false, err
-	}
-	tmp.Close()
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		os.Remove(tmpPath)
-		return 0, false, err
-	}
-	if err := os.Rename(tmpPath, p); err != nil {
-		return 0, false, err
-	}
-	return r.FailureCount, autoRejected, nil
+	err = withLock(d, lookupID, func() error {
+		r, err := readFile(p)
+		if err != nil {
+			return err
+		}
+		r.FailureCount++
+		count = r.FailureCount
+		if r.FailureCount >= MaxFailures {
+			r.State = StateRejected
+			r.DecidedAt = time.Now().UTC().Truncate(time.Second)
+			autoRejected = true
+		}
+		return writeRecord(d, p, r)
+	})
+	return count, autoRejected, err
 }

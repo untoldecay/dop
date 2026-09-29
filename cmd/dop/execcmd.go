@@ -348,7 +348,16 @@ func readGenCache(paths *config.Paths, lookupID string) uint64 {
 		return 0
 	}
 	var v uint64
-	fmt.Sscanf(string(b), "%d", &v)
+	n, err := fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &v)
+	if err != nil || n != 1 {
+		// Corrupt cache file. Warn on stderr (surfaced in audit + doctor)
+		// but return 0 so exec can still succeed if the bundle itself
+		// checks out — a defense-in-depth cache should never brick the
+		// primary path.
+		fmt.Fprintf(os.Stderr, "dop exec: warning: gen-cache %s corrupt (%v), ignoring\n",
+			genCachePath(paths, lookupID), err)
+		return 0
+	}
 	return v
 }
 

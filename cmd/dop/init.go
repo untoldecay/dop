@@ -74,13 +74,21 @@ func initAsAdmin(paths *config.Paths, source string) int {
 }
 
 // seedTrustIfPossible writes an initial admins.trust with just this
-// admin's pubkey — but only if we have an active admin session. Silent
-// no-op when locked; the trust file will land at first `token issue`
-// via saveVaultViaDaemon.
+// admin's pubkey — but only if we have an active admin session AND the
+// trust file doesn't already exist. Silent no-op otherwise; the trust
+// file will land at first `token issue` via saveVaultViaDaemon.
+//
+// The stat guard matters when a second admin joins an existing vault:
+// their `dop init --vault` must NOT overwrite the trust list that
+// already includes the first admin (v1.6.3 shipped without this guard;
+// caught in third-pass review).
 func seedTrustIfPossible(paths *config.Paths) error {
 	client := admin.NewClient(admin.SockPath(paths))
 	if !client.SessionActive() {
 		return nil
+	}
+	if _, err := os.Stat(trust.Path(paths)); err == nil {
+		return nil // don't clobber an existing trust list
 	}
 	st, err := client.Status()
 	if err != nil {
