@@ -1,5 +1,6 @@
-# Compiled binary
+# Compiled binaries
 /dop
+/dop-credential-git
 
 # Go build artifacts
 *.test
