@@ -337,6 +337,10 @@ func runTokenIssue(args []string) int {
 }
 
 func runTokenList(args []string) int {
+	fs := flag.NewFlagSet("token list", flag.ExitOnError)
+	all := fs.Bool("all", false, "include revoked capabilities (default: active only)")
+	_ = fs.Parse(args)
+
 	paths, _ := config.Resolve()
 	client, err := requireAdminSession(paths)
 	if err != nil {
@@ -357,11 +361,22 @@ func runTokenList(args []string) int {
 		names = append(names, id)
 	}
 	sort.Strings(names)
+	shown, hidden := 0, 0
 	for _, id := range names {
 		c := v.Capabilities[id]
+		if !*all && c.Status != capability.RecordStatusActive {
+			hidden++
+			continue
+		}
 		fmt.Printf("- %s  subject=%s  grants=%v  gen=%d  status=%s  expires=%s\n",
 			id[:12], c.Subject, c.Grants, c.Generation, c.Status,
 			c.ExpiresAt.Format(time.RFC3339))
+		shown++
+	}
+	if shown == 0 && hidden > 0 {
+		fmt.Printf("(no active capabilities; %d revoked hidden — use --all to include)\n", hidden)
+	} else if hidden > 0 {
+		fmt.Printf("\n(%d revoked hidden — use --all to include)\n", hidden)
 	}
 	return 0
 }
@@ -715,7 +730,39 @@ func saveVaultViaDaemon(client *admin.Client, paths *config.Paths, vaultPath str
 		return err
 	}
 	// Sync the trust sidecar so agent installs can verify signatures.
-	return trust.Write(paths, v)
+	if err := trust.Write(paths, v); err != nil {
+		return err
+	}
+	// v1.9.11 — auto-push vault after every admin-plane save so the
+	// M2/team members see the change without an explicit `dop push`.
+	// Best-effort: log a warning but do NOT fail the operation if push
+	// fails (no upstream, offline, etc.) — the local vault is already
+	// updated and the user can push manually later.
+	autoPushVault(paths)
+	return nil
+}
+
+// autoPushVault runs `git add -A + commit + push` on the vault repo
+// after a successful admin-plane save. Opt out with
+// `DOP_NO_AUTO_PUSH=1`. All errors are best-effort — the local save is
+// already durable and the operator can retry via `dop push` if the
+// remote is unreachable.
+func autoPushVault(paths *config.Paths) {
+	if os.Getenv("DOP_NO_AUTO_PUSH") == "1" {
+		return
+	}
+	// Nothing to push if the vault isn't a git repo (fresh install, tests).
+	if _, err := os.Stat(filepath.Join(paths.Vault, ".git")); err != nil {
+		return
+	}
+	_ = runGit(io.Discard, paths.Vault, "add", "-A")
+	// commit may exit 1 with "nothing to commit" — allow both 0 and 1.
+	_ = runGitAllowExit(io.Discard, paths.Vault, []int{0, 1}, "commit", "-m", "dop: sync (auto)")
+	// If no upstream, git push fails; that's OK — we already committed
+	// locally and next `dop push` (or `git push -u origin main`) covers it.
+	if err := runGit(io.Discard, paths.Vault, "push"); err != nil {
+		fmt.Fprintf(os.Stderr, "  (auto-push skipped: %v — run `dop push` when ready)\n", err)
+	}
 }
 
 // adminPubkeyPresent returns true if any admin entry in the vault
