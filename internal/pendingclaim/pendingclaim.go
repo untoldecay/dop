@@ -33,6 +33,38 @@ import (
 	"github.com/fray/dop/internal/config"
 )
 
+// ownerAlive reports whether the process that wrote a pending-claim
+// record is still running. signal(0) probes for existence without
+// side-effects. Used by Write to auto-clean records left behind by a
+// SIGKILL / panic / power-loss (SIGINT is caught + cleaned via defer,
+// but SIGKILL can't be trapped, so the file leaks).
+//
+// Only meaningful on the same host as the writer — a Record with a
+// non-empty Host different from ours conservatively reports alive so
+// we don't step on a peer's in-flight claim.
+func ownerAlive(r *Record) bool {
+	if r.PID <= 0 {
+		return true // legacy record, no PID — conservative
+	}
+	if r.Host != "" && r.Host != currentHost() {
+		return true // written by another machine
+	}
+	err := unix.Kill(r.PID, 0)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, unix.ESRCH) {
+		return false
+	}
+	// EPERM means the process exists but we can't signal it — still alive.
+	return true
+}
+
+func currentHost() string {
+	h, _ := os.Hostname()
+	return h
+}
+
 // TTL is how long a pending claim survives before the agent considers
 // it abandoned. Chat-handoff flows need enough room to scan a QR,
 // unlock a phone, type a passphrase — 5 min is comfortable without
@@ -62,6 +94,12 @@ type Record struct {
 	// The two paths share a limiter so an attacker can't burn attempts
 	// from the CLI to bypass a web-page counter.
 	FailureCount int `json:"failure_count,omitempty"`
+	// PID + Host — v1.9.4. Set by Write to the process that owns the
+	// claim. Enables next-run staleness detection: if the process is
+	// gone (SIGKILL, panic, power-loss), Write silently reclaims the
+	// slot instead of demanding "reject it first".
+	PID  int    `json:"pid,omitempty"`
+	Host string `json:"host,omitempty"`
 }
 
 // MaxFailures is the shared limit — approve/reject paths must call
@@ -109,8 +147,9 @@ func dir(paths *config.Paths) (string, error) {
 	return d, nil
 }
 
-// Write creates a new pending-claim file. Fails if one already exists
-// for the same lookup_id.
+// Write creates a new pending-claim file. If one already exists for
+// the same lookup_id, checks whether the owner process is still alive:
+// dead → reclaim silently (v1.9.4 stale-lock fix), alive → refuse.
 func Write(paths *config.Paths, r Record) error {
 	if r.LookupID == "" || r.SAS == "" {
 		return errors.New("pendingclaim.Write: missing lookup_id or SAS")
@@ -119,9 +158,20 @@ func Write(paths *config.Paths, r Record) error {
 	if err != nil {
 		return err
 	}
+	if r.PID == 0 {
+		r.PID = os.Getpid()
+	}
+	if r.Host == "" {
+		r.Host = currentHost()
+	}
 	p := filepath.Join(d, r.LookupID+".json")
-	if _, err := os.Stat(p); err == nil {
-		return fmt.Errorf("a pending claim already exists for this capability (%s) — reject it first", p)
+	if existing, rerr := readFile(p); rerr == nil {
+		if !ownerAlive(existing) {
+			_ = os.Remove(p)
+			_ = os.Remove(filepath.Join(d, r.LookupID+".lock"))
+		} else {
+			return fmt.Errorf("a pending claim already exists for this capability (%s) — reject it first", p)
+		}
 	}
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -152,7 +202,7 @@ func readFile(p string) (*Record, error) {
 	return &r, nil
 }
 
-// Delete removes a pending-claim file (and its lockfile) by lookup_id.
+// Delete removes a pending-claim file (and its lockfile + QR PNG) by lookup_id.
 func Delete(paths *config.Paths, lookupID string) error {
 	d, err := dir(paths)
 	if err != nil {
@@ -162,8 +212,9 @@ func Delete(paths *config.Paths, lookupID string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	// Best-effort: sweep the lockfile too so it doesn't linger.
+	// Best-effort: sweep the lockfile + QR PNG so nothing lingers.
 	_ = os.Remove(filepath.Join(d, lookupID+".lock"))
+	_ = os.Remove(filepath.Join(d, lookupID+".qr.png"))
 	return nil
 }
 

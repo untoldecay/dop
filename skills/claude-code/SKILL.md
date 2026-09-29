@@ -45,6 +45,16 @@ LAN URL: http://192.168.1.42:57553/c/<hex>
 
 **Do NOT try to render the QR from ASCII or Unicode blocks yourself.** The terminal will show its own Unicode QR after the structured header — ignore it. The PNG file is the authoritative version.
 
+**Alternative — `--json` for structured parsing:** if terminal-scraping the stderr header is fragile in your harness, run `dop claim --json <PIN>` instead. This emits JSONL on stdout:
+
+```json
+{"event":"pending","state":"pending","subject":"...","sas":"...","public_url":"...","lan_url":"...","qr_png":"/path/to/foo.qr.png","expires_at":"...","ttl_seconds":300,"cancel_hint":"dop claim --cancel"}
+```
+
+then on approval/rejection/timeout, a `{"event":"result","state":"claimed"|"aborted",...}` line. Parse fields directly instead of grepping the pretty header.
+
+**If you need to abort a pending claim** (agent tool timeout, wrong PIN, user changed their mind), run `DOP_TOKEN=<bearer> dop claim --cancel` from any shell — it deletes the pending-claim file, the blocked `dop claim` process sees it disappear and exits. Also useful: `dop claim --status --json` reports the current state (`pending`, `approved`, `rejected`, `expired`, or `absent`) without spawning a new claim.
+
 If the user only gives you a bearer (no PIN), the token was issued with `--no-bind` — skip claim, jump straight to `dop exec`.
 
 If the PIN has expired ("PIN does not match" after clearly correct input), ask the user to run `dop token repin --subject <name>` and hand you a fresh one.
