@@ -26,6 +26,10 @@ const (
 	EventRepin         = "repin"
 	EventRevoke        = "revoke"
 	EventExec          = "exec"
+	// v1.9.7 — `dop env` (like exec) surfaces plaintext values,
+	// so it now enforces + audits the same binding gate.
+	EventEnv       = "env"
+	EventEnvDenied = "env_denied"
 	EventAdminLogin    = "admin_login"
 	EventAdminLogout   = "admin_logout"
 	// v1.9 — admin-invite bootstrap.
