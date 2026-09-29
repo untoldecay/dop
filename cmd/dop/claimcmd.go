@@ -65,6 +65,9 @@ func runClaim(args []string) int {
 	noTunnel := fs.Bool("no-tunnel", false, "serve the approval page on LAN only (no Cloudflare tunnel)")
 	bindAddr := fs.String("bind", "", "interface to bind the approval server (default: 127.0.0.1 with tunnel, 0.0.0.0 with --no-tunnel)")
 	remote := fs.Bool("remote", false, "no admin daemon on this host — stage the claim in the vault repo, admin approves + syncs via `dop approve-remote`")
+	cancel := fs.Bool("cancel", false, "cancel any in-flight pending claim for $DOP_TOKEN and exit")
+	status := fs.Bool("status", false, "print the pending-claim state for $DOP_TOKEN (json) and exit")
+	asJSON := fs.Bool("json", false, "emit JSONL events (pending, result) on stdout instead of human-readable output on stderr")
 	_ = fs.Parse(args)
 
 	// Default bind depends on tunnel mode: 127.0.0.1 is fine when the
@@ -76,6 +79,25 @@ func runClaim(args []string) int {
 		} else {
 			*bindAddr = "127.0.0.1"
 		}
+	}
+
+	// --cancel and --status don't need a PIN; they operate on whatever
+	// pending claim exists for the current bearer.
+	if *cancel || *status {
+		if fs.NArg() != 0 {
+			fmt.Fprintln(os.Stderr, "usage: dop claim --cancel   OR   dop claim --status")
+			return 2
+		}
+		bearer, err := readBearer(*tokenFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop claim: %v\n", err)
+			return 1
+		}
+		paths, _ := config.Resolve()
+		if *cancel {
+			return runClaimCancel(paths, bearer, *asJSON)
+		}
+		return runClaimStatus(paths, bearer, *asJSON)
 	}
 
 	if fs.NArg() != 1 {
@@ -176,8 +198,12 @@ func runClaim(args []string) int {
 
 	// Passphrase-gated approval (v1.6). Skippable for unattended flows.
 	if !*skipApproval {
-		if err := awaitApproval(paths, lookupID, hex.EncodeToString(hdr.CapabilityID[:]), env.Subject, pubHex, *noTunnel, *bindAddr); err != nil {
-			fmt.Fprintf(os.Stderr, "dop claim: %v\n", err)
+		if err := awaitApproval(paths, lookupID, hex.EncodeToString(hdr.CapabilityID[:]), env.Subject, pubHex, *noTunnel, *bindAddr, *asJSON); err != nil {
+			if *asJSON {
+				emitJSON(map[string]any{"event": "result", "state": "aborted", "error": err.Error()})
+			} else {
+				fmt.Fprintf(os.Stderr, "dop claim: %v\n", err)
+			}
 			return 1
 		}
 	}
@@ -293,14 +319,133 @@ func runClaim(args []string) int {
 		Actor:    pubHex,
 		Extra:    map[string]string{"generation": fmt.Sprintf("%d", newGen)},
 	})
-	fmt.Fprintf(os.Stderr, "dop claim: bound %s → pubkey %s… (gen %d)\n",
-		env.Subject, pubHex[:16], newGen)
+	if *asJSON {
+		emitJSON(map[string]any{
+			"event":      "result",
+			"state":      "claimed",
+			"subject":    env.Subject,
+			"generation": newGen,
+			"pubkey":     pubHex,
+			"agent_key":  keyPath,
+		})
+	} else {
+		fmt.Fprintf(os.Stderr, "dop claim: bound %s → pubkey %s… (gen %d)\n",
+			env.Subject, pubHex[:16], newGen)
+		fmt.Fprintf(os.Stderr, "  agent key: %s\n", keyPath)
+		fmt.Fprintf(os.Stderr, "  run: dop exec --agent-name %s -- <cmd>\n", env.Subject)
+	}
 	if *shell {
 		fmt.Printf("export DOP_TOKEN=%s\n", bearer)
 	}
-	fmt.Fprintf(os.Stderr, "  agent key: %s\n", keyPath)
-	fmt.Fprintf(os.Stderr, "  run: dop exec --agent-name %s -- <cmd>\n", env.Subject)
 	return 0
+}
+
+// emitJSON writes a compact JSON object followed by a newline to
+// stdout — one event per line so agents can parse the stream
+// incrementally.
+func emitJSON(v map[string]any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	os.Stdout.Write(b)
+	os.Stdout.Write([]byte("\n"))
+}
+
+// runClaimCancel deletes the pending-claim file for $DOP_TOKEN so the
+// running `dop claim` (which is polling that file) sees it disappear
+// and exits. Idempotent: absent file → success.
+func runClaimCancel(paths *config.Paths, bearer string, asJSON bool) int {
+	lookupID, err := lookupIDFromBearer(paths, bearer)
+	if err != nil {
+		if asJSON {
+			emitJSON(map[string]any{"event": "cancel", "state": "error", "error": err.Error()})
+		} else {
+			fmt.Fprintf(os.Stderr, "dop claim --cancel: %v\n", err)
+		}
+		return 1
+	}
+	if err := pendingclaim.Delete(paths, lookupID); err != nil {
+		if asJSON {
+			emitJSON(map[string]any{"event": "cancel", "state": "error", "error": err.Error()})
+		} else {
+			fmt.Fprintf(os.Stderr, "dop claim --cancel: %v\n", err)
+		}
+		return 1
+	}
+	if asJSON {
+		emitJSON(map[string]any{"event": "cancel", "state": "cancelled", "lookup_id": lookupID})
+	} else {
+		fmt.Fprintf(os.Stderr, "dop claim --cancel: pending claim cleared\n")
+	}
+	return 0
+}
+
+// runClaimStatus reports the current pending-claim record for
+// $DOP_TOKEN. Reports "absent" if no file exists.
+func runClaimStatus(paths *config.Paths, bearer string, asJSON bool) int {
+	lookupID, err := lookupIDFromBearer(paths, bearer)
+	if err != nil {
+		if asJSON {
+			emitJSON(map[string]any{"event": "status", "state": "error", "error": err.Error()})
+		} else {
+			fmt.Fprintf(os.Stderr, "dop claim --status: %v\n", err)
+		}
+		return 1
+	}
+	rec, err := pendingclaim.Read(paths, lookupID)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if asJSON {
+				emitJSON(map[string]any{"event": "status", "state": "absent", "lookup_id": lookupID})
+			} else {
+				fmt.Println("(no pending claim)")
+			}
+			return 0
+		}
+		if asJSON {
+			emitJSON(map[string]any{"event": "status", "state": "error", "error": err.Error()})
+		} else {
+			fmt.Fprintf(os.Stderr, "dop claim --status: %v\n", err)
+		}
+		return 1
+	}
+	state := rec.State
+	if rec.State == pendingclaim.StatePending && rec.Expired(time.Now()) {
+		state = "expired"
+	}
+	if asJSON {
+		emitJSON(map[string]any{
+			"event":        "status",
+			"state":        state,
+			"sas":          rec.SAS,
+			"subject":      rec.Subject,
+			"lookup_id":    lookupID,
+			"started_at":   rec.StartedAt.Format(time.RFC3339),
+			"expires_at":   rec.ExpiresAt.Format(time.RFC3339),
+			"failure_count": rec.FailureCount,
+		})
+	} else {
+		ttl := time.Until(rec.ExpiresAt).Truncate(time.Second)
+		ttlStr := ttl.String()
+		if ttl < 0 {
+			ttlStr = "expired"
+		}
+		fmt.Printf("subject: %s\nstate:   %s\nSAS:     %s\nTTL:     %s\n", rec.Subject, state, rec.SAS, ttlStr)
+	}
+	return 0
+}
+
+// lookupIDFromBearer derives the lookup_id for a bearer using the
+// vault-context. Both files must already be present locally (vault has
+// been initialized).
+func lookupIDFromBearer(paths *config.Paths, bearer string) (string, error) {
+	ctxPath := filepath.Join(paths.Vault, "vault-context.bin")
+	vaultCtx, err := os.ReadFile(ctxPath)
+	if err != nil {
+		return "", fmt.Errorf("read vault_context: %w", err)
+	}
+	return capability.LookupID(vaultCtx, bearer), nil
 }
 
 // runClaimRemote is the agent-side of the remote-claim flow. It runs
@@ -489,7 +634,7 @@ func gitCommitPushRemoteClaim(paths *config.Paths, lookupID string) error {
 // writes the pending-claim file for `dop pending` / `dop approve <SAS>`
 // CLI compatibility, then blocks until the human decides on the web
 // page OR the CLI approve command lands OR TTL expires.
-func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex string, noTunnel bool, bindAddr string) error {
+func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex string, noTunnel bool, bindAddr string, asJSON bool) error {
 	sas, err := pendingclaim.NewSAS()
 	if err != nil {
 		return fmt.Errorf("SAS gen: %w", err)
@@ -571,23 +716,40 @@ func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex stri
 	qrPath := filepath.Join(paths.Root, "pending-claims", lookupID+".qr.png")
 	_ = writeQRPNG(publicURL, qrPath)
 
-	// Structured header — the labelled lines are parseable by an agent
-	// skill so the file + URL can be surfaced back into the chat.
-	fmt.Fprintf(os.Stderr, "\ndop claim: PENDING — approve within %s\n", pendingclaim.TTL)
-	fmt.Fprintf(os.Stderr, "  subject: %s\n", subject)
-	fmt.Fprintf(os.Stderr, "  SAS:     %s\n\n", sas)
-	fmt.Fprintf(os.Stderr, "QR image: %s\n", qrPath)
-	fmt.Fprintf(os.Stderr, "Public URL: %s\n", publicURL)
-	if publicURL != localURL {
-		fmt.Fprintf(os.Stderr, "LAN URL: %s\n", localURL)
+	if asJSON {
+		payload := map[string]any{
+			"event":         "pending",
+			"state":         "pending",
+			"subject":       subject,
+			"sas":           sas,
+			"lookup_id":     lookupID,
+			"public_url":    publicURL,
+			"lan_url":       localURL,
+			"qr_png":        qrPath,
+			"expires_at":    rec.ExpiresAt.Format(time.RFC3339),
+			"ttl_seconds":   int(pendingclaim.TTL / time.Second),
+			"cancel_hint":   "dop claim --cancel",
+		}
+		emitJSON(payload)
+	} else {
+		// Structured header — the labelled lines are parseable by an agent
+		// skill so the file + URL can be surfaced back into the chat.
+		fmt.Fprintf(os.Stderr, "\ndop claim: PENDING — approve within %s\n", pendingclaim.TTL)
+		fmt.Fprintf(os.Stderr, "  subject: %s\n", subject)
+		fmt.Fprintf(os.Stderr, "  SAS:     %s\n\n", sas)
+		fmt.Fprintf(os.Stderr, "QR image: %s\n", qrPath)
+		fmt.Fprintf(os.Stderr, "Public URL: %s\n", publicURL)
+		if publicURL != localURL {
+			fmt.Fprintf(os.Stderr, "LAN URL: %s\n", localURL)
+		}
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "  → attach the QR image in this chat AND share the Public URL as text.")
+		fmt.Fprintln(os.Stderr, "  → the admin will scan the QR or open the URL on their phone,")
+		fmt.Fprintln(os.Stderr, "    enter the DOP approval passphrase, and this claim will unblock.")
+		fmt.Fprintln(os.Stderr)
+		// Unicode terminal QR — harmless for humans, ignored by agents.
+		qrterminal.GenerateHalfBlock(publicURL, qrterminal.L, os.Stderr)
 	}
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "  → attach the QR image in this chat AND share the Public URL as text.")
-	fmt.Fprintln(os.Stderr, "  → the admin will scan the QR or open the URL on their phone,")
-	fmt.Fprintln(os.Stderr, "    enter the DOP approval passphrase, and this claim will unblock.")
-	fmt.Fprintln(os.Stderr)
-	// Unicode terminal QR — harmless for humans, ignored by agents.
-	qrterminal.GenerateHalfBlock(publicURL, qrterminal.L, os.Stderr)
 
 	// Clean up on Ctrl-C or terminal close. SIGHUP matters when the
 	// user closes the shell hosting `dop claim` — without trapping it
@@ -653,6 +815,17 @@ func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex stri
 			// mutates the on-disk state.
 			cur, err := pendingclaim.Read(paths, lookupID)
 			if err != nil {
+				// v1.9.4: `dop claim --cancel` (or manual rm) removes the
+				// file — treat as an explicit cancellation and unwind.
+				if os.IsNotExist(err) {
+					audit.Append(paths, audit.Event{
+						Kind:     audit.EventClaimDenied,
+						Subject:  subject,
+						LookupID: lookupID,
+						Extra:    map[string]string{"reason": "cancelled"},
+					})
+					return errors.New("cancelled — pending-claim file removed")
+				}
 				continue
 			}
 			switch cur.State {
