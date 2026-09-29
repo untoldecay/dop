@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/fray/dop/internal/admin"
+	"github.com/fray/dop/internal/admininvite"
 	"github.com/fray/dop/internal/approval"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
@@ -32,7 +33,7 @@ import (
 
 func runTeam(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop team <add-key|remove|list>")
+		fmt.Fprintln(os.Stderr, "usage: dop team <add-key|remove|list|invite>")
 		return 2
 	}
 	switch args[0] {
@@ -42,6 +43,8 @@ func runTeam(args []string) int {
 		return runTeamRemove(args[1:])
 	case "list":
 		return runTeamList(args[1:])
+	case "invite":
+		return runTeamInvite(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop team: unknown subcommand %q\n", args[0])
 		return 2
@@ -314,6 +317,7 @@ func runDoctor(args []string) int {
 	dopCheckGenCache(paths, line)
 	dopCheckPendingClaims(paths, line)
 	dopCheckGrantPrefixCollisions(c, paths, line)
+	dopCheckPendingInvites(paths, line)
 
 	// --- security ---
 	if *securityMode {
@@ -604,6 +608,31 @@ func yamlUnmarshalVault(b []byte, v *vault.Vault) error {
 
 // Tie in tunnel package so it's not unused.
 var _ = tunnel.Available
+
+// dopCheckPendingInvites (v1.9) surfaces open admin invites — either
+// waiting for a response or awaiting the operator's approval.
+func dopCheckPendingInvites(paths *config.Paths, line func(status, name, detail string)) {
+	all, err := admininvite.ListInvites(paths)
+	if err != nil || len(all) == 0 {
+		return
+	}
+	now := time.Now()
+	live, expired := 0, 0
+	for _, inv := range all {
+		if inv.Expired(now) {
+			expired++
+		} else {
+			live++
+		}
+	}
+	msg := fmt.Sprintf("%d live", live)
+	if expired > 0 {
+		msg += fmt.Sprintf(", %d expired (delete with `dop team cancel-invite`)", expired)
+		line("!", "vault:pending-invites", msg)
+	} else if live > 0 {
+		line("⋯", "vault:pending-invites", msg)
+	}
+}
 
 func remainingTTL(ttlSec int64, refUnix int64) string {
 	remaining := time.Until(time.Unix(refUnix, 0).Add(time.Duration(ttlSec) * time.Second))

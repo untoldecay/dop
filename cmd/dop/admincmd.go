@@ -23,7 +23,7 @@ import (
 
 func runAdmin(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop admin <init|login|logout|status>")
+		fmt.Fprintln(os.Stderr, "usage: dop admin <init|login|logout|status|join|set-approval>")
 		return 2
 	}
 	switch args[0] {
@@ -37,6 +37,8 @@ func runAdmin(args []string) int {
 		return runAdminStatus(args[1:])
 	case "set-approval":
 		return runAdminSetApproval(args[1:])
+	case "join":
+		return runAdminJoin(args[1:])
 	case "__session-daemon":
 		// Internal: fork target from `dop admin login`. Not shown in help.
 		return runAdminSessionDaemon(args[1:])

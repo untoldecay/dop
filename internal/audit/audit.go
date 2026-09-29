@@ -28,6 +28,10 @@ const (
 	EventExec          = "exec"
 	EventAdminLogin    = "admin_login"
 	EventAdminLogout   = "admin_logout"
+	// v1.9 — admin-invite bootstrap.
+	EventInvite         = "invite"          // M1 opens an invite
+	EventInviteResponse = "invite_response" // M2 replies
+	EventInviteComplete = "invite_complete" // M1 accepts, admin added
 )
 
 // Event is one line in the log.
