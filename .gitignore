@@ -14,3 +14,6 @@ coverage.txt
 
 # BeadsLog runtime state (init locally with `bd init`)
 /.beads/
+/.gitattributes
+/CLAUDE.md
+/_rules/_orchestration/
