@@ -273,6 +273,11 @@ func runGrant(args []string) int {
 }
 
 func runGrantList(args []string) int {
+	fs := flag.NewFlagSet("grant list", flag.ExitOnError)
+	projectFilter := fs.String("project", "", "only show grants that belong to this project")
+	tagFilter := fs.String("tag", "", "only show grants carrying this tag")
+	_ = fs.Parse(args)
+
 	paths, _ := config.Resolve()
 	client, err := requireAdminSession(paths)
 	if err != nil {
@@ -288,16 +293,65 @@ func runGrantList(args []string) int {
 		fmt.Println("(no grants)")
 		return 0
 	}
-	ids := make([]string, 0, len(v.Grants))
-	for id := range v.Grants {
-		ids = append(ids, id)
+
+	// v1.8: group by project when no filter. A grant belonging to
+	// multiple projects appears under each.
+	buckets := map[string][]string{} // project → sorted grant IDs
+	tag := strings.TrimSpace(*tagFilter)
+	pf := strings.TrimSpace(*projectFilter)
+	for id, g := range v.Grants {
+		if tag != "" && !containsFold(g.Tags, tag) {
+			continue
+		}
+		if pf != "" && !containsFold(g.Projects, pf) {
+			continue
+		}
+		if len(g.Projects) == 0 {
+			buckets[""] = append(buckets[""], id)
+			continue
+		}
+		for _, p := range g.Projects {
+			buckets[p] = append(buckets[p], id)
+		}
 	}
-	sortStrings(ids)
-	for _, id := range ids {
-		g := v.Grants[id]
-		fmt.Printf("- %s  → %s.%s  env_prefix=%s\n", id, g.Integration, g.Token, g.EnvPrefix)
+	if len(buckets) == 0 {
+		fmt.Println("(no grants match)")
+		return 0
+	}
+	projs := make([]string, 0, len(buckets))
+	for p := range buckets {
+		projs = append(projs, p)
+	}
+	sortStrings(projs)
+	for _, p := range projs {
+		if p == "" {
+			fmt.Println("(ungrouped)")
+		} else {
+			fmt.Printf("project: %s\n", p)
+		}
+		ids := buckets[p]
+		sortStrings(ids)
+		for _, id := range ids {
+			g := v.Grants[id]
+			tagSuffix := ""
+			if len(g.Tags) > 0 {
+				tagSuffix = "  tags=[" + strings.Join(g.Tags, ",") + "]"
+			}
+			fmt.Printf("  - %s  → %s.%s  env=%s_TOKEN%s\n",
+				id, g.Integration, g.Token, g.EffectivePrefix(), tagSuffix)
+		}
 	}
 	return 0
+}
+
+// containsFold is case-insensitive slice membership.
+func containsFold(hay []string, needle string) bool {
+	for _, s := range hay {
+		if strings.EqualFold(s, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func runGrantRemove(args []string) int {
@@ -337,16 +391,20 @@ func runGrantAdd(args []string) int {
 	id := fs.String("id", "", "grant id (required, e.g. notion.read)")
 	integration := fs.String("integration", "", "integration name (required)")
 	token := fs.String("token", "", "upstream token name (required)")
-	envPrefix := fs.String("env-prefix", "", "env var prefix (defaults to uppercased integration name)")
+	envPrefix := fs.String("env-prefix", "", "env var prefix (defaults to <INTEGRATION>_<TOKEN>, sanitized)")
+	projectsCSV := fs.String("projects", "", "comma-separated project tags (cosmetic grouping; a grant can belong to multiple)")
+	tagsCSV := fs.String("tags", "", "comma-separated free-form tags (e.g. read,write,admin)")
 	_ = fs.Parse(args)
 
 	if *id == "" || *integration == "" || *token == "" {
 		fmt.Fprintln(os.Stderr, "dop grant add: --id, --integration, --token required")
 		return 2
 	}
-	if *envPrefix == "" {
-		*envPrefix = strings.ToUpper(*integration)
-	}
+	// v1.8: leave env_prefix empty on the record — EffectivePrefix()
+	// derives <INTEGRATION>_<TOKEN> at resolution time. Only persist an
+	// explicit value when the operator overrode the default.
+	projects := splitCSV(*projectsCSV)
+	tags := splitCSV(*tagsCSV)
 
 	paths, _ := config.Resolve()
 	client, err := requireAdminSession(paths)
@@ -386,12 +444,23 @@ func runGrantAdd(args []string) int {
 		Integration: *integration,
 		Token:       *token,
 		EnvPrefix:   *envPrefix,
+		Projects:    projects,
+		Tags:        tags,
 	}
 	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
 		fmt.Fprintf(os.Stderr, "dop grant add: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "dop grant add: %s grant %q → %s.%s (env prefix %s)\n", action, *id, *integration, *token, *envPrefix)
+	// Preview what the child env will actually look like.
+	effective := v.Grants[*id].EffectivePrefix()
+	fmt.Fprintf(os.Stderr, "dop grant add: %s grant %q → %s.%s (env: %s_TOKEN)\n",
+		action, *id, *integration, *token, effective)
+	if len(projects) > 0 {
+		fmt.Fprintf(os.Stderr, "  projects: %s\n", strings.Join(projects, ", "))
+	}
+	if len(tags) > 0 {
+		fmt.Fprintf(os.Stderr, "  tags: %s\n", strings.Join(tags, ", "))
+	}
 	return 0
 }
 

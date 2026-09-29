@@ -35,7 +35,7 @@ echo "=== [3] value was actually changed"
 "$DOP" grant add --id notion.read --integration notion --token read >/dev/null 2>&1
 BEARER=$("$DOP" token issue --no-bind --grants notion.read --name checker 2>/dev/null)
 env_out=$(DOP_TOKEN="$BEARER" "$DOP" exec --agent-name c -- env 2>/dev/null)
-echo "$env_out" | grep -q "NOTION_TOKEN=NEW_VALUE" || fail "value not updated: $env_out"
+echo "$env_out" | grep -q "NOTION_READ_TOKEN=NEW_VALUE" || fail "value not updated: $env_out"
 pass "edit persisted correctly"
 
 echo "=== [4] plaintext tempfile cleaned up"

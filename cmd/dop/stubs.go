@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -312,6 +313,7 @@ func runDoctor(args []string) int {
 	dopCheckAuditLog(paths, line)
 	dopCheckGenCache(paths, line)
 	dopCheckPendingClaims(paths, line)
+	dopCheckGrantPrefixCollisions(c, paths, line)
 
 	// --- security ---
 	if *securityMode {
@@ -520,6 +522,84 @@ func dopCheckPendingClaims(paths *config.Paths, line func(status, name, detail s
 	} else if live > 0 {
 		line("⋯", "pending:claims", msg)
 	}
+}
+
+// dopCheckGrantPrefixCollisions (v1.8) warns when any project contains
+// two or more grants sharing an env prefix. Not fatal — `dop token
+// issue` refuses at commit time — but flags a vault-config smell that
+// will bite a future `--project P` bundle.
+func dopCheckGrantPrefixCollisions(client *admin.Client, paths *config.Paths, line func(status, name, detail string)) {
+	if !client.SessionActive() {
+		return
+	}
+	// Load vault best-effort.
+	vpath := vaultFilePath(paths)
+	if _, err := os.Stat(vpath); err != nil {
+		return
+	}
+	raw, err := os.ReadFile(vpath)
+	if err != nil {
+		return
+	}
+	var v vault.Vault
+	if bytes.Contains(raw, []byte("\nsops:")) || bytes.HasPrefix(raw, []byte("sops:")) {
+		plain, derr := client.DecryptVault(vpath)
+		if derr != nil {
+			return
+		}
+		if err := yamlUnmarshalVault(plain, &v); err != nil {
+			return
+		}
+	} else {
+		if err := yamlUnmarshalVault(raw, &v); err != nil {
+			return
+		}
+	}
+
+	// project → prefix → []grant-ids
+	nested := map[string]map[string][]string{}
+	add := func(proj, prefix, gid string) {
+		if _, ok := nested[proj]; !ok {
+			nested[proj] = map[string][]string{}
+		}
+		nested[proj][prefix] = append(nested[proj][prefix], gid)
+	}
+	for gid, g := range v.Grants {
+		prefix := g.EffectivePrefix()
+		if len(g.Projects) == 0 {
+			add("(ungrouped)", prefix, gid)
+		}
+		for _, p := range g.Projects {
+			add(p, prefix, gid)
+		}
+	}
+	warned := 0
+	for proj, byPrefix := range nested {
+		for prefix, ids := range byPrefix {
+			if len(ids) < 2 {
+				continue
+			}
+			sort.Strings(ids)
+			line("!", "vault:prefix-collision",
+				fmt.Sprintf("project %q: %s_TOKEN used by %s (bundling any two will silently overwrite)",
+					proj, prefix, strings.Join(ids, ", ")))
+			warned++
+		}
+	}
+	if warned == 0 && len(v.Grants) > 0 {
+		line("✓", "vault:prefix-collision", "no env-prefix collisions within any project")
+	}
+}
+
+// yamlUnmarshalVault is a tiny wrapper so we don't repeat the yaml import
+// dance across doctor helpers.
+func yamlUnmarshalVault(b []byte, v *vault.Vault) error {
+	parsed, err := vault.ParsePlain(b)
+	if err != nil {
+		return err
+	}
+	*v = *parsed
+	return nil
 }
 
 // Tie in tunnel package so it's not unused.

@@ -246,16 +246,46 @@ type issueView struct {
 	// Grants step (v1.6.1) — pick-from-list, following TUI_GUIDELINES
 	// "List-picker views" rules. Falls back to text entry when the
 	// vault has no grants declared yet.
-	grantList     []string        // sorted, from vault
+	// v1.8: rows carry an optional project header. A grant belonging
+	// to multiple projects appears in each project's section — but the
+	// selection map is keyed by grant ID, so choosing it once counts
+	// everywhere.
+	grantRows     []grantRow
+	grantList     []string        // legacy: unique IDs for fallback callers
+	grantByID     map[string]tuiGrantInfo
 	grantSelected map[string]bool // key = grant id
-	grantCursor   int
+	grantCursor   int             // index into grantRows (skips headers)
+}
+
+type grantRow struct {
+	project  string // empty for the "(ungrouped)" section
+	grantID  string // empty when this row is a section header
+	isHeader bool
+}
+
+// tuiGrantInfo carries just what the picker needs from a vault.Grant
+// (avoids importing vault into the picker code and keeps the render
+// path cheap).
+type tuiGrantInfo struct {
+	Integration string
+	Token       string
+	Prefix      string   // resolved via EffectivePrefix()
+	Tags        []string
+	Projects    []string
 }
 
 func newIssueView(c *admin.Client, p *config.Paths) *issueView {
 	v := &issueView{client: c, paths: p, grantSelected: map[string]bool{}}
 	v.expiryBuf.WriteString("72h") // sensible default
 	// Try to load available grants from the vault for UX.
-	v.grantList = loadGrantsForList(c, p)
+	v.grantList, v.grantRows, v.grantByID = loadGrantsForList(c, p)
+	// Advance initial cursor past any leading header row.
+	for i, r := range v.grantRows {
+		if !r.isHeader {
+			v.grantCursor = i
+			break
+		}
+	}
 	return v
 }
 
@@ -278,6 +308,62 @@ func (v *issueView) syncGrantsBuf() {
 		v.grantsBuf.WriteString(g)
 		first = false
 	}
+}
+
+// grantCursorMove advances the cursor by delta while skipping header
+// rows. Bounds-clamped at both ends.
+func (v *issueView) grantCursorMove(delta int) {
+	if len(v.grantRows) == 0 {
+		return
+	}
+	i := v.grantCursor + delta
+	for i >= 0 && i < len(v.grantRows) {
+		if !v.grantRows[i].isHeader {
+			v.grantCursor = i
+			return
+		}
+		i += delta
+	}
+}
+
+// currentGrantID returns the grant id under the cursor, or "" for a header.
+func (v *issueView) currentGrantID() string {
+	if v.grantCursor < 0 || v.grantCursor >= len(v.grantRows) {
+		return ""
+	}
+	return v.grantRows[v.grantCursor].grantID
+}
+
+// currentSection returns the project name the cursor sits under.
+func (v *issueView) currentSection() string {
+	if v.grantCursor < 0 || v.grantCursor >= len(v.grantRows) {
+		return ""
+	}
+	return v.grantRows[v.grantCursor].project
+}
+
+// collidingPrefixes returns a map of prefix → grant-IDs when two or
+// more currently-selected grants share the same env prefix.
+func (v *issueView) collidingPrefixes() map[string][]string {
+	byPrefix := map[string][]string{}
+	for gid, on := range v.grantSelected {
+		if !on {
+			continue
+		}
+		info, ok := v.grantByID[gid]
+		if !ok {
+			continue
+		}
+		byPrefix[info.Prefix] = append(byPrefix[info.Prefix], gid)
+	}
+	out := map[string][]string{}
+	for p, ids := range byPrefix {
+		if len(ids) > 1 {
+			sort.Strings(ids)
+			out[p] = ids
+		}
+	}
+	return out
 }
 
 func (v *issueView) selectedGrantCount() int {
@@ -327,17 +413,22 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if v.step == 1 && v.grantsListMode() {
 			switch mm.String() {
 			case "up", "k":
-				if v.grantCursor > 0 {
-					v.grantCursor--
-				}
+				v.grantCursorMove(-1)
 			case "down", "j":
-				if v.grantCursor < len(v.grantList)-1 {
-					v.grantCursor++
-				}
+				v.grantCursorMove(+1)
 			case " ":
-				g := v.grantList[v.grantCursor]
-				v.grantSelected[g] = !v.grantSelected[g]
+				if id := v.currentGrantID(); id != "" {
+					v.grantSelected[id] = !v.grantSelected[id]
+				}
 			case "a":
+				// v1.8: select all in the CURRENT section (project).
+				sec := v.currentSection()
+				for _, r := range v.grantRows {
+					if !r.isHeader && r.project == sec {
+						v.grantSelected[r.grantID] = true
+					}
+				}
+			case "A":
 				for _, g := range v.grantList {
 					v.grantSelected[g] = true
 				}
@@ -348,6 +439,14 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if v.selectedGrantCount() == 0 {
 					v.err = "select at least one grant (space to toggle)"
+					return v, nil
+				}
+				if colliders := v.collidingPrefixes(); len(colliders) > 0 {
+					lines := make([]string, 0, len(colliders))
+					for prefix, gs := range colliders {
+						lines = append(lines, prefix+"_TOKEN ← "+strings.Join(gs, ", "))
+					}
+					v.err = "env prefix collision (last wins silently):\n  " + strings.Join(lines, "\n  ")
 					return v, nil
 				}
 				v.err = ""
@@ -510,18 +609,54 @@ func (v *issueView) View() string {
 		b.WriteString(cursorSt.Render("Grants") + "  " +
 			mutedSt.Render(fmt.Sprintf("%d/%d selected", v.selectedGrantCount(), len(v.grantList))) +
 			"\n")
-		for i, g := range v.grantList {
-			cursor := "  "
+		var lastSection string
+		firstSection := true
+		for i, row := range v.grantRows {
+			if row.isHeader {
+				if !firstSection {
+					b.WriteString("\n")
+				}
+				firstSection = false
+				lastSection = row.project
+				label := "project · " + row.project
+				if row.project == "(ungrouped)" {
+					label = row.project
+				}
+				b.WriteString("  " + mutedSt.Render(label) + "\n")
+				continue
+			}
+			_ = lastSection
+			cursor := "    "
 			labelStyle := lipgloss.NewStyle()
 			if i == v.grantCursor {
-				cursor = cursorSt.Render("➤ ")
+				cursor = "  " + cursorSt.Render("➤ ")
 				labelStyle = cursorSt
 			}
 			mark := "○"
-			if v.grantSelected[g] {
+			if v.grantSelected[row.grantID] {
 				mark = okSt.Render("●")
 			}
-			b.WriteString(cursor + mark + " " + labelStyle.Render(g) + "\n")
+			// Right-column hint: env prefix + optional tags.
+			info := v.grantByID[row.grantID]
+			hint := info.Prefix + "_TOKEN"
+			if len(info.Tags) > 0 {
+				hint += "  " + strings.Join(info.Tags, ",")
+			}
+			b.WriteString(cursor + mark + " " + labelStyle.Render(row.grantID) +
+				"  " + mutedSt.Render(hint) + "\n")
+		}
+		// Live collision warning.
+		if colliders := v.collidingPrefixes(); len(colliders) > 0 {
+			b.WriteString("\n")
+			b.WriteString(failSt.Render("⚠ env prefix collision:") + "\n")
+			prefixes := make([]string, 0, len(colliders))
+			for p := range colliders {
+				prefixes = append(prefixes, p)
+			}
+			sort.Strings(prefixes)
+			for _, p := range prefixes {
+				b.WriteString(mutedSt.Render("  " + p + "_TOKEN ← " + strings.Join(colliders[p], ", ")) + "\n")
+			}
 		}
 	} else if len(v.grantList) == 0 && v.step == 1 {
 		b.WriteString("\n" + mutedSt.Render("no grants defined in vault — type them manually") + "\n")
@@ -531,7 +666,7 @@ func (v *issueView) View() string {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
 	if pickerAtStep1 {
-		b.WriteString("\n" + helpSt.Render("↑↓ move · space toggle · a all · n none · enter next · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move · space toggle · a section · A all · n none · enter next · esc cancel"))
 	} else {
 		b.WriteString("\n" + helpSt.Render("enter next · esc cancel"))
 	}
@@ -539,29 +674,79 @@ func (v *issueView) View() string {
 }
 
 // loadGrantsForList — best-effort read of the vault to surface grants.
-func loadGrantsForList(client *admin.Client, paths *config.Paths) []string {
+// v1.8: also returns per-project rows and an info map keyed by grant ID.
+func loadGrantsForList(client *admin.Client, paths *config.Paths) ([]string, []grantRow, map[string]tuiGrantInfo) {
 	vp := paths.Vault + "/vault.yaml"
 	raw, err := os.ReadFile(vp)
 	if err != nil {
-		return nil
+		return nil, nil, nil
 	}
 	if bytes.Contains(raw, []byte("\nsops:")) || bytes.HasPrefix(raw, []byte("sops:")) {
 		plain, err := client.DecryptVault(vp)
 		if err != nil {
-			return nil
+			return nil, nil, nil
 		}
 		raw = plain
 	}
 	var v vault.Vault
 	if err := yaml.Unmarshal(raw, &v); err != nil {
-		return nil
+		return nil, nil, nil
 	}
-	out := make([]string, 0, len(v.Grants))
-	for g := range v.Grants {
-		out = append(out, g)
+	// Flat list — kept for the "no grants" fallback callers.
+	ids := make([]string, 0, len(v.Grants))
+	info := make(map[string]tuiGrantInfo, len(v.Grants))
+	for id, g := range v.Grants {
+		ids = append(ids, id)
+		info[id] = tuiGrantInfo{
+			Integration: g.Integration,
+			Token:       g.Token,
+			Prefix:      g.EffectivePrefix(),
+			Tags:        append([]string(nil), g.Tags...),
+			Projects:    append([]string(nil), g.Projects...),
+		}
 	}
-	sort.Strings(out)
-	return out
+	sort.Strings(ids)
+	// Build project → grantIDs, deduped inside each project.
+	byProj := map[string][]string{}
+	for _, id := range ids {
+		g := info[id]
+		if len(g.Projects) == 0 {
+			byProj[""] = append(byProj[""], id)
+			continue
+		}
+		for _, p := range g.Projects {
+			byProj[p] = append(byProj[p], id)
+		}
+	}
+	// Emit rows: project sections (sorted), then ungrouped last.
+	projs := make([]string, 0, len(byProj))
+	hasUngrouped := false
+	for p := range byProj {
+		if p == "" {
+			hasUngrouped = true
+			continue
+		}
+		projs = append(projs, p)
+	}
+	sort.Strings(projs)
+	rows := []grantRow{}
+	appendSection := func(header string, gids []string) {
+		if len(gids) == 0 {
+			return
+		}
+		sort.Strings(gids)
+		rows = append(rows, grantRow{project: header, isHeader: true})
+		for _, id := range gids {
+			rows = append(rows, grantRow{project: header, grantID: id})
+		}
+	}
+	for _, p := range projs {
+		appendSection(p, byProj[p])
+	}
+	if hasUngrouped {
+		appendSection("(ungrouped)", byProj[""])
+	}
+	return ids, rows, info
 }
 
 // ---------- List ----------
