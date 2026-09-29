@@ -1,0 +1,247 @@
+// `dop admin join <VAULT-URL> <PIN>` — v1.9 admin bootstrap, M2 side.
+//
+// On a machine without an admin key yet (or with one but never
+// attached to this vault), clones the vault, verifies the PIN against
+// the open invite, signs a response with its ed25519 key, pushes,
+// then polls until it appears in the vault's admins list.
+
+package main
+
+import (
+	"crypto/ed25519"
+	"encoding/hex"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/fray/dop/internal/admin"
+	"github.com/fray/dop/internal/admininvite"
+	"github.com/fray/dop/internal/approval"
+	"github.com/fray/dop/internal/audit"
+	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/trust"
+)
+
+func runAdminJoin(args []string) int {
+	fs := flag.NewFlagSet("admin join", flag.ExitOnError)
+	pfromStdin := fs.Bool("passphrase-stdin", false, "read passphrase(s) from stdin (testing only)")
+	timeoutStr := fs.String("timeout", "30m", "how long to wait for M1 to approve")
+	_ = fs.Parse(args)
+
+	if fs.NArg() != 2 {
+		fmt.Fprintln(os.Stderr, "usage: dop admin join <VAULT-URL> <PIN>")
+		return 2
+	}
+	vaultURL := fs.Arg(0)
+	pin := fs.Arg(1)
+	waitTimeout, err := time.ParseDuration(*timeoutStr)
+	if err != nil || waitTimeout <= 0 {
+		fmt.Fprintf(os.Stderr, "dop admin join: bad --timeout: %v\n", err)
+		return 2
+	}
+
+	paths, _ := config.Resolve()
+	if err := paths.EnsureDirs(); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+		return 1
+	}
+
+	// Step 1: bootstrap admin key if missing.
+	if !admin.KeyFileExists(paths) {
+		fmt.Fprintln(os.Stderr, "dop admin join: no admin key on this machine — creating one now.")
+		if rc := adminInitInline(paths, *pfromStdin); rc != 0 {
+			return rc
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "dop admin join: existing admin key detected — using it.")
+	}
+
+	// Step 2: unwrap the admin key so we can sign the response.
+	pass, err := readPassphrase("Admin passphrase (to unwrap keys): ", *pfromStdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+		return 1
+	}
+	keys, err := admin.LoadAndUnwrap(paths, pass)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+		return 1
+	}
+	edPub := keys.Ed25519.Public().(ed25519.PublicKey)
+	pubHex := hex.EncodeToString(edPub)
+	ageRecipient := keys.Age.Recipient().String()
+
+	// Step 3: clone the vault (if not already attached).
+	if _, err := os.Stat(filepath.Join(paths.Vault, ".git")); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: cloning vault into %s…\n", paths.Vault)
+		if rc := attachRepo(vaultURL, paths.Vault, false); rc != 0 {
+			return rc
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "dop admin join: vault already attached — pulling.")
+		if err := runGit(io.Discard, paths.Vault, "pull", "--ff-only"); err != nil {
+			fmt.Fprintf(os.Stderr, "dop admin join: pull: %v\n", err)
+			return 1
+		}
+	}
+
+	// Step 4: locate the invite by PIN.
+	inv, err := admininvite.FindByPIN(paths, pin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+		return 1
+	}
+	if inv == nil {
+		fmt.Fprintln(os.Stderr, "dop admin join: no matching invite found — did the original admin run `dop team invite` and push?")
+		return 1
+	}
+	if inv.Expired(time.Now()) {
+		fmt.Fprintln(os.Stderr, "dop admin join: this invite has expired — ask for a fresh one")
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "  ✓ invite matched: %q (id %s)\n", inv.Name, inv.InviteID[:8])
+
+	// Step 5: sign + write the response.
+	host, _ := os.Hostname()
+	resp := admininvite.Response{
+		InviteID:      inv.InviteID,
+		Ed25519Pubkey: pubHex,
+		AgeRecipient:  ageRecipient,
+		Host:          host,
+		RespondedAt:   time.Now().UTC().Truncate(time.Second),
+	}
+	if err := resp.Sign(keys.Ed25519); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: sign: %v\n", err)
+		return 1
+	}
+	if err := admininvite.WriteResponse(paths, resp); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: write response: %v\n", err)
+		return 1
+	}
+	if err := gitAddCommitPush(paths.Vault,
+		filepath.Join("pending-admin-invites", inv.InviteID+".response.json"),
+		fmt.Sprintf("dop: admin invite response %s (%s)", inv.InviteID[:8], host)); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: push response: %v\n", err)
+		return 1
+	}
+	audit.Append(paths, audit.Event{
+		Kind:    audit.EventInviteResponse,
+		Subject: inv.Name,
+		Actor:   pubHex,
+		Extra:   map[string]string{"invite_id": inv.InviteID, "host": host},
+	})
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "  ✓ response pushed. Waiting for original admin to approve…")
+
+	// Step 6: poll until we appear in admins.trust.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigCh)
+
+	deadline := time.Now().Add(waitTimeout)
+	tick := time.NewTicker(3 * time.Second)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-sigCh:
+			fmt.Fprintln(os.Stderr, "\ndop admin join: cancelled by signal")
+			return 1
+		case <-tick.C:
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintln(os.Stderr, "\ndop admin join: timed out — no approval received.")
+			return 1
+		}
+		_ = runGit(io.Discard, paths.Vault, "pull", "--ff-only")
+		trusted, err := trust.Load(paths)
+		if err != nil {
+			continue
+		}
+		if trusted[strings.ToLower(pubHex)] || trusted[pubHex] {
+			break
+		}
+	}
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "  ✓ approved — this machine is now an admin.")
+	fmt.Fprintln(os.Stderr, "    next: `dop admin login` to start an interactive session,")
+	fmt.Fprintln(os.Stderr, "          `dop admin status` to verify.")
+	return 0
+}
+
+// adminInitInline runs the same interactive admin-init flow that
+// `dop admin init` uses, so `dop admin join` on a fresh machine can
+// bootstrap without a separate command call.
+func adminInitInline(paths *config.Paths, pfromStdin bool) int {
+	pass1, err := readPassphrase("Choose a passphrase for your admin key: ", pfromStdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+		return 1
+	}
+	if len(pass1) < 8 {
+		fmt.Fprintln(os.Stderr, "dop admin join: passphrase must be at least 8 characters")
+		return 1
+	}
+	if !pfromStdin {
+		pass2, err := readPassphrase("Confirm passphrase: ", false)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+			return 1
+		}
+		if pass1 != pass2 {
+			fmt.Fprintln(os.Stderr, "dop admin join: passphrases do not match")
+			return 1
+		}
+	}
+	keys, err := admin.Generate()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+		return 1
+	}
+	wrapped, err := admin.Wrap(keys, pass1)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+		return 1
+	}
+	if err := admin.WriteFile(admin.KeyFile(paths), wrapped); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+		return 1
+	}
+	// Approval passphrase (matches admin init).
+	appPass1, err := readPassphrase("Choose an approval passphrase: ", pfromStdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+		return 1
+	}
+	if len(appPass1) < 10 {
+		fmt.Fprintln(os.Stderr, "dop admin join: approval passphrase must be at least 10 characters")
+		return 1
+	}
+	if !pfromStdin {
+		appPass2, err := readPassphrase("Confirm approval passphrase: ", false)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop admin join: %v\n", err)
+			return 1
+		}
+		if appPass1 != appPass2 {
+			fmt.Fprintln(os.Stderr, "dop admin join: approval passphrases do not match")
+			return 1
+		}
+	}
+	if err := approval.Set(paths, appPass1); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin join: store approval passphrase: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(os.Stderr, "  ✓ admin key generated")
+	return 0
+}
+
+var _ = errors.New // keep tidy

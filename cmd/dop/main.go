@@ -27,6 +27,8 @@ usage:
   dop admin logout                               end session
   dop admin status                               show session state + TTL
   dop admin set-approval                         (re)set the approval passphrase
+  dop admin join <VAULT-URL> <PIN>               join a vault as a new admin device (v1.9)
+  dop team invite --name <label>                 open an admin invite (v1.9)
   dop init --vault <url|path>                    attach vault (admin-required for first attach)
   dop token issue --grants CSV --name L [flags]  mint a capability + bearer (admin-required)
   dop token list                                 list capabilities (admin-required)
