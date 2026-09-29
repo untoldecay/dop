@@ -587,25 +587,50 @@ func loadVaultViaDaemon(client *admin.Client, paths *config.Paths) (*vault.Vault
 // saveVaultViaDaemon marshals vault and asks the daemon to encrypt +
 // write. Uses the admin's own age recipient from the session status.
 func saveVaultViaDaemon(client *admin.Client, paths *config.Paths, vaultPath string, v *vault.Vault) error {
-	// Bootstrap admin list on first save.
+	// Bootstrap admin list on first save. Match by pubkey, not by
+	// hostname — the old `_, ok := v.Admins["self"]` check never
+	// matched because we always wrote under `hostname`. Consequence:
+	// dop team remove --name $HOSTNAME on the current admin would
+	// remove the entry then have it silently re-added here. Also could
+	// duplicate entries if hostname changed on the same machine.
 	st, err := client.Status()
 	if err != nil {
 		return err
 	}
-	if len(v.Admins) == 0 {
+	if v.Admins == nil {
 		v.Admins = map[string]Admin{}
 	}
-	if _, ok := v.Admins["self"]; !ok {
+	if !adminPubkeyPresent(v, st.AdminPubkey) {
 		hostname, _ := os.Hostname()
 		if hostname == "" {
 			hostname = "admin"
 		}
-		v.Admins[hostname] = Admin{
+		// Avoid overwriting a distinct admin already registered under
+		// this hostname — de-duplicate against pubkey.
+		key := hostname
+		for i := 2; ; i++ {
+			existing, ok := v.Admins[key]
+			if !ok || strings.EqualFold(existing.Ed25519Pubkey, st.AdminPubkey) {
+				break
+			}
+			key = fmt.Sprintf("%s-%d", hostname, i)
+		}
+		v.Admins[key] = Admin{
 			AgeRecipient:  st.AgeRecipient,
 			Ed25519Pubkey: st.AdminPubkey,
 			AddedAt:       time.Now().UTC().Truncate(time.Second),
 			Note:          "self",
 		}
+	}
+
+	// v1.6.3 — sync sidecar records against the vault BEFORE writing
+	// the vault. Any capability whose metadata drifted (e.g. via
+	// `dop vault edit`) gets re-signed and its `.record` file
+	// regenerated. Revoked / removed capabilities have their sidecars
+	// deleted. Without this, `dop vault edit` could not effectively
+	// revoke, because exec reads the sidecar not the vault.
+	if err := syncSidecars(client, paths, v); err != nil {
+		return err
 	}
 
 	b, err := vault.EmitPlain(v)
@@ -632,6 +657,123 @@ func saveVaultViaDaemon(client *admin.Client, paths *config.Paths, vaultPath str
 	}
 	// Sync the trust sidecar so agent installs can verify signatures.
 	return trust.Write(paths, v)
+}
+
+// adminPubkeyPresent returns true if any admin entry in the vault
+// carries the given ed25519 pubkey (case-insensitive hex).
+func adminPubkeyPresent(v *vault.Vault, pubHex string) bool {
+	if pubHex == "" {
+		return false
+	}
+	for _, a := range v.Admins {
+		if strings.EqualFold(a.Ed25519Pubkey, pubHex) {
+			return true
+		}
+	}
+	return false
+}
+
+// syncSidecars keeps the on-disk `.record` sidecars aligned with the
+// current in-memory vault. For every ACTIVE capability whose sidecar
+// is missing or differs on {generation, bundle_hash, status, binding,
+// expires_at}, we re-sign and re-write the sidecar so that `dop exec`
+// (which reads the sidecar) sees the same truth as the vault.
+//
+// For every capability whose vault status is not active, or that no
+// longer has a vault entry at all, we remove the sidecar and bundle.
+//
+// This is what makes `dop vault edit` actually able to revoke a
+// capability by flipping Status — otherwise the sidecar would stay
+// stale and exec would still succeed.
+func syncSidecars(client *admin.Client, paths *config.Paths, v *vault.Vault) error {
+	dir := filepath.Join(paths.Vault, "capabilities")
+	// Nothing to sync if the vault has no capabilities and no dir.
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	// 1) Update / (re-)sign every active record whose sidecar drifted.
+	for capID, c := range v.Capabilities {
+		p := filepath.Join(dir, c.LookupID+".record")
+		if c.Status != capability.RecordStatusActive {
+			// Non-active — kill the sidecar (bundle is deleted by revoke
+			// path; leave it be if still present so we don't double-delete
+			// mid-operation).
+			_ = os.Remove(p)
+			continue
+		}
+		if sidecarMatches(p, c) {
+			continue
+		}
+		rec := vaultCapability2Record(c, capID)
+		if err := signRecordViaDaemon(client, &rec); err != nil {
+			return fmt.Errorf("resign %s: %w", c.LookupID, err)
+		}
+		// Reflect the new signature back into the vault map so the two
+		// stay coherent.
+		v.Capabilities[capID] = capability2VaultCapability(rec)
+		if err := writeRecordSidecar(paths, rec); err != nil {
+			return fmt.Errorf("write sidecar %s: %w", c.LookupID, err)
+		}
+	}
+	// 2) Delete orphan sidecars whose lookup_id no longer maps to any
+	// vault entry. Guards against admins deleting entries via
+	// `dop vault edit` — the sidecar should disappear too.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	known := map[string]bool{}
+	for _, c := range v.Capabilities {
+		if c.Status == capability.RecordStatusActive {
+			known[c.LookupID] = true
+		}
+	}
+	for _, e := range entries {
+		n := e.Name()
+		if !strings.HasSuffix(n, ".record") && !strings.HasSuffix(n, ".bundle") {
+			continue
+		}
+		lookup := strings.TrimSuffix(strings.TrimSuffix(n, ".record"), ".bundle")
+		if !known[lookup] {
+			_ = os.Remove(filepath.Join(dir, n))
+		}
+	}
+	return nil
+}
+
+// sidecarMatches returns true if the on-disk sidecar matches every
+// field a re-sign would change. Cheap comparison — avoids an argon2id-
+// like signing cost per save when nothing drifted.
+func sidecarMatches(path string, c vault.Capability) bool {
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var existing capability.Record
+	if err := json.Unmarshal(blob, &existing); err != nil {
+		return false
+	}
+	if existing.Generation != c.Generation ||
+		existing.BundleHash != c.BundleHash ||
+		existing.Status != c.Status ||
+		!existing.ExpiresAt.Equal(c.ExpiresAt) {
+		return false
+	}
+	// Binding drift — compare kind + pubkey (the fields that matter to
+	// exec's binding check).
+	if (existing.Binding == nil) != (c.Binding == nil) {
+		return false
+	}
+	if existing.Binding != nil && c.Binding != nil {
+		if existing.Binding.Kind != c.Binding.Kind ||
+			existing.Binding.Pubkey != c.Binding.Pubkey {
+			return false
+		}
+	}
+	return true
 }
 
 // writeRecordSidecar writes a signed capability record next to its

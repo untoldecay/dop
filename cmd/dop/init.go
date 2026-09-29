@@ -15,6 +15,8 @@ import (
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/trust"
+	"github.com/fray/dop/internal/vault"
 )
 
 func runInit(args []string) int {
@@ -56,7 +58,49 @@ func initAsAdmin(paths *config.Paths, source string) int {
 		fmt.Fprintln(os.Stderr, "  Run `dop admin init` first to generate one, or use `dop init --cache <url>` for an agent install.")
 		return 1
 	}
-	return attachRepo(source, paths.Vault, false)
+	if rc := attachRepo(source, paths.Vault, false); rc != 0 {
+		return rc
+	}
+	// v1.6.3 — bootstrap admins.trust on first attach if a session is
+	// already active. This is the chicken-and-egg fix: an admin who
+	// runs `admin init` + `init --vault` but no `token issue` never
+	// wrote admins.trust, so agent clones couldn't verify signatures.
+	// Best-effort; requires an unlocked session because trust.Write
+	// needs the admin pubkey from status.
+	if err := seedTrustIfPossible(paths); err != nil {
+		fmt.Fprintf(os.Stderr, "dop init: trust seed skipped: %v\n", err)
+	}
+	return 0
+}
+
+// seedTrustIfPossible writes an initial admins.trust with just this
+// admin's pubkey — but only if we have an active admin session. Silent
+// no-op when locked; the trust file will land at first `token issue`
+// via saveVaultViaDaemon.
+func seedTrustIfPossible(paths *config.Paths) error {
+	client := admin.NewClient(admin.SockPath(paths))
+	if !client.SessionActive() {
+		return nil
+	}
+	st, err := client.Status()
+	if err != nil {
+		return err
+	}
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "admin"
+	}
+	v := &vault.Vault{
+		SchemaVersion: vault.SchemaVersion,
+		Admins: map[string]vault.Admin{
+			hostname: {
+				AgeRecipient:  st.AgeRecipient,
+				Ed25519Pubkey: st.AdminPubkey,
+				Note:          "self",
+			},
+		},
+	}
+	return trust.Write(paths, v)
 }
 
 // initAsAgent clones the vault WITHOUT generating any admin key.
@@ -104,8 +148,33 @@ func attachRepo(source, dest string, agentInstall bool) int {
 	if agentInstall {
 		kind = "agent install"
 	}
+	// v1.6.3 — seed a .gitignore inside the vault dir so temp files
+	// from atomic renames or SOPS staging never get accidentally
+	// committed. Idempotent: skip if already present.
+	if err := ensureVaultGitignore(dest); err != nil {
+		fmt.Fprintf(os.Stderr, "dop init: warning: %v\n", err)
+	}
 	fmt.Fprintf(os.Stderr, "dop init: vault attached at %s (%s)\n", dest, kind)
 	return 0
+}
+
+// ensureVaultGitignore writes a minimal .gitignore inside the vault
+// checkout the first time we attach. Prevents editor swap files, SOPS
+// staging tempfiles, and atomic-rename leftovers from being committed
+// by `dop push` (which does `git add -A`).
+func ensureVaultGitignore(dest string) error {
+	p := filepath.Join(dest, ".gitignore")
+	if _, err := os.Stat(p); err == nil {
+		return nil
+	}
+	body := `# DOP-managed vault checkout — never commit these
+.dop-encrypt-*.yaml
+.vault-edit-*.yaml
+*.tmp
+*.swp
+.DS_Store
+`
+	return os.WriteFile(p, []byte(body), 0o644)
 }
 
 func ensureDestClear(dest string) error {

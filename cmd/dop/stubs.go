@@ -65,8 +65,21 @@ func runTeamRemove(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop team remove: %v\n", err)
 		return 1
 	}
-	if _, ok := v.Admins[*name]; !ok {
+	victimEntry, ok := v.Admins[*name]
+	if !ok {
 		fmt.Fprintf(os.Stderr, "dop team remove: no admin named %q\n", *name)
+		return 1
+	}
+	// v1.6.3 — safety checks. Neither of these can be defeated by
+	// `--force`: they'd brick the vault outright.
+	if len(v.Admins) <= 1 {
+		fmt.Fprintln(os.Stderr, "dop team remove: refusing — this is the only admin. Vault would become unrecoverable.")
+		return 1
+	}
+	st, serr := client.Status()
+	if serr == nil && strings.EqualFold(victimEntry.Ed25519Pubkey, st.AdminPubkey) {
+		fmt.Fprintln(os.Stderr, "dop team remove: refusing to remove yourself.")
+		fmt.Fprintln(os.Stderr, "  Ask another admin to run `dop team remove --name <you> --force` from their machine.")
 		return 1
 	}
 
@@ -93,8 +106,7 @@ func runTeamRemove(args []string) int {
 	// sidecars. Without this, records signed by the removed admin
 	// remain trusted (via admins.trust) until the admin explicitly
 	// revokes them, which is the opposite of what removal should mean.
-	victim := v.Admins[*name]
-	victimPub := strings.ToLower(victim.Ed25519Pubkey)
+	victimPub := strings.ToLower(victimEntry.Ed25519Pubkey)
 	revoked := 0
 	if victimPub != "" {
 		for capID, c := range v.Capabilities {

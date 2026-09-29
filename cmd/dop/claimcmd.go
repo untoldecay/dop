@@ -377,9 +377,12 @@ func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex stri
 	}
 	fmt.Fprintln(os.Stderr, "  the page asks for your DOP approval passphrase.")
 
-	// Clean up on Ctrl-C.
+	// Clean up on Ctrl-C or terminal close. SIGHUP matters when the
+	// user closes the shell hosting `dop claim` — without trapping it
+	// the process dies via runtime default, defers don't run, and we
+	// strand the pending-claim file + orphaned cloudflared subprocess.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigCh)
 
 	// Wait on: (1) the web server signaling a decision, (2) the pending

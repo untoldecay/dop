@@ -490,7 +490,11 @@ func verifySignedRecord(paths *config.Paths, lookupID string, bundleBytes []byte
 		return fmt.Errorf("load trust: %w", err)
 	}
 	if len(trusted) == 0 {
-		return errors.New("no admins.trust file (agent install has no way to verify — admin must `dop token issue` at least once to seed it)")
+		trustPath := trust.Path(paths)
+		if _, statErr := os.Stat(trustPath); statErr == nil {
+			return fmt.Errorf("admins.trust at %s lists zero admins — nothing to verify against", trustPath)
+		}
+		return fmt.Errorf("no admins.trust file at %s (agent install must `dop pull` after the admin has bootstrapped it)", trustPath)
 	}
 	if !trusted[strings.ToLower(rec.IssuedBy)] && !trusted[rec.IssuedBy] {
 		return fmt.Errorf("record signed by unknown admin: %s", short(rec.IssuedBy))

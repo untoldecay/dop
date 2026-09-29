@@ -169,17 +169,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
-	// Per-server rate limit — the URL itself is a public token, so
-	// argon2id cost alone isn't enough. Cap failed attempts before we
-	// even reach the crypto.
-	s.mu.Lock()
-	if s.rateFailures >= approveRateMax {
-		s.mu.Unlock()
+	// Shared rate limit — check the pending file's failure count so the
+	// web endpoint and `dop approve` CLI share the same 8-attempt cap.
+	// A same-uid attacker can't split attempts across the two paths.
+	cur, ferr := pendingclaim.Read(s.Paths, s.Pending.LookupID)
+	if ferr == nil && cur != nil && cur.FailureCount >= pendingclaim.MaxFailures {
 		s.markDecided(DecisionRejected)
 		http.Error(w, "too many failed passphrase attempts — claim aborted.", http.StatusTooManyRequests)
 		return
 	}
-	s.mu.Unlock()
 
 	if err := r.ParseForm(); err != nil {
 		s.renderPage(w, "malformed form", "")
@@ -200,17 +198,24 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		s.mu.Lock()
-		s.rateFailures++
-		remaining := approveRateMax - s.rateFailures
-		s.mu.Unlock()
-		msg := fmt.Sprintf("incorrect passphrase (%d attempt(s) left before this claim is aborted)", remaining)
-		if remaining <= 0 {
+		newCount, autoReject, berr := pendingclaim.BumpFailure(s.Paths, s.Pending.LookupID)
+		if berr != nil {
+			// Fall back to in-memory counter so we don't fail-open on
+			// a filesystem hiccup — better false-positive than
+			// unlimited attempts.
+			s.mu.Lock()
+			s.rateFailures++
+			newCount = s.rateFailures
+			s.mu.Unlock()
+			autoReject = newCount >= pendingclaim.MaxFailures
+		}
+		remaining := pendingclaim.MaxFailures - newCount
+		if autoReject || remaining <= 0 {
 			s.markDecided(DecisionRejected)
 			http.Error(w, "too many failed passphrase attempts — claim aborted.", http.StatusTooManyRequests)
 			return
 		}
-		s.renderPage(w, msg, "")
+		s.renderPage(w, fmt.Sprintf("incorrect passphrase (%d attempt(s) left before this claim is aborted)", remaining), "")
 		return
 	}
 	// Write the response FIRST so it starts flushing to the client

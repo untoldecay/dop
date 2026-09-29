@@ -44,6 +44,23 @@ func runApprove(args []string) int {
 		fmt.Fprintln(os.Stderr, "dop approve: no approval passphrase set — run `dop admin set-approval`")
 		return 1
 	}
+	// v1.6.3 — locate the pending claim BEFORE prompting so we can
+	// share the rate limiter with the web endpoint. A same-uid attacker
+	// spinning `dop approve --passphrase-stdin` in a loop trips this.
+	sasArg := fs.Arg(0)
+	pending, err := pendingclaim.FindBySAS(paths, sasArg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop approve: %v\n", err)
+		return 1
+	}
+	if pending == nil {
+		fmt.Fprintf(os.Stderr, "dop approve: no pending claim matches SAS %q\n", sasArg)
+		return 1
+	}
+	if pending.FailureCount >= pendingclaim.MaxFailures {
+		fmt.Fprintf(os.Stderr, "dop approve: this claim has already burned its %d passphrase attempts\n", pendingclaim.MaxFailures)
+		return 1
+	}
 	pass, err := readPassphrase("Approval passphrase: ", *pfromStdin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop approve: %v\n", err)
@@ -55,10 +72,19 @@ func runApprove(args []string) int {
 		return 1
 	}
 	if !ok {
-		fmt.Fprintln(os.Stderr, "dop approve: incorrect passphrase")
+		newCount, autoReject, berr := pendingclaim.BumpFailure(paths, pending.LookupID)
+		if berr != nil {
+			fmt.Fprintf(os.Stderr, "dop approve: bump failure counter: %v\n", berr)
+		}
+		remaining := pendingclaim.MaxFailures - newCount
+		if autoReject || remaining <= 0 {
+			fmt.Fprintf(os.Stderr, "dop approve: incorrect passphrase — claim aborted after %d attempts\n", pendingclaim.MaxFailures)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "dop approve: incorrect passphrase (%d attempt(s) left)\n", remaining)
 		return 1
 	}
-	return decideClaim(fs.Arg(0), pendingclaim.StateApproved)
+	return decideClaim(sasArg, pendingclaim.StateApproved)
 }
 
 func runReject(args []string) int {

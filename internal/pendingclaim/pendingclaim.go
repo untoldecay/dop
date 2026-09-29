@@ -55,7 +55,17 @@ type Record struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 	State        string    `json:"state"`
 	DecidedAt    time.Time `json:"decided_at,omitempty"`
+	// FailureCount — v1.6.3. Every failed passphrase attempt bumps
+	// this, whether from the web endpoint OR the `dop approve` CLI.
+	// The two paths share a limiter so an attacker can't burn attempts
+	// from the CLI to bypass a web-page counter.
+	FailureCount int `json:"failure_count,omitempty"`
 }
+
+// MaxFailures is the shared limit — approve/reject paths must call
+// BumpFailure and refuse when the count reaches this. Matches
+// approveRateMax in the approvalserver package.
+const MaxFailures = 8
 
 // NewSAS returns a 6-digit numeric code formatted as `XXX-XXX`.
 // 000000-999999 = 20 bits of entropy; scoped to a 2-minute window with
@@ -230,4 +240,44 @@ func SetState(paths *config.Paths, lookupID, state string) error {
 // Expired returns true if the pending claim's ExpiresAt has passed.
 func (r *Record) Expired(now time.Time) bool {
 	return now.After(r.ExpiresAt)
+}
+
+// BumpFailure atomically increments the on-disk failure counter for
+// the pending claim with this lookup_id. Returns the new count and
+// whether the pending claim has been auto-rejected (count >= Max).
+func BumpFailure(paths *config.Paths, lookupID string) (count int, autoRejected bool, err error) {
+	d, err := dir(paths)
+	if err != nil {
+		return 0, false, err
+	}
+	p := filepath.Join(d, lookupID+".json")
+	r, err := readFile(p)
+	if err != nil {
+		return 0, false, err
+	}
+	r.FailureCount++
+	if r.FailureCount >= MaxFailures {
+		r.State = StateRejected
+		r.DecidedAt = time.Now().UTC().Truncate(time.Second)
+		autoRejected = true
+	}
+	tmp, err := os.CreateTemp(d, ".dop-pending-*")
+	if err != nil {
+		return 0, false, err
+	}
+	tmpPath := tmp.Name()
+	if err := json.NewEncoder(tmp).Encode(r); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return 0, false, err
+	}
+	tmp.Close()
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		os.Remove(tmpPath)
+		return 0, false, err
+	}
+	if err := os.Rename(tmpPath, p); err != nil {
+		return 0, false, err
+	}
+	return r.FailureCount, autoRejected, nil
 }
