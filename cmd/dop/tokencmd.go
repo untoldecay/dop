@@ -56,7 +56,9 @@ func runToken(args []string) int {
 
 func runTokenIssue(args []string) int {
 	fs := flag.NewFlagSet("token issue", flag.ExitOnError)
-	grantsCSV := fs.String("grants", "", "comma-separated grant IDs (required)")
+	grantsCSV := fs.String("grants", "", "comma-separated grant IDs (required unless --project)")
+	projectFilter := fs.String("project", "", "resolve grants by project name (bundles all grants tagged with this project)")
+	tagsCSV := fs.String("tags", "", "when combined with --project or --grants, keep only grants carrying ALL these tags")
 	name := fs.String("name", "", "human-readable subject/label")
 	expires := fs.String("expires", "72h", "duration until expiry (default 72h)")
 	note := fs.String("note", "", "free-text note (not used in v1.0)")
@@ -66,8 +68,8 @@ func runTokenIssue(args []string) int {
 	_ = fs.Parse(args)
 	_ = note
 
-	if strings.TrimSpace(*grantsCSV) == "" {
-		fmt.Fprintln(os.Stderr, "dop token issue: --grants is required")
+	if strings.TrimSpace(*grantsCSV) == "" && strings.TrimSpace(*projectFilter) == "" {
+		fmt.Fprintln(os.Stderr, "dop token issue: one of --grants or --project is required")
 		return 2
 	}
 	if *noBind && *bindPubkey != "" {
@@ -103,7 +105,48 @@ func runTokenIssue(args []string) int {
 		return 1
 	}
 
-	// Validate grants exist.
+	// v1.8: augment explicit --grants with any grants matching --project
+	// (and, optionally, ALL of --tags). De-duplicate so passing both
+	// --grants and --project doesn't double-count.
+	tagFilter := splitCSV(*tagsCSV)
+	if strings.TrimSpace(*projectFilter) != "" {
+		seen := map[string]bool{}
+		for _, g := range grants {
+			seen[g] = true
+		}
+		for gid, g := range v.Grants {
+			if !containsFold(g.Projects, *projectFilter) {
+				continue
+			}
+			if !hasAllTags(g.Tags, tagFilter) {
+				continue
+			}
+			if !seen[gid] {
+				grants = append(grants, gid)
+				seen[gid] = true
+			}
+		}
+		if len(grants) == 0 {
+			fmt.Fprintf(os.Stderr, "dop token issue: no grants match --project=%q --tags=%v\n", *projectFilter, tagFilter)
+			return 1
+		}
+	} else if len(tagFilter) > 0 {
+		// --tags without --project narrows the explicit --grants set.
+		filtered := grants[:0]
+		for _, gid := range grants {
+			g, ok := v.Grants[gid]
+			if !ok {
+				continue
+			}
+			if hasAllTags(g.Tags, tagFilter) {
+				filtered = append(filtered, gid)
+			}
+		}
+		grants = filtered
+	}
+
+	// Validate grants exist + surface env-prefix collisions before
+	// silently overwriting.
 	unknown := []string{}
 	for _, g := range grants {
 		if _, ok := v.Grants[g]; !ok {
@@ -112,6 +155,14 @@ func runTokenIssue(args []string) int {
 	}
 	if len(unknown) > 0 {
 		fmt.Fprintf(os.Stderr, "dop token issue: unknown grants: %v\n", unknown)
+		return 1
+	}
+	if colliders := detectPrefixCollisions(v, grants); len(colliders) > 0 {
+		fmt.Fprintln(os.Stderr, "dop token issue: env-prefix collision — the last grant will overwrite the earlier one silently:")
+		for prefix, gs := range colliders {
+			fmt.Fprintf(os.Stderr, "  %s_TOKEN used by: %s\n", prefix, strings.Join(gs, ", "))
+		}
+		fmt.Fprintln(os.Stderr, "  fix: set an explicit env_prefix on the colliding grant(s), or drop one from --grants.")
 		return 1
 	}
 
@@ -911,6 +962,41 @@ func signRecordViaDaemon(client *admin.Client, rec *capability.Record) error {
 	return nil
 }
 
+// hasAllTags returns true when every tag in `want` is present in `have`
+// (case-insensitive). Empty `want` always matches.
+func hasAllTags(have, want []string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	for _, w := range want {
+		if !containsFold(have, w) {
+			return false
+		}
+	}
+	return true
+}
+
+// detectPrefixCollisions returns a map of prefix → grant-IDs when two
+// or more selected grants would write to the same `<PREFIX>_TOKEN`.
+func detectPrefixCollisions(v *vault.Vault, grants []string) map[string][]string {
+	byPrefix := map[string][]string{}
+	for _, gid := range grants {
+		g, ok := v.Grants[gid]
+		if !ok {
+			continue
+		}
+		p := g.EffectivePrefix()
+		byPrefix[p] = append(byPrefix[p], gid)
+	}
+	out := map[string][]string{}
+	for p, ids := range byPrefix {
+		if len(ids) > 1 {
+			out[p] = ids
+		}
+	}
+	return out
+}
+
 // resolveGrantsToEnv walks the vault and materializes the env bundle
 // that a bearer with these grants would receive at exec time.
 func resolveGrantsToEnv(v *vault.Vault, grants []string) map[string]string {
@@ -928,13 +1014,12 @@ func resolveGrantsToEnv(v *vault.Vault, grants []string) map[string]string {
 		if !ok {
 			continue
 		}
-		prefix := g.EnvPrefix
-		if prefix == "" {
-			prefix = strings.ToUpper(g.Integration)
-		}
+		// v1.8: EffectivePrefix defaults to <INTEGRATION>_<TOKEN> so grants
+		// within the same integration don't collide on `<INTEGRATION>_TOKEN`.
+		prefix := g.EffectivePrefix()
 		out[prefix+"_TOKEN"] = tok.Value
 		for mk, mv := range integ.Metadata {
-			out[prefix+"_"+strings.ToUpper(mk)] = mv
+			out[prefix+"_"+vault.SanitizeEnvKey(mk)] = mv
 		}
 	}
 	return out

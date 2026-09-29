@@ -85,10 +85,64 @@ type Token struct {
 }
 
 // Grant maps a scope label to (integration, upstream-token, env prefix).
+// v1.8: Projects + Tags are metadata for cosmetic grouping in the TUI
+// and CLI filters (`--project P`, `--tags T,T`). They do NOT act as
+// permission boundaries — grants are the smallest unit of permission,
+// projects are just a view. Grants can belong to multiple projects.
 type Grant struct {
-	Integration string `yaml:"integration"`
-	Token       string `yaml:"token"`
-	EnvPrefix   string `yaml:"env_prefix,omitempty"`
+	Integration string   `yaml:"integration"`
+	Token       string   `yaml:"token"`
+	EnvPrefix   string   `yaml:"env_prefix,omitempty"`
+	Projects    []string `yaml:"projects,omitempty"`
+	Tags        []string `yaml:"tags,omitempty"`
+}
+
+// EffectivePrefix returns the env-var prefix DOP should use when
+// materializing this grant. Precedence:
+//  1. `env_prefix` if set (explicit override).
+//  2. `<INTEGRATION>_<TOKEN>` uppercased, dashes/dots → underscores.
+//     Baking the token name into the default eliminates the collision
+//     footgun that plagued the pre-v1.8 default of `<INTEGRATION>` alone.
+func (g Grant) EffectivePrefix() string {
+	if g.EnvPrefix != "" {
+		return g.EnvPrefix
+	}
+	return SanitizeEnvKey(g.Integration + "_" + g.Token)
+}
+
+// SanitizeEnvKey uppercases s and rewrites any non-alphanumeric char to
+// `_`. Ensures the result is a valid POSIX env var name.
+func SanitizeEnvKey(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+			out = append(out, c-32)
+		case c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+			out = append(out, c)
+		default:
+			out = append(out, '_')
+		}
+	}
+	// Collapse repeated underscores.
+	dedup := make([]byte, 0, len(out))
+	prev := byte(0)
+	for _, c := range out {
+		if c == '_' && prev == '_' {
+			continue
+		}
+		dedup = append(dedup, c)
+		prev = c
+	}
+	// Trim leading/trailing underscores.
+	for len(dedup) > 0 && dedup[0] == '_' {
+		dedup = dedup[1:]
+	}
+	for len(dedup) > 0 && dedup[len(dedup)-1] == '_' {
+		dedup = dedup[:len(dedup)-1]
+	}
+	return string(dedup)
 }
 
 // Capability is the vault-side metadata record for one issued bearer.

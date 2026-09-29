@@ -53,7 +53,7 @@ echo "=== [7] issue against the fresh integration + grant"
 BEARER=$("$DOP" token issue --no-bind --grants notion.read --name test 2>/dev/null)
 [[ "$BEARER" == tok_1* ]] || fail "no bearer"
 env_out=$(DOP_TOKEN="$BEARER" "$DOP" exec --agent-name t -- env 2>/dev/null)
-echo "$env_out" | grep -q "NOTION_TOKEN=ntn_ro_NEW" || fail "wrong token value in env"
+echo "$env_out" | grep -q "NOTION_READ_TOKEN=ntn_ro_NEW" || { echo "$env_out"; fail "wrong token value in env"; }
 pass "issue + exec end-to-end"
 
 echo "=== [8] logout"
