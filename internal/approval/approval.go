@@ -66,8 +66,8 @@ func Configured(paths *config.Paths) bool {
 
 // Set hashes the passphrase with a fresh salt and writes it atomically.
 func Set(paths *config.Paths, passphrase string) error {
-	if len(passphrase) < 6 {
-		return errors.New("approval passphrase must be at least 6 characters")
+	if len(passphrase) < 10 {
+		return errors.New("approval passphrase must be at least 10 characters")
 	}
 	if err := paths.EnsureDirs(); err != nil {
 		return err

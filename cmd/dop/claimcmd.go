@@ -55,8 +55,19 @@ func runClaim(args []string) int {
 	shell := fs.Bool("shell", false, "after claim, print `eval $(dop env-shell ...)`-style exports")
 	skipApproval := fs.Bool("skip-approval", false, "finalize immediately without out-of-band approval (unsafe for chat handoff)")
 	noTunnel := fs.Bool("no-tunnel", false, "serve the approval page on LAN only (no Cloudflare tunnel)")
-	bindAddr := fs.String("bind", "127.0.0.1", "interface to bind the approval server (use 0.0.0.0 with --no-tunnel for LAN access)")
+	bindAddr := fs.String("bind", "", "interface to bind the approval server (default: 127.0.0.1 with tunnel, 0.0.0.0 with --no-tunnel)")
 	_ = fs.Parse(args)
+
+	// Default bind depends on tunnel mode: 127.0.0.1 is fine when the
+	// tunnel is the reachability path; --no-tunnel needs 0.0.0.0 so a
+	// phone on the same wifi can actually reach the server.
+	if *bindAddr == "" {
+		if *noTunnel {
+			*bindAddr = "0.0.0.0"
+		} else {
+			*bindAddr = "127.0.0.1"
+		}
+	}
 
 	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: dop claim <PIN>")
@@ -220,22 +231,35 @@ func runClaim(args []string) int {
 	}
 	v.Capabilities[capIDHex] = capability2VaultCapability(rec)
 
-	// Save vault before renaming the bundle — if vault write fails, we
-	// leave the old bundle in place.
-	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
+	// v1.6.2 — Reorder to minimize inconsistency on crash. Priority is
+	// "exec must keep working". Steps:
+	//   1. Persist the agent private key (so we don't lose it later).
+	//   2. Rename the bundle atomically (exec reads this; new binding lands).
+	//   3. Write the signed record sidecar (exec verifies signature via this).
+	//   4. Save the vault (heaviest, admin-view only).
+	//
+	// Failure between (2) and (3): bundle has pubkey, sidecar out of
+	// sync — exec's bundle_hash check fails. Rare and manually
+	// recoverable via revoke + reissue.
+	// Failure between (3) and (4): everything exec needs is on disk;
+	// only the vault's own view lags. Re-running claim will observe
+	// bundle+sidecar already updated and skip.
+	keyPath, err := writeAgentKey(paths, lookupID, priv)
+	if err != nil {
 		os.Remove(newBundlePath)
-		fmt.Fprintf(os.Stderr, "dop claim: save vault: %v\n", err)
+		fmt.Fprintf(os.Stderr, "dop claim: persist key: %v\n", err)
 		return 1
 	}
 	if err := os.Rename(newBundlePath, bundlePath); err != nil {
-		fmt.Fprintf(os.Stderr, "dop claim: swap bundle: %v (vault was updated — resync will fix)\n", err)
+		fmt.Fprintf(os.Stderr, "dop claim: swap bundle: %v\n", err)
 		return 1
 	}
-
-	// Persist the agent private key.
-	keyPath, err := writeAgentKey(paths, lookupID, priv)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop claim: persist key: %v\n", err)
+	if err := writeRecordSidecar(paths, rec); err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim: write record sidecar: %v\n", err)
+		return 1
+	}
+	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
+		fmt.Fprintf(os.Stderr, "dop claim: save vault (bundle+sidecar are consistent — retry with `dop admin login`): %v\n", err)
 		return 1
 	}
 
@@ -325,7 +349,7 @@ func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex stri
 	} else if !tunnel.Available() {
 		fmt.Fprintln(os.Stderr, "dop claim: cloudflared not on PATH — serving LAN-only. `brew install cloudflared` for internet approval.")
 	}
-	localURL := fmt.Sprintf("http://%s:%d/c/%s", bindAddr, port, displayToken)
+	localURL := fmt.Sprintf("http://%s:%d/c/%s", displayHost(bindAddr), port, displayToken)
 	if publicURL == "" {
 		publicURL = localURL
 	}
@@ -431,6 +455,40 @@ func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex stri
 			}
 		}
 	}
+}
+
+// displayHost turns the bind address into a URL-friendly host. If the
+// caller bound to 0.0.0.0 (LAN mode), we discover the first non-loopback
+// IPv4 so the printed URL is actually reachable from a phone.
+func displayHost(bind string) string {
+	if bind != "0.0.0.0" && bind != "" && bind != "::" {
+		return bind
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "127.0.0.1"
+	}
+	for _, i := range ifaces {
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := i.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			v4 := ipnet.IP.To4()
+			if v4 == nil || v4.IsLoopback() || v4.IsLinkLocalUnicast() {
+				continue
+			}
+			return v4.String()
+		}
+	}
+	return "127.0.0.1"
 }
 
 // writeAgentKey persists the ed25519 private key to

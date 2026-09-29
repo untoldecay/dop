@@ -6,6 +6,7 @@ package main
 import (
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,8 +18,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/trust"
 	"github.com/fray/dop/internal/vault"
 )
 
@@ -51,6 +54,18 @@ func runExec(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
 		return 1
 	}
+	paths, _ := config.Resolve()
+	audit.Append(paths, audit.Event{
+		Kind:     audit.EventExec,
+		Subject:  res.subject,
+		LookupID: res.lookupID,
+		Extra: map[string]string{
+			"agent_name":  *agentName,
+			"generation":  fmt.Sprintf("%d", res.generation),
+			"env_keys":    fmt.Sprintf("%d", len(env)),
+			"child":       filepath.Base(child[0]),
+		},
+	})
 	fmt.Fprintf(os.Stderr, "dop exec: agent=%q subject=%q gen=%d env_keys=%d\n",
 		*agentName, res.subject, res.generation, len(env))
 	if err := execChild(child, env, *cleanEnv); err != nil {
@@ -244,6 +259,13 @@ func resolveBearer(bearer string) (map[string]string, resolveResult, error) {
 		return nil, resolveResult{}, err
 	}
 
+	// v1.6.2 — verify signed capability record BEFORE decrypting the
+	// bundle. The record's admin signature is the actual root of trust;
+	// the bundle envelope alone only proves bearer possession.
+	if err := verifySignedRecord(paths, lookupID, bundleBytes); err != nil {
+		return nil, resolveResult{}, fmt.Errorf("record verify: %w", err)
+	}
+
 	// Load capability record from the local generation cache OR the
 	// vault (admin installs only). Agents rely on a cache updated at
 	// pull time. For Phase 4 minimum, we accept the bundle's own
@@ -424,23 +446,66 @@ func bearerFingerprint(bearer string) string {
 	return bearer
 }
 
-// verifyRecord (Phase 4.5): given a Capability record with a known
-// admin pubkey, verify its ed25519 signature. Included here for
-// completeness; the exec path currently trusts the bundle envelope and
-// generation cache. A full verification pass requires reading the vault
-// (admin install) OR distributing the trusted admin pubkey list as a
-// sidecar to agent installs. Ships as a Phase 5 polish.
-func verifyRecord(rec capability.Record, adminPubkeys []string) error {
-	if err := rec.Verify(); err != nil {
+// verifySignedRecord (v1.6.2) is the actual signature-verification
+// path the exec plane now runs. It loads:
+//   - `<lookup_id>.record` (JSON, signed capability.Record)
+//   - `admins.trust` (JSON, plaintext list of admin ed25519 pubkeys)
+// then confirms:
+//   - the record's ed25519 signature is valid over its canonical form
+//   - the record.IssuedBy pubkey is in the trust list
+//   - the record.BundleHash matches sha256 of the on-disk bundle
+//   - the record.LookupID matches the computed lookup id
+//   - the record.Status is "active"
+//
+// Missing sidecar OR missing trust file → hard-fail. This is the
+// gate that promotes "any bearer + any bundle file" (the pre-v1.6.2
+// contract) to "any bearer + a bundle whose record was signed by a
+// currently-trusted admin".
+func verifySignedRecord(paths *config.Paths, lookupID string, bundleBytes []byte) error {
+	recPath := filepath.Join(paths.Vault, "capabilities", lookupID+".record")
+	blob, err := os.ReadFile(recPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no signed record for this bearer (%s missing)", recPath)
+		}
 		return err
 	}
-	// Also confirm IssuedBy is a known admin.
-	for _, p := range adminPubkeys {
-		if strings.EqualFold(rec.IssuedBy, p) {
-			return nil
-		}
+	var rec capability.Record
+	if err := json.Unmarshal(blob, &rec); err != nil {
+		return fmt.Errorf("record json: %w", err)
 	}
-	return fmt.Errorf("record signed by unknown admin: %s", rec.IssuedBy)
+
+	if rec.Status != capability.RecordStatusActive {
+		return fmt.Errorf("record status is %q", rec.Status)
+	}
+	if rec.LookupID != lookupID {
+		return fmt.Errorf("record lookup_id mismatch")
+	}
+	if want := capability.HashBundle(bundleBytes); rec.BundleHash != want {
+		return fmt.Errorf("bundle hash mismatch (record %s ≠ file %s) — bundle tampered or out of sync",
+			short(rec.BundleHash), short(want))
+	}
+	trusted, err := trust.Load(paths)
+	if err != nil {
+		return fmt.Errorf("load trust: %w", err)
+	}
+	if len(trusted) == 0 {
+		return errors.New("no admins.trust file (agent install has no way to verify — admin must `dop token issue` at least once to seed it)")
+	}
+	if !trusted[strings.ToLower(rec.IssuedBy)] && !trusted[rec.IssuedBy] {
+		return fmt.Errorf("record signed by unknown admin: %s", short(rec.IssuedBy))
+	}
+	if err := rec.Verify(); err != nil {
+		return fmt.Errorf("signature: %w", err)
+	}
+	return nil
+}
+
+func short(s string) string {
+	if len(s) > 12 {
+		return s[:12] + "…"
+	}
+	return s
 }
 
 // stubs to keep imports honest — some ed25519 use is deferred to Phase 5.

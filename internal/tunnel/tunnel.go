@@ -23,10 +23,24 @@ import (
 	"time"
 )
 
-// urlRegexp matches the "https://<something>.trycloudflare.com" line
-// cloudflared prints in its startup banner. cloudflared writes it to
-// stderr wrapped in a fancy box; we grep the URL out.
-var urlRegexp = regexp.MustCompile(`https://[a-z0-9-]+\.trycloudflare\.com`)
+// urlRegexps match the Quick-Tunnel URLs cloudflared prints in its
+// startup banner. Order matters: we try the most specific first, then
+// fall back to any https URL under trycloudflare.com or cfargotunnel.com
+// so a minor banner tweak upstream doesn't silently break us.
+var urlRegexps = []*regexp.Regexp{
+	regexp.MustCompile(`https://[a-z0-9-]+\.trycloudflare\.com`),
+	regexp.MustCompile(`https://[a-z0-9-]+\.cfargotunnel\.com`),
+	regexp.MustCompile(`https?://[a-z0-9.-]*(?:trycloudflare|cfargotunnel)\.com[^\s]*`),
+}
+
+func findURL(line string) string {
+	for _, re := range urlRegexps {
+		if m := re.FindString(line); m != "" {
+			return m
+		}
+	}
+	return ""
+}
 
 // Tunnel is a running cloudflared subprocess.
 type Tunnel struct {
@@ -75,7 +89,7 @@ func Start(ctx context.Context, localPort int, timeout time.Duration) (*Tunnel, 
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !found {
-				if m := urlRegexp.FindString(line); m != "" {
+				if m := findURL(line); m != "" {
 					urlCh <- m
 					found = true
 				}

@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -29,6 +30,7 @@ import (
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/trust"
 	"github.com/fray/dop/internal/vault"
 )
 
@@ -247,6 +249,10 @@ func runTokenIssue(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
 		return 1
 	}
+	if err := writeRecordSidecar(paths, rec); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token issue: write record: %v\n", err)
+		return 1
+	}
 
 	audit.Append(paths, audit.Event{
 		Kind:     audit.EventIssue,
@@ -348,9 +354,13 @@ func runTokenRevoke(args []string) int {
 	}
 	v.Capabilities[matched] = capability2VaultCapability(rec)
 
-	// Delete the bundle file.
+	// Delete the bundle + record files.
 	bundlePath := filepath.Join(paths.Vault, "capabilities", c.LookupID+".bundle")
 	if err := os.Remove(bundlePath); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "dop token revoke: warning: %v\n", err)
+	}
+	recordPath := filepath.Join(paths.Vault, "capabilities", c.LookupID+".record")
+	if err := os.Remove(recordPath); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "dop token revoke: warning: %v\n", err)
 	}
 
@@ -513,6 +523,10 @@ func runTokenRepin(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop token repin: swap bundle: %v\n", err)
 		return 1
 	}
+	if err := writeRecordSidecar(paths, rec); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token repin: write record: %v\n", err)
+		return 1
+	}
 
 	audit.Append(paths, audit.Event{
 		Kind:     audit.EventRepin,
@@ -613,7 +627,32 @@ func saveVaultViaDaemon(client *admin.Client, paths *config.Paths, vaultPath str
 		return err
 	}
 
-	return client.EncryptVault(vaultPath, b, recipient)
+	if err := client.EncryptVault(vaultPath, b, recipient); err != nil {
+		return err
+	}
+	// Sync the trust sidecar so agent installs can verify signatures.
+	return trust.Write(paths, v)
+}
+
+// writeRecordSidecar writes a signed capability record next to its
+// bundle so `dop exec` (which never opens the vault) can verify the
+// admin signature.
+func writeRecordSidecar(paths *config.Paths, rec capability.Record) error {
+	dir := filepath.Join(paths.Vault, "capabilities")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	p := filepath.Join(dir, rec.LookupID+".record")
+	blob, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	blob = append(blob, '\n')
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, blob, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
 }
 
 // writeSopsConfig writes a .sops.yaml file in the vault dir with the

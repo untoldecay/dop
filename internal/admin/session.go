@@ -182,6 +182,17 @@ func (s *Session) ttlLoop() {
 
 func (s *Session) handleConn(conn net.Conn) {
 	defer conn.Close()
+	// Verify the peer runs as the same uid as this daemon. The socket
+	// is already mode 0600 in a 0700 directory, but peer-cred adds
+	// defense against fd inheritance, race conditions, and any
+	// non-obvious path a different-uid process might reach the socket.
+	if uid, err := peerUID(conn); err != nil {
+		WriteMessage(conn, Response{Error: "peer-cred: " + err.Error()})
+		return
+	} else if uid != uint32(os.Geteuid()) {
+		WriteMessage(conn, Response{Error: "peer uid mismatch"})
+		return
+	}
 	// Enforce per-connection read timeout — the client should send its
 	// request promptly.
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))

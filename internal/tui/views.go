@@ -242,15 +242,52 @@ type issueView struct {
 	pin       string
 	done      bool
 	flash     string
-	grantList []string
+
+	// Grants step (v1.6.1) — pick-from-list, following TUI_GUIDELINES
+	// "List-picker views" rules. Falls back to text entry when the
+	// vault has no grants declared yet.
+	grantList     []string        // sorted, from vault
+	grantSelected map[string]bool // key = grant id
+	grantCursor   int
 }
 
 func newIssueView(c *admin.Client, p *config.Paths) *issueView {
-	v := &issueView{client: c, paths: p}
+	v := &issueView{client: c, paths: p, grantSelected: map[string]bool{}}
 	v.expiryBuf.WriteString("72h") // sensible default
 	// Try to load available grants from the vault for UX.
 	v.grantList = loadGrantsForList(c, p)
 	return v
+}
+
+// grantsListMode returns true when we should show the picker instead
+// of the fallback text field.
+func (v *issueView) grantsListMode() bool { return len(v.grantList) > 0 }
+
+// syncGrantsBuf reflects the current selection into grantsBuf so the
+// downstream `dop token issue` call sees the CSV.
+func (v *issueView) syncGrantsBuf() {
+	v.grantsBuf.Reset()
+	first := true
+	for _, g := range v.grantList {
+		if !v.grantSelected[g] {
+			continue
+		}
+		if !first {
+			v.grantsBuf.WriteString(",")
+		}
+		v.grantsBuf.WriteString(g)
+		first = false
+	}
+}
+
+func (v *issueView) selectedGrantCount() int {
+	n := 0
+	for _, sel := range v.grantSelected {
+		if sel {
+			n++
+		}
+	}
+	return n
 }
 
 func (v *issueView) Init() tea.Cmd { return nil }
@@ -284,6 +321,39 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Any key from bearer display → done
 			v.done = true
 			v.flash = "issue: bearer copied to clipboard? make sure — it's shown once"
+			return v, nil
+		}
+		// Grants step is a multi-select list when the vault has grants.
+		if v.step == 1 && v.grantsListMode() {
+			switch mm.String() {
+			case "up", "k":
+				if v.grantCursor > 0 {
+					v.grantCursor--
+				}
+			case "down", "j":
+				if v.grantCursor < len(v.grantList)-1 {
+					v.grantCursor++
+				}
+			case " ":
+				g := v.grantList[v.grantCursor]
+				v.grantSelected[g] = !v.grantSelected[g]
+			case "a":
+				for _, g := range v.grantList {
+					v.grantSelected[g] = true
+				}
+			case "n":
+				for _, g := range v.grantList {
+					v.grantSelected[g] = false
+				}
+			case "enter":
+				if v.selectedGrantCount() == 0 {
+					v.err = "select at least one grant (space to toggle)"
+					return v, nil
+				}
+				v.err = ""
+				v.syncGrantsBuf()
+				v.step++
+			}
 			return v, nil
 		}
 		switch mm.String() {
@@ -406,27 +476,65 @@ func (v *issueView) View() string {
 		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
 		return b.String()
 	}
-	labels := []string{"Subject (label)", "Grants (comma-separated)", "Expires (e.g. 72h, 30d)"}
+	labels := []string{"Subject (label)", "Grants", "Expires (e.g. 72h, 30d)"}
 	values := []string{v.nameBuf.String(), v.grantsBuf.String(), v.expiryBuf.String()}
+
+	// Steps 0 and 2 always render as text-entry. Step 1 renders as a
+	// picker when the vault has grants, otherwise text-entry.
+	pickerAtStep1 := v.step == 1 && v.grantsListMode()
+
 	for i, l := range labels {
+		if i == 1 && pickerAtStep1 {
+			// Skip the text-entry row for grants; the picker renders below.
+			continue
+		}
 		style := mutedSt
 		if i == v.step {
 			style = cursorSt
 		}
 		b.WriteString(style.Render(l) + ": ")
-		b.WriteString(values[i])
-		if i == v.step {
-			b.WriteString(cursorSt.Render("▎"))
+		if i == 1 {
+			// Show the currently committed selection when NOT on this step.
+			b.WriteString(values[i])
+		} else {
+			b.WriteString(values[i])
+			if i == v.step {
+				b.WriteString(cursorSt.Render("▎"))
+			}
 		}
 		b.WriteString("\n")
 	}
-	if len(v.grantList) > 0 && v.step == 1 {
-		b.WriteString("\n" + mutedSt.Render("available grants: "+strings.Join(v.grantList, ", ")) + "\n")
+
+	if pickerAtStep1 {
+		b.WriteString("\n")
+		b.WriteString(cursorSt.Render("Grants") + "  " +
+			mutedSt.Render(fmt.Sprintf("%d/%d selected", v.selectedGrantCount(), len(v.grantList))) +
+			"\n")
+		for i, g := range v.grantList {
+			cursor := "  "
+			labelStyle := lipgloss.NewStyle()
+			if i == v.grantCursor {
+				cursor = cursorSt.Render("➤ ")
+				labelStyle = cursorSt
+			}
+			mark := "○"
+			if v.grantSelected[g] {
+				mark = okSt.Render("●")
+			}
+			b.WriteString(cursor + mark + " " + labelStyle.Render(g) + "\n")
+		}
+	} else if len(v.grantList) == 0 && v.step == 1 {
+		b.WriteString("\n" + mutedSt.Render("no grants defined in vault — type them manually") + "\n")
 	}
+
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("enter next · esc cancel"))
+	if pickerAtStep1 {
+		b.WriteString("\n" + helpSt.Render("↑↓ move · space toggle · a all · n none · enter next · esc cancel"))
+	} else {
+		b.WriteString("\n" + helpSt.Render("enter next · esc cancel"))
+	}
 	return b.String()
 }
 

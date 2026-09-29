@@ -65,11 +65,13 @@ grep -q "^sops:" "$VAULT_DIR/vault.yaml" || fail "vault not encrypted after issu
 grep -q "ENC\\[AES256" "$VAULT_DIR/vault.yaml" || fail "no ENC values"
 pass "vault SOPS-wrapped"
 
-echo "=== [7] capability bundle exists"
+echo "=== [7] capability bundle + record exist"
 ls "$VAULT_DIR/capabilities" >/dev/null 2>&1 || fail "no capabilities dir"
-BUNDLES=$(ls "$VAULT_DIR/capabilities" | wc -l | tr -d ' ')
+BUNDLES=$(ls "$VAULT_DIR/capabilities"/*.bundle 2>/dev/null | wc -l | tr -d ' ')
+RECORDS=$(ls "$VAULT_DIR/capabilities"/*.record 2>/dev/null | wc -l | tr -d ' ')
 [[ "$BUNDLES" == "1" ]] || fail "expected 1 bundle, got $BUNDLES"
-pass "bundle written"
+[[ "$RECORDS" == "1" ]] || fail "expected 1 record, got $RECORDS"
+pass "bundle + signed record written"
 
 echo "=== [8] token list shows the capability"
 "$DOP" token list 2>/dev/null | grep -q "test-agent" || fail "list didn't show subject"

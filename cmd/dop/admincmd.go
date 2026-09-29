@@ -112,8 +112,8 @@ func runAdminInit(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop admin init: approval passphrase: %v\n", err)
 		return 1
 	}
-	if len(appPass1) < 6 {
-		fmt.Fprintln(os.Stderr, "dop admin init: approval passphrase must be at least 6 characters")
+	if len(appPass1) < 10 {
+		fmt.Fprintln(os.Stderr, "dop admin init: approval passphrase must be at least 10 characters")
 		return 1
 	}
 	if !*pfromStdin {
@@ -137,7 +137,9 @@ func runAdminInit(args []string) int {
 
 // runAdminSetApproval (re)sets the approval passphrase without touching
 // the admin key. Useful if the passphrase leaks or the user wants to
-// rotate.
+// rotate. Requires an active admin session — otherwise a same-uid
+// attacker could silently swap the passphrase and then self-approve
+// pending claims.
 func runAdminSetApproval(args []string) int {
 	fs := flag.NewFlagSet("admin set-approval", flag.ExitOnError)
 	pfromStdin := fs.Bool("passphrase-stdin", false, "read passphrase from stdin (testing only)")
@@ -148,13 +150,18 @@ func runAdminSetApproval(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop admin set-approval: %v\n", err)
 		return 1
 	}
+	client := admin.NewClient(admin.SockPath(paths))
+	if !client.SessionActive() {
+		fmt.Fprintln(os.Stderr, "dop admin set-approval: no active admin session — run `dop admin login` first")
+		return 1
+	}
 	pass1, err := readPassphrase("New approval passphrase: ", *pfromStdin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin set-approval: %v\n", err)
 		return 1
 	}
-	if len(pass1) < 6 {
-		fmt.Fprintln(os.Stderr, "dop admin set-approval: passphrase must be at least 6 characters")
+	if len(pass1) < 10 {
+		fmt.Fprintln(os.Stderr, "dop admin set-approval: passphrase must be at least 10 characters")
 		return 1
 	}
 	if !*pfromStdin {

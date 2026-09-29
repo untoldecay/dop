@@ -46,7 +46,7 @@ CLAIM_PID=$!
 # Wait for the URL line to appear in stderr.
 URL=""
 for _ in {1..30}; do
-    URL=$( (grep -oE 'http://127.0.0.1:[0-9]+/c/[a-f0-9]+' "$WORKROOT/claim.err" 2>/dev/null || true) | head -1 )
+    URL=$( (grep -oE 'http://([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+/c/[a-f0-9]+' "$WORKROOT/claim.err" 2>/dev/null || true) | head -1 )
     if [[ -n "$URL" ]]; then break; fi
     sleep 0.2
 done
@@ -94,11 +94,11 @@ DOP_TOKEN="$B2" "$DOP" claim --no-tunnel "$P2" >/dev/null 2>"$WORKROOT/claim2.er
 CLAIM2=$!
 URL2=""
 for _ in {1..30}; do
-    URL2=$( (grep -oE 'http://127.0.0.1:[0-9]+/c/[a-f0-9]+' "$WORKROOT/claim2.err" 2>/dev/null || true) | head -1 )
+    URL2=$( (grep -oE 'http://([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+/c/[a-f0-9]+' "$WORKROOT/claim2.err" 2>/dev/null || true) | head -1 )
     if [[ -n "$URL2" ]]; then break; fi
     sleep 0.2
 done
-BASE=$(echo "$URL2" | grep -oE 'http://127.0.0.1:[0-9]+')
+BASE=$(echo "$URL2" | grep -oE 'http://([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+')
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/c/deadbeefdeadbeef")
 [[ "$code" == "404" ]] || fail "wrong token should 404, got $code"
 pass "wrong token 404s"

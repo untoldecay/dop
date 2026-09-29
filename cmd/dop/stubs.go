@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/fray/dop/internal/admin"
+	"github.com/fray/dop/internal/audit"
+	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/vault"
 )
@@ -86,13 +88,45 @@ func runTeamRemove(args []string) int {
 		return 0
 	}
 
-	// Force-remove.
+	// Force-remove. v1.6.4: also revoke every capability signed by the
+	// removed admin's ed25519 pubkey and delete their bundle/record
+	// sidecars. Without this, records signed by the removed admin
+	// remain trusted (via admins.trust) until the admin explicitly
+	// revokes them, which is the opposite of what removal should mean.
+	victim := v.Admins[*name]
+	victimPub := strings.ToLower(victim.Ed25519Pubkey)
+	revoked := 0
+	if victimPub != "" {
+		for capID, c := range v.Capabilities {
+			if !strings.EqualFold(c.IssuedBy, victimPub) {
+				continue
+			}
+			if c.Status != capability.RecordStatusActive {
+				continue
+			}
+			c.Status = capability.RecordStatusRevoked
+			c.Generation = v.BumpGeneration(c.Subject)
+			v.Capabilities[capID] = c
+			// Delete on-disk artifacts.
+			bp := filepath.Join(paths.Vault, "capabilities", c.LookupID+".bundle")
+			_ = os.Remove(bp)
+			rp := filepath.Join(paths.Vault, "capabilities", c.LookupID+".record")
+			_ = os.Remove(rp)
+			audit.Append(paths, audit.Event{
+				Kind:     audit.EventRevoke,
+				Subject:  c.Subject,
+				LookupID: c.LookupID,
+				Extra:    map[string]string{"reason": "admin_removed", "admin": *name},
+			})
+			revoked++
+		}
+	}
 	delete(v.Admins, *name)
 	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
 		fmt.Fprintf(os.Stderr, "dop team remove: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "dop team remove: %s removed\n", *name)
+	fmt.Fprintf(os.Stderr, "dop team remove: %s removed; revoked %d capability(ies) they had issued\n", *name, revoked)
 	return 0
 }
 

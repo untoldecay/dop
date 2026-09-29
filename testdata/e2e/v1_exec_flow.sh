@@ -97,7 +97,8 @@ echo "=== [11] tamper the bundle → exec fails"
 # Issue a fresh bearer specifically for this test.
 TAMPER_BEARER=$("$DOP" token issue --no-bind --grants notion.read --name tamperX --expires 1h 2>/dev/null)
 # Pick the newest bundle — that's the one for TAMPER_BEARER.
-BUNDLE=$(ls -t "$VAULT_DIR/capabilities" | head -1)
+BUNDLE=$(ls -t "$VAULT_DIR/capabilities"/*.bundle | head -1)
+BUNDLE=$(basename "$BUNDLE")
 [[ -n "$BUNDLE" ]] || fail "no bundle to tamper"
 # Flip a byte in the ciphertext region.
 python3 -c "
