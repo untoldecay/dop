@@ -29,17 +29,27 @@ const (
 	inviteKindTeamMember inviteKind = "team_member"
 )
 
+// Step ordinals. Device flow uses all five; team-member flow skips
+// inviteStepIdentity and goes name → passphrase → running → done.
+const (
+	inviteStepName       = 0
+	inviteStepIdentity   = 1 // device only
+	inviteStepPassphrase = 2
+	inviteStepRunning    = 3
+	inviteStepDone       = 4
+)
+
 type inviteView struct {
 	paths *config.Paths
 	kind  inviteKind
 
-	step          int // 0 = name, 1 = passphrase, 2 = running, 3 = done
+	step          int
 	nameBuf       strings.Builder
 	passBuf       strings.Builder
 	err           string
 	done          bool
 	flash         string
-	shareIdentity bool // v1.9.3 — toggle at name step with 's'
+	shareIdentity bool // v1.9.5 — chosen at inviteStepIdentity (device only)
 
 	// Runtime state — set once we spawn the subprocess.
 	cmd       *exec.Cmd
@@ -89,14 +99,14 @@ func (v *inviteView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch mm.String() {
 		case "esc", "ctrl+c":
-			if v.step == 2 && v.cmd != nil && v.cmd.Process != nil {
+			if v.step == inviteStepRunning && v.cmd != nil && v.cmd.Process != nil {
 				// Kill the subprocess so it doesn't linger polling.
 				_ = v.cmd.Process.Kill()
 			}
 			v.done = true
 			return v, nil
 		}
-		if v.step == 3 {
+		if v.step == inviteStepDone {
 			// Any key returns to menu.
 			v.done = true
 			return v, nil
@@ -111,14 +121,13 @@ func (v *inviteView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				buf.Reset()
 				buf.WriteString(s[:len(s)-1])
 			}
-		case "ctrl+s":
-			// v1.9.3 — Flavor Y toggle. Only for "device" kind
-			// (share-identity with a teammate is a security anti-pattern).
-			if v.kind == inviteKindDevice && v.step < 2 {
+		case "left", "right", "up", "down", "tab", " ":
+			// v1.9.5 — arrow / space / tab toggle at the identity step.
+			if v.step == inviteStepIdentity {
 				v.shareIdentity = !v.shareIdentity
 			}
 		default:
-			if len(mm.Runes) > 0 && v.step < 2 {
+			if len(mm.Runes) > 0 && (v.step == inviteStepName || v.step == inviteStepPassphrase) {
 				v.currentBuf().WriteString(string(mm.Runes))
 			}
 		}
@@ -128,9 +137,9 @@ func (v *inviteView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (v *inviteView) currentBuf() *strings.Builder {
 	switch v.step {
-	case 0:
+	case inviteStepName:
 		return &v.nameBuf
-	case 1:
+	case inviteStepPassphrase:
 		return &v.passBuf
 	}
 	return &strings.Builder{}
@@ -138,20 +147,27 @@ func (v *inviteView) currentBuf() *strings.Builder {
 
 func (v *inviteView) advance() (tea.Model, tea.Cmd) {
 	switch v.step {
-	case 0:
+	case inviteStepName:
 		if strings.TrimSpace(v.nameBuf.String()) == "" {
 			v.err = "name required"
 			return v, nil
 		}
 		v.err = ""
-		v.step = 1
-	case 1:
+		if v.kind == inviteKindDevice {
+			v.step = inviteStepIdentity
+		} else {
+			v.step = inviteStepPassphrase
+		}
+	case inviteStepIdentity:
+		v.err = ""
+		v.step = inviteStepPassphrase
+	case inviteStepPassphrase:
 		if strings.TrimSpace(v.passBuf.String()) == "" {
 			v.err = "approval passphrase required"
 			return v, nil
 		}
 		v.err = ""
-		v.step = 2
+		v.step = inviteStepRunning
 		return v, tea.Batch(v.launch(), v.waitForLine())
 	}
 	return v, nil
@@ -254,54 +270,48 @@ func (v *inviteView) View() string {
 	if v.kind == inviteKindTeamMember {
 		titleLabel = "Invite team member"
 	}
-	b.WriteString(titleSt.Render(titleLabel) + "\n")
-	if v.kind == inviteKindDevice {
-		state := "OFF (new independent identity)"
-		if v.shareIdentity {
-			state = "ON (SAME identity as this machine — single revocation surface)"
-		}
-		b.WriteString(mutedSt.Render("share identity: "+state+"   [ctrl-s to toggle]") + "\n")
-		if v.shareIdentity {
-			b.WriteString(failSt.Render("⚠  losing EITHER device leaks the shared admin identity — rotate the whole admin key on loss") + "\n")
-		}
+	b.WriteString(titleSt.Render(titleLabel) + "\n\n")
+
+	// Field 1: label.
+	labelStyle := mutedSt
+	if v.step == inviteStepName {
+		labelStyle = cursorSt
+	}
+	b.WriteString(labelStyle.Render("Device / member label") + ": ")
+	b.WriteString(v.nameBuf.String())
+	if v.step == inviteStepName {
+		b.WriteString(cursorSt.Render("▎"))
 	}
 	b.WriteString("\n")
 
-	labels := []string{"Device / member label", "Approval passphrase"}
-	for i, l := range labels {
-		if i > v.step && v.step < 2 {
-			break
+	// Field 2: identity mode (device only).
+	if v.kind == inviteKindDevice && v.step >= inviteStepIdentity {
+		idStyle := mutedSt
+		if v.step == inviteStepIdentity {
+			idStyle = cursorSt
 		}
-		style := mutedSt
-		if i == v.step {
-			style = cursorSt
-		}
-		b.WriteString(style.Render(l) + ": ")
-		if v.step >= 2 && i < 2 {
-			if i == 0 {
-				b.WriteString(v.nameBuf.String())
-			} else {
-				b.WriteString(strings.Repeat("•", len(v.passBuf.String())))
-			}
-			b.WriteString("\n")
-			continue
-		}
-		if i == v.step {
-			if i == 1 {
-				b.WriteString(strings.Repeat("•", len(v.passBuf.String())))
-			} else {
-				b.WriteString(v.nameBuf.String())
-			}
-			b.WriteString(cursorSt.Render("▎"))
+		b.WriteString(idStyle.Render("Identity") + ":       " + renderIdentityChoice(v.shareIdentity, v.step == inviteStepIdentity) + "\n")
+		if v.shareIdentity {
+			b.WriteString("             " + failSt.Render("⚠  losing EITHER device leaks the shared admin identity") + "\n")
 		} else {
-			if i == 0 {
-				b.WriteString(v.nameBuf.String())
-			}
+			b.WriteString("             " + mutedSt.Render("each device has its own admin key — revoke independently") + "\n")
+		}
+	}
+
+	// Field 3: passphrase.
+	if v.step >= inviteStepPassphrase {
+		passStyle := mutedSt
+		if v.step == inviteStepPassphrase {
+			passStyle = cursorSt
+		}
+		b.WriteString(passStyle.Render("Approval passphrase") + ":   " + strings.Repeat("•", len(v.passBuf.String())))
+		if v.step == inviteStepPassphrase {
+			b.WriteString(cursorSt.Render("▎"))
 		}
 		b.WriteString("\n")
 	}
 
-	if v.step == 2 {
+	if v.step == inviteStepRunning {
 		b.WriteString("\n")
 		if v.pin != "" {
 			b.WriteString("  PIN: " + lipgloss.NewStyle().Bold(true).Render(v.pin) + "\n")
@@ -322,7 +332,7 @@ func (v *inviteView) View() string {
 		}
 		v.linesMu.Unlock()
 	}
-	if v.step == 3 {
+	if v.step == inviteStepDone {
 		b.WriteString("\n")
 		if v.finalRC == 0 {
 			b.WriteString(okSt.Render("✓ invite completed successfully") + "\n")
@@ -335,12 +345,42 @@ func (v *inviteView) View() string {
 	}
 
 	switch v.step {
-	case 0, 1:
+	case inviteStepIdentity:
+		b.WriteString("\n" + helpSt.Render("← → toggle · enter confirm · esc cancel"))
+	case inviteStepName, inviteStepPassphrase:
 		b.WriteString("\n" + helpSt.Render("enter next · esc cancel"))
-	case 2:
+	case inviteStepRunning:
 		b.WriteString("\n" + helpSt.Render("esc kill invite · (auto-approves when passphrase matches)"))
-	case 3:
+	case inviteStepDone:
 		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
 	}
 	return b.String()
+}
+
+// renderIdentityChoice draws two pill options side-by-side with the
+// active one highlighted. The active pill depends on v.shareIdentity;
+// when we're on the identity step we also draw a subtle cursor around
+// the currently-focused pill so it's obvious what pressing enter locks
+// in.
+func renderIdentityChoice(share, focused bool) string {
+	sepLabel := " ○ separate identity  "
+	sharedLabel := "  ● same identity  "
+	if !share {
+		sepLabel = " ● separate identity  "
+		sharedLabel = "  ○ same identity  "
+	}
+	sepStyle := mutedSt
+	sharedStyle := mutedSt
+	if !share {
+		sepStyle = okSt
+		if focused {
+			sepStyle = cursorSt
+		}
+	} else {
+		sharedStyle = failSt
+		if focused {
+			sharedStyle = cursorSt
+		}
+	}
+	return sepStyle.Render(sepLabel) + sharedStyle.Render(sharedLabel)
 }
