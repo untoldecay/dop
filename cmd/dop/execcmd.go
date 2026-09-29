@@ -171,11 +171,37 @@ func runEnv(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop env: %v\n", err)
 		return 1
 	}
-	env, _, err := resolveBearer(bearer)
+	env, res, err := resolveBearer(bearer)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop env: %v\n", err)
 		return 1
 	}
+	// v1.9.7 SECURITY — `dop env` prints plaintext credential values, so
+	// it must enforce the same PIN-claim binding as `dop exec`. Prior to
+	// this fix, possession of $DOP_TOKEN alone was enough to extract
+	// secrets, defeating the "stolen bearer isn't enough" guarantee that
+	// binding is supposed to provide. Audit-log denied attempts.
+	if err := verifyBinding(bearer, res); err != nil {
+		paths, _ := config.Resolve()
+		audit.Append(paths, audit.Event{
+			Kind:     audit.EventEnvDenied,
+			Subject:  res.subject,
+			LookupID: res.lookupID,
+			Extra:    map[string]string{"reason": err.Error()},
+		})
+		fmt.Fprintf(os.Stderr, "dop env: %v\n", err)
+		return 1
+	}
+	paths, _ := config.Resolve()
+	audit.Append(paths, audit.Event{
+		Kind:     audit.EventEnv,
+		Subject:  res.subject,
+		LookupID: res.lookupID,
+		Extra: map[string]string{
+			"generation": fmt.Sprintf("%d", res.generation),
+			"env_keys":   fmt.Sprintf("%d", len(env)),
+		},
+	})
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
