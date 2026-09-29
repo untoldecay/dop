@@ -68,6 +68,20 @@ grep -q '"public_url":' "$WORKROOT/claim.out" || fail "no public_url in JSON"
 grep -q '"qr_png":' "$WORKROOT/claim.out" || fail "no qr_png in JSON"
 pass "JSON pending event has sas + public_url + qr_png"
 
+echo "=== [3b] v1.9.9 — QR PNG canvas ≤ 500x500"
+QRPATH=$(grep -Eo '"qr_png":"[^"]+"' "$WORKROOT/claim.out" | head -1 | sed 's/^"qr_png":"//; s/"$//')
+[[ -n "$QRPATH" && -f "$QRPATH" ]] || fail "qr_png path missing or file absent ($QRPATH)"
+# Extract PNG dimensions from IHDR (bytes 16-23, big-endian uint32).
+# hexdump lets us read each byte and combine.
+HEX=$(hexdump -v -e '/1 "%02x"' -n 8 -s 16 "$QRPATH" 2>/dev/null)
+QRW=$((16#${HEX:0:8}))
+QRH=$((16#${HEX:8:8}))
+[[ -n "$QRW" && -n "$QRH" ]] || fail "could not parse PNG dims from $QRPATH"
+if (( QRW > 500 || QRH > 500 )); then
+    fail "QR PNG too large: ${QRW}x${QRH} (must be ≤ 500x500)"
+fi
+pass "QR PNG dims ${QRW}x${QRH} (≤ 500x500 chat-relay-safe)"
+
 echo "=== [4] --status reports pending"
 DOP_TOKEN="$BEARER" "$DOP" claim --status --json > "$WORKROOT/status.out" 2>&1 || { cat "$WORKROOT/status.out"; fail "--status failed"; }
 grep -q '"state":"pending"' "$WORKROOT/status.out" || { cat "$WORKROOT/status.out"; fail "--status wrong state"; }

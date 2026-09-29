@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -70,6 +71,13 @@ func Start(ctx context.Context, localPort int, timeout time.Duration) (*Tunnel, 
 	}
 	cmd := exec.Command("cloudflared", "tunnel", "--no-autoupdate",
 		"--url", fmt.Sprintf("http://localhost:%d", localPort))
+	// v1.9.9 — put cloudflared in its OWN process group so anything it
+	// or its children do at shutdown (signal handlers, tty group leader
+	// cleanup, etc.) can't propagate a SIGHUP/SIGTERM back to us. Before
+	// this, killing the old tunnel during an auto-restart would race
+	// into the parent claim's sigCh and abort the whole flow with
+	// 'interrupted — pending claim cancelled'.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return nil, err
@@ -113,7 +121,10 @@ func Start(ctx context.Context, localPort int, timeout time.Duration) (*Tunnel, 
 	}
 }
 
-// Stop kills the tunnel process. Idempotent.
+// Stop kills the tunnel process group. Idempotent. Kills the whole
+// group (not just the leader) because cloudflared spawns children —
+// TERM the leader alone leaves orphans that keep the tunnel URL alive
+// briefly and race the health-restart path.
 func (t *Tunnel) Stop() {
 	t.stopMu.Lock()
 	defer t.stopMu.Unlock()
@@ -121,8 +132,15 @@ func (t *Tunnel) Stop() {
 		return
 	}
 	t.stopped = true
-	_ = t.cmd.Process.Kill()
-	// Reap it so it doesn't linger as a zombie.
+	pid := t.cmd.Process.Pid
+	// Negative PID → target the process group (created by Setpgid in Start).
+	// SIGKILL to be sure it goes; fall back to killing just the leader if
+	// group signaling fails on this platform.
+	if pid > 0 {
+		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+			_ = t.cmd.Process.Kill()
+		}
+	}
 	go func() { _, _ = t.cmd.Process.Wait() }()
 }
 
