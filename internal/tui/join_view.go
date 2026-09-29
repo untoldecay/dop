@@ -82,7 +82,7 @@ func (v *joinView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.linesMu.Unlock()
 		return v, v.waitForLine()
 	case inviteDone:
-		v.step = 6
+		v.step = joinStepDone
 		v.finalRC = mm.rc
 		v.finalErr = mm.err
 		if mm.rc == 0 {
