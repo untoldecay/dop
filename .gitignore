@@ -7,3 +7,10 @@
 *.out
 coverage.txt
 /dist/
+
+# Local BeadsLog devlogs (session narratives — private engineering notes;
+# structured artifacts live in _rules/_documentation/ + _rules/_requirements/)
+/_rules/_devlog/
+
+# BeadsLog runtime state (init locally with `bd init`)
+/.beads/
