@@ -100,24 +100,29 @@ func runAdminInit(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop admin init: %v\n", err)
 		return 1
 	}
-	if err := admin.WriteFile(admin.KeyFile(paths), wrapped); err != nil {
-		fmt.Fprintf(os.Stderr, "dop admin init: %v\n", err)
-		return 1
-	}
-	fmt.Fprintf(os.Stderr, "dop admin init: wrote %s (mode 0600)\n", admin.KeyFile(paths))
-	fmt.Fprintf(os.Stderr, "  admin ed25519 pubkey: %s\n", keys.AdminPubkey())
-	fmt.Fprintf(os.Stderr, "  vault decryption age recipient: %s\n", keys.Age.Recipient().String())
-
 	// v1.6 — approval passphrase, used to gate out-of-band claim
 	// approvals (web + CLI). Distinct from the admin passphrase so we
 	// never ask the user to type the master secret into a phone form.
-	appPass1, err := readPassphrase("Choose an approval passphrase (used to confirm agent claims): ", *pfromStdin)
+	//
+	// v1.10.5 — read the approval passphrase BEFORE writing admin.age.enc
+	// so a validation failure here leaves the install completely clean
+	// instead of half-baked. Prior behaviour wrote the admin key then
+	// bailed on the approval check, stranding the user with an unlocked
+	// admin key but no approval passphrase, and a confusing error.
+	appPass1, err := readPassphrase("Choose an approval passphrase — a SEPARATE secret you type on your phone to approve agent claims (used by 'dop approve'): ", *pfromStdin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin init: approval passphrase: %v\n", err)
 		return 1
 	}
+	if appPass1 == "" {
+		fmt.Fprintln(os.Stderr, "dop admin init: approval passphrase is required.")
+		fmt.Fprintln(os.Stderr, "  This is a SECOND, separate secret from the admin passphrase you just chose.")
+		fmt.Fprintln(os.Stderr, "  You'll type this one on your phone to approve agent claims.")
+		fmt.Fprintln(os.Stderr, "  Must be at least 10 characters. (If you're using --passphrase-stdin, feed TWO lines.)")
+		return 1
+	}
 	if len(appPass1) < 10 {
-		fmt.Fprintln(os.Stderr, "dop admin init: approval passphrase must be at least 10 characters")
+		fmt.Fprintf(os.Stderr, "dop admin init: approval passphrase must be at least 10 characters (got %d).\n", len(appPass1))
 		return 1
 	}
 	if !*pfromStdin {
@@ -131,10 +136,25 @@ func runAdminInit(args []string) int {
 			return 1
 		}
 	}
-	if err := approval.Set(paths, appPass1); err != nil {
-		fmt.Fprintf(os.Stderr, "dop admin init: store approval passphrase: %v\n", err)
+
+	// All validation passed — now write both artifacts. If either step
+	// fails past this point we roll back to a clean slate so the user
+	// isn't stranded in a half-installed state.
+	if err := admin.WriteFile(admin.KeyFile(paths), wrapped); err != nil {
+		fmt.Fprintf(os.Stderr, "dop admin init: %v\n", err)
 		return 1
 	}
+	if err := approval.Set(paths, appPass1); err != nil {
+		// Roll back the admin key so `dop admin init` can be retried
+		// from scratch without needing --force.
+		_ = os.Remove(admin.KeyFile(paths))
+		fmt.Fprintf(os.Stderr, "dop admin init: store approval passphrase: %v\n", err)
+		fmt.Fprintln(os.Stderr, "  rolled back admin key — safe to retry.")
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "dop admin init: wrote %s (mode 0600)\n", admin.KeyFile(paths))
+	fmt.Fprintf(os.Stderr, "  admin ed25519 pubkey: %s\n", keys.AdminPubkey())
+	fmt.Fprintf(os.Stderr, "  vault decryption age recipient: %s\n", keys.Age.Recipient().String())
 	fmt.Fprintln(os.Stderr, "  approval passphrase stored (keys/approval.hash)")
 	return 0
 }
