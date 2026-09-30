@@ -55,6 +55,13 @@ import (
 // first" message rather than leaking the raw os.ReadFile error.
 var ErrNotAttached = errors.New("no vault attached to this machine yet")
 
+// ErrSessionEnded is returned when a TUI view tried to talk to the
+// admin daemon but the socket was unreachable — usually because the
+// session hit its idle timeout or the daemon was killed. Callers
+// should detect this sentinel and prompt the operator to log in again
+// instead of leaking the raw "dial unix …: connect: refused" string.
+var ErrSessionEnded = errors.New("admin session ended — log in again")
+
 // SchemaVersion is the current schema label. v1 vaults MUST carry this;
 // loading refuses anything else (including numeric v0 schemas from
 // pre-v1.0 DOP builds).

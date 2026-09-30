@@ -91,7 +91,7 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if v.step == integAddStepDone {
 			v.done = true
-			v.flash = "integration saved"
+			v.flash = "integration saved · synced with team"
 			return v, nil
 		}
 		switch mm.String() {
@@ -360,7 +360,7 @@ func (v *addGrantView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.step = 3 // back to confirm
 			return v, nil
 		}
-		v.flash = "grant saved"
+		v.flash = "grant saved · synced with team"
 		v.done = true
 		return v, nil
 	case tea.KeyMsg:

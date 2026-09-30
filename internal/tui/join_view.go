@@ -86,7 +86,7 @@ func (v *joinView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.finalRC = mm.rc
 		v.finalErr = mm.err
 		if mm.rc == 0 {
-			v.flash = "joined — this machine is now an admin"
+			v.flash = "joined — this machine is now an admin · synced with team"
 		}
 		return v, nil
 	case tea.KeyMsg:

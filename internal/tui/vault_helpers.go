@@ -35,6 +35,9 @@ func loadVaultForListing(client *admin.Client, paths *config.Paths) (*vault.Vaul
 	if bytes.Contains(raw, []byte("\nsops:")) || bytes.HasPrefix(raw, []byte("sops:")) {
 		plain, err := client.DecryptVault(vp)
 		if err != nil {
+			if isDaemonUnreachable(err) {
+				return nil, vp, vault.ErrSessionEnded
+			}
 			return nil, vp, friendlyDecryptError(err)
 		}
 		raw = plain
@@ -80,6 +83,31 @@ func renderNoVault(noun string) string {
 	return "No vault attached to this machine yet — nothing to show under " + noun + ".\n\n" +
 		"From the main menu, pick 'Attach vault' and paste your vault URL,\n" +
 		"or on the CLI:  dop init --vault <URL>"
+}
+
+// renderSessionEnded returns the plain-English "your admin session
+// ended, log in again" text that every view uses when it hits
+// vault.ErrSessionEnded.
+func renderSessionEnded() string {
+	return "Your admin session ended (idle timeout).\n\n" +
+		"Press esc to go back to the main menu, then pick 'Login' to unlock again."
+}
+
+// isDaemonUnreachable returns true when err looks like a socket-connect
+// failure to the admin daemon. Matches Go's net.OpError and the raw
+// string patterns from the socket call.
+func isDaemonUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return containsAny(s,
+		"connect: connection refused",
+		"connect: no such file",
+		"dial unix",
+		"broken pipe",
+		"use of closed network connection",
+	)
 }
 
 // vaultAttached returns true iff the vault directory is a git clone.

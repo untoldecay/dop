@@ -89,11 +89,15 @@ func (v *inviteView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return v, v.waitForLine()
 	case inviteDone:
-		v.step = 3
+		// v1.10.7 — was hard-coded to 3, but that's inviteStepRunning after
+		// the identity step landed. Same class of bug as the v1.9.10 join
+		// TUI hang. The CLI completes cleanly on shared-identity flows;
+		// this was the reason the TUI stayed on "waiting for response…".
+		v.step = inviteStepDone
 		v.finalRC = mm.rc
 		v.finalErr = mm.err
 		if mm.rc == 0 {
-			v.flash = "invite completed — new admin device added"
+			v.flash = "invite completed — new admin device added · synced with team"
 		}
 		return v, nil
 	case tea.KeyMsg:
@@ -223,10 +227,12 @@ func (v *inviteView) launch() tea.Cmd {
 				rc = 1
 				msg = err.Error()
 			}
-			v.lineCh <- inviteLine{line: "__DONE__"}
-			// Send the done sentinel via same channel and a marker.
+			// v1.10.7 — set the final result fields BEFORE pushing the
+			// __DONE__ sentinel. Prior order (sentinel first, fields
+			// second) racaced waitForLine reading zero values.
 			v.finalRC = rc
 			v.finalErr = msg
+			v.lineCh <- inviteLine{line: "__DONE__"}
 		}()
 		// Return a marker; the tea program will call waitForLine to get
 		// each stderr line as a message.
