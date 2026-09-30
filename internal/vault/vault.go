@@ -187,10 +187,18 @@ type Capability struct {
 // A PIN-bound capability moves through two states:
 //   - Unclaimed:  PinExpiry is set, Pubkey is empty.
 //   - Claimed:    Pubkey is set, PinExpiry cleared.
+//
+// v1.11 — KeyType identifies which signature scheme the agent's key
+// uses. Older records omit the field entirely; verifiers default to
+// Ed25519 (the only option pre-v1.11) for backward compatibility.
+//   "ed25519"  — legacy raw file key (default when field is empty)
+//   "p256"     — ECDSA P-256, hardware-backed (macOS Secure Enclave)
+//                 or file-backed (Linux/CI with DOP_ALLOW_FILE_KEYS=1)
 type Binding struct {
 	Kind      string    `yaml:"kind" json:"kind"`
 	PinExpiry time.Time `yaml:"pin_expiry,omitempty" json:"pin_expiry,omitempty"`
 	Pubkey    string    `yaml:"pubkey,omitempty" json:"pubkey,omitempty"`
+	KeyType   string    `yaml:"key_type,omitempty" json:"key_type,omitempty"`
 	ClaimedAt time.Time `yaml:"claimed_at,omitempty" json:"claimed_at,omitempty"`
 }
 
@@ -199,6 +207,25 @@ const (
 	BindingKindPubkey = "pubkey"
 	BindingKindNone   = "none"
 )
+
+const (
+	// KeyTypeEd25519 is the legacy raw-file agent key (pre-v1.11).
+	KeyTypeEd25519 = "ed25519"
+	// KeyTypeP256 is v1.11+ ECDSA P-256 with X9.62/DER-encoded
+	// signatures. Hardware-backed on macOS (Secure Enclave), file-backed
+	// on Linux/CI via explicit DOP_ALLOW_FILE_KEYS=1 opt-in.
+	KeyTypeP256 = "p256"
+)
+
+// EffectiveKeyType returns the binding's key type, defaulting to
+// Ed25519 when the field is absent (older records). Callers use this
+// to pick the right signature verifier.
+func (b *Binding) EffectiveKeyType() string {
+	if b == nil || b.KeyType == "" {
+		return KeyTypeEd25519
+	}
+	return b.KeyType
+}
 
 // ParsePlain unmarshals plaintext YAML into a Vault, enforcing v1 schema.
 func ParsePlain(b []byte) (*Vault, error) {
