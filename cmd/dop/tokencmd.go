@@ -742,27 +742,122 @@ func saveVaultViaDaemon(client *admin.Client, paths *config.Paths, vaultPath str
 	return nil
 }
 
+// autoPushGuard prevents the retry path from recursing indefinitely.
+// autoPullAndMerge → saveMergedVault → saveVaultViaDaemon calls back
+// into autoPushVault — we set this to true so that inner invocation
+// doesn't kick off another pull-merge cycle.
+var autoPushInMergeRetry bool
+
 // autoPushVault runs `git add -A + commit + push` on the vault repo
 // after a successful admin-plane save. Opt out with
 // `DOP_NO_AUTO_PUSH=1`. All errors are best-effort — the local save is
 // already durable and the operator can retry via `dop push` if the
 // remote is unreachable.
+//
+// v1.10.3 — if push fails because remote moved (non-FF), we transparently
+// pull-merge-push once so single-operator cross-machine workflows stay
+// silent. If the merge conflicts, we surface a helpful one-liner but
+// don't fail the caller — the save is already committed locally.
 func autoPushVault(paths *config.Paths) {
 	if os.Getenv("DOP_NO_AUTO_PUSH") == "1" {
 		return
 	}
-	// Nothing to push if the vault isn't a git repo (fresh install, tests).
 	if _, err := os.Stat(filepath.Join(paths.Vault, ".git")); err != nil {
 		return
 	}
 	_ = runGit(io.Discard, paths.Vault, "add", "-A")
-	// commit may exit 1 with "nothing to commit" — allow both 0 and 1.
 	_ = runGitAllowExit(io.Discard, paths.Vault, []int{0, 1}, "commit", "-m", "dop: sync (auto)")
-	// If no upstream, git push fails; that's OK — we already committed
-	// locally and next `dop push` (or `git push -u origin main`) covers it.
-	if err := runGit(io.Discard, paths.Vault, "push"); err != nil {
-		fmt.Fprintf(os.Stderr, "  (auto-push skipped: %v — run `dop push` when ready)\n", err)
+	if err := runGit(io.Discard, paths.Vault, "push"); err == nil {
+		return
 	}
+	// Push failed. If we're already inside a merge-retry, don't recurse
+	// — just surface the failure and let the outer caller decide.
+	if autoPushInMergeRetry {
+		fmt.Fprintln(os.Stderr, "  (auto-push after merge still couldn't reach the team; run `dop push` when ready)")
+		return
+	}
+	autoPushInMergeRetry = true
+	defer func() { autoPushInMergeRetry = false }()
+	if err := autoPullAndMerge(paths); err != nil {
+		fmt.Fprintf(os.Stderr, "  (auto-sync deferred: %v — run `dop pull` then `dop push` when ready)\n", err)
+		return
+	}
+	if err := runGit(io.Discard, paths.Vault, "push"); err != nil {
+		fmt.Fprintf(os.Stderr, "  (auto-push retry failed: %v — run `dop push` when ready)\n", err)
+	}
+}
+
+// autoPullVault runs a silent smart-merge on `dop admin login` so the
+// operator's next action sees the latest team state. Opt out with
+// `DOP_NO_AUTO_PULL=1`. All output is best-effort and non-fatal.
+func autoPullVault(paths *config.Paths) {
+	if os.Getenv("DOP_NO_AUTO_PULL") == "1" {
+		return
+	}
+	if _, err := os.Stat(filepath.Join(paths.Vault, ".git")); err != nil {
+		return
+	}
+	if err := autoPullAndMerge(paths); err != nil {
+		// Only surface if it's not a trivial "nothing to pull" case.
+		if !strings.Contains(err.Error(), "up to date") {
+			fmt.Fprintf(os.Stderr, "  (auto-sync note: %v)\n", err)
+		}
+	}
+}
+
+// autoPullAndMerge fetches origin, and if the local branch has moved
+// beyond it, does a real 3-way vault merge (same code path as
+// `dop pull`) — but silently, without the plain-English narrative.
+// Returns nil on success or a short reason string on soft failure.
+func autoPullAndMerge(paths *config.Paths) error {
+	if err := runGit(io.Discard, paths.Vault, "fetch", "origin"); err != nil {
+		return fmt.Errorf("fetch: %w", err)
+	}
+	ours, _ := gitRevListCount(paths.Vault, "origin/main..HEAD")
+	theirs, _ := gitRevListCount(paths.Vault, "HEAD..origin/main")
+	if ours == 0 && theirs == 0 {
+		return nil // up to date
+	}
+	if ours == 0 {
+		// Just behind — fast-forward.
+		return runGit(io.Discard, paths.Vault, "merge", "--ff-only", "origin/main")
+	}
+	if theirs == 0 {
+		return nil // ahead only; nothing to pull
+	}
+	// Diverged — do the real merge quietly.
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		return fmt.Errorf("admin session needed to merge encrypted vaults")
+	}
+	base, err := gitMergeBase(paths.Vault, "HEAD", "origin/main")
+	if err != nil {
+		return fmt.Errorf("no shared ancestor with team")
+	}
+	localV, err := decryptVaultAtRef(client, paths, "HEAD")
+	if err != nil {
+		return fmt.Errorf("decrypt local: %w", err)
+	}
+	remoteV, err := decryptVaultAtRef(client, paths, "origin/main")
+	if err != nil {
+		return fmt.Errorf("decrypt team: %w", err)
+	}
+	baseV, err := decryptVaultAtRef(client, paths, base)
+	if err != nil {
+		baseV = &vault.Vault{}
+	}
+	result := vault.Merge(baseV, localV, remoteV)
+	if len(result.Conflicts) > 0 {
+		return fmt.Errorf("%d conflict(s) — run `dop pull` to resolve", len(result.Conflicts))
+	}
+	if err := saveMergedVault(client, paths, result.Merged); err != nil {
+		return fmt.Errorf("save merged: %w", err)
+	}
+	if err := runGit(io.Discard, paths.Vault, "merge", "-s", "ours", "origin/main",
+		"--no-ff", "-m", "dop: auto-merged local + team vaults"); err != nil {
+		return fmt.Errorf("finalize merge: %w", err)
+	}
+	return nil
 }
 
 // adminPubkeyPresent returns true if any admin entry in the vault
@@ -931,7 +1026,13 @@ func writeRecordSidecar(paths *config.Paths, rec capability.Record) error {
 // writeSopsConfig writes a .sops.yaml file in the vault dir with the
 // current admin recipient list.
 func writeSopsConfig(vaultDir string, recipients []string) error {
-	body := fmt.Sprintf("creation_rules:\n  - path_regex: 'vault\\.yaml$'\n    age: %s\n", strings.Join(recipients, ","))
+	// Match any *.yaml in this dir. Newer sops (3.13+) refuses to encrypt
+	// with --age explicit when .sops.yaml exists but has no matching rule
+	// for the input path — and the daemon stages plaintext through
+	// `.dop-encrypt-*.yaml` tempfiles that don't match `vault\.yaml$`.
+	// This is dop's private vault dir; there's nothing else to encrypt
+	// here, so a permissive regex is safe.
+	body := fmt.Sprintf("creation_rules:\n  - path_regex: '\\.yaml$'\n    age: %s\n", strings.Join(recipients, ","))
 	return os.WriteFile(filepath.Join(vaultDir, ".sops.yaml"), []byte(body), 0o644)
 }
 

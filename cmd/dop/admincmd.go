@@ -269,6 +269,12 @@ func runAdminLogin(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop admin login: release: %v\n", err)
 	}
 	fmt.Fprintln(os.Stderr, "dop admin login: session started")
+	// v1.10.3 — auto-sync: silently pull + auto-merge on login so the
+	// operator's next action sees the latest team state. Best-effort:
+	// any failure prints a one-liner and lets login succeed.
+	//   - opt out with DOP_NO_AUTO_PULL=1 (mirrors DOP_NO_AUTO_PUSH)
+	//   - skipped entirely if vault isn't a git repo yet
+	autoPullVault(paths)
 	return 0
 }
 

@@ -52,15 +52,16 @@ cp "$HOME_A/Library/Application Support/dop/keys/approval.hash" \
 echo -n "$PASS" | HOME="$HOME_B" "$DOP" admin login --passphrase-stdin >/dev/null
 pass "M2 attached with M1's identity"
 
-echo "=== [3] M1 issues tokenC; M2 issues tokenB — divergent"
+echo "=== [3] M1 issues tokenC; M2 issues tokenB — force divergence by disabling auto-pull on B"
 HOME="$HOME_A" "$DOP" token issue --no-bind --grants notion.read --name tokenC >/dev/null 2>&1
-HOME="$HOME_B" "$DOP" token issue --no-bind --grants notion.read --name tokenB 2>&1 | tail -3 || true
-# M2 tries to auto-push but should conflict on push (fetch shows different tip).
-# We deliberately don't force — the state after this is:
-#   remote = M1's HEAD (has tokenA + tokenC)
-#   M2 local = has tokenA + tokenB
+# With auto-pull-on-login (v1.10.3) M2 would sync tokenC before its own
+# issue and skip divergence entirely; force the diverged scenario by
+# disabling auto-pull + auto-push during M2's issue.
+DOP_NO_AUTO_PULL=1 DOP_NO_AUTO_PUSH=1 HOME="$HOME_B" "$DOP" token issue --no-bind --grants notion.read --name tokenB 2>&1 | tail -3 || true
+# Commit and confirm B is diverged before pull.
 B_VAULT="$HOME_B/Library/Application Support/dop/vault"
 cd "$B_VAULT"
+git add -A 2>/dev/null && git commit -m "M2 local tokenB" >/dev/null 2>&1 || true
 git fetch origin 2>&1 | tail -1
 AHEAD=$(git rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
 BEHIND=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
