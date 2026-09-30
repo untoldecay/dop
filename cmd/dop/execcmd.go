@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fray/dop/internal/agentkey"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
@@ -29,10 +30,19 @@ func runExec(args []string) int {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
 	agentName := fs.String("agent-name", "", "self-reported label for audit")
 	tokenFile := fs.String("token-file", "", "read bearer from file (alternative to $DOP_TOKEN)")
-	cleanEnv := fs.Bool("clean-env", false, "strip inherited env, keep only PATH/HOME/USER + injected")
+	// v1.11 — flipped default. `--clean-env` used to be opt-in; the
+	// child inherited the parent's whole env by default, which leaked
+	// unrelated secrets (Nostr keys, editor auth tokens, harness
+	// config, previous DOP_TOKENs) to whatever the agent invoked. Now
+	// the default is clean; keep-parent-env is opt-in via --inherit-env.
+	// The legacy --clean-env flag remains as a silent no-op so old
+	// wrappers don't break.
+	inheritEnv := fs.Bool("inherit-env", false, "let the child see the parent process's env (LEGACY behaviour — leaks unrelated secrets)")
+	_ = fs.Bool("clean-env", true, "deprecated: clean is now the default; use --inherit-env to opt back into parent-env passthrough")
 	noPull := fs.Bool("no-pull", false, "skip auto-pull freshness check")
 	_ = fs.Parse(args)
 	_ = noPull // freshness check is a Phase 5 polish
+	cleanEnv := !*inheritEnv
 
 	child := fs.Args()
 	if len(child) == 0 {
@@ -68,7 +78,7 @@ func runExec(args []string) int {
 	})
 	fmt.Fprintf(os.Stderr, "dop exec: agent=%q subject=%q gen=%d env_keys=%d\n",
 		*agentName, res.subject, res.generation, len(env))
-	if err := execChild(child, env, *cleanEnv); err != nil {
+	if err := execChild(child, env, cleanEnv); err != nil {
 		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
 		return 1
 	}
@@ -100,34 +110,56 @@ func verifyBinding(bearer string, res resolveResult) error {
 	if err != nil {
 		return err
 	}
-	priv, err := loadAgentKey(paths, res.lookupID)
+	// v1.11 — the AUTHORITATIVE source for the bound pubkey + key_type
+	// is the admin-signed record sidecar (already verified upstream in
+	// resolveBearer via verifySignedRecord). The bundle's own
+	// EnvelopeBinding is a bearer-locked convenience view that can lag
+	// through a `dop agent migrate` (bundle is bearer-encrypted, admin
+	// can't rewrite it without the bearer). Load the record here so
+	// migrations don't strand agents.
+	recPath := filepath.Join(paths.Vault, "capabilities", res.lookupID+".record")
+	recBlob, err := os.ReadFile(recPath)
 	if err != nil {
-		return fmt.Errorf("agent key: %w", err)
+		return fmt.Errorf("read record: %w", err)
 	}
-	if priv == nil {
-		return errors.New("this bearer is bound but no agent key is present on this machine — run `dop claim <PIN>` on the agent's machine")
+	var rec capability.Record
+	if err := json.Unmarshal(recBlob, &rec); err != nil {
+		return fmt.Errorf("record json: %w", err)
 	}
-	pubBytes, err := hex.DecodeString(res.binding.Pubkey)
+	if rec.Binding == nil || rec.Binding.Pubkey == "" {
+		return errors.New("record has no bound pubkey — this bearer requires a PIN claim first")
+	}
+	pubBytes, err := hex.DecodeString(rec.Binding.Pubkey)
 	if err != nil {
 		return fmt.Errorf("binding pubkey not hex: %w", err)
 	}
-	if len(pubBytes) != ed25519.PublicKeySize {
-		return fmt.Errorf("binding pubkey wrong size: %d", len(pubBytes))
+	expectedType := vault.KeyTypeEd25519
+	if rec.Binding.KeyType != "" {
+		expectedType = rec.Binding.KeyType
 	}
-	pub, ok := priv.Public().(ed25519.PublicKey)
-	if !ok {
-		return errors.New("agent key: no public component")
+	store, err := agentkey.OpenByType(paths, res.lookupID, expectedType)
+	if err != nil {
+		if err == agentkey.ErrNotFound {
+			return errors.New("this bearer is bound but no agent key of the required type is present on this machine — run `dop claim <PIN>` on the agent's machine, or `dop agent migrate " + res.lookupID + "` if you have an older key here")
+		}
+		return fmt.Errorf("agent key: %w", err)
 	}
-	// Constant-time comparison: local pubkey must match bound pubkey.
-	if !ed25519.PublicKey(pubBytes).Equal(pub) {
-		return errors.New("local agent key does not match the bound pubkey (was this bearer rebound?)")
+	if store.KeyType() != expectedType {
+		return fmt.Errorf(
+			"local agent key type (%s) doesn't match the record's bound key type (%s) — "+
+				"run 'dop agent migrate %s' on this machine, or revoke+re-issue the bearer.",
+			store.KeyType(), expectedType, res.lookupID)
 	}
-	// Sign+verify a canonical challenge — proves possession, not just
-	// filesystem presence.
+	if !agentkey.PubkeyEqual(pubBytes, store.PublicKey()) {
+		return errors.New("local agent key does not match the record's bound pubkey (was this bearer rebound elsewhere?)")
+	}
 	challenge := []byte("dop-v1-exec:" + res.lookupID + ":" + res.capID)
-	sig := ed25519.Sign(priv, challenge)
-	if !ed25519.Verify(pub, challenge, sig) {
-		return errors.New("agent key self-verify failed")
+	sig, err := store.Sign(challenge)
+	if err != nil {
+		return fmt.Errorf("agent key sign: %w", err)
+	}
+	if err := agentkey.Verify(expectedType, pubBytes, challenge, sig); err != nil {
+		return fmt.Errorf("agent key self-verify failed: %w", err)
 	}
 	return nil
 }
@@ -412,6 +444,13 @@ func execChild(argv []string, env map[string]string, cleanEnv bool) error {
 	} else {
 		finalEnv = append(finalEnv, os.Environ()...)
 	}
+	// v1.11 — unconditionally strip DOP_TOKEN / DOP_TOKEN_FILE from
+	// the child, regardless of clean/inherit mode. A compromised child
+	// process inheriting the bearer can just re-invoke `dop env` and
+	// dump every credential — which defeats the whole point of the
+	// binding gate. The bearer is only meant to be visible to `dop`
+	// itself, never the process being run.
+	finalEnv = stripEnv(finalEnv, []string{"DOP_TOKEN", "DOP_TOKEN_FILE"})
 	// v1.5 env-hardening — when the child is `git`, strip external
 	// config + disable hooks + refuse ext protocols BEFORE injecting
 	// credential env. Prevents a hostile repo's hooks or a rogue

@@ -100,6 +100,10 @@ type EnvelopeBinding struct {
 	PinHash   string `json:"pin_hash,omitempty"`
 	PinExpiry int64  `json:"pin_expiry,omitempty"`
 	Pubkey    string `json:"pubkey,omitempty"`
+	// v1.11 — KeyType mirrors vault.Binding.KeyType so exec-time
+	// verification can pick the right signature scheme without loading
+	// the vault. Absent field → "ed25519" for legacy records.
+	KeyType string `json:"key_type,omitempty"`
 }
 
 // WriteOpts configures Write.

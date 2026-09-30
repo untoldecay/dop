@@ -48,6 +48,7 @@ import (
 	"github.com/mdp/qrterminal/v3"
 	"rsc.io/qr"
 
+	"github.com/fray/dop/internal/agentkey"
 	"github.com/fray/dop/internal/approvalserver"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
@@ -190,13 +191,17 @@ func runClaim(args []string) int {
 		return 1
 	}
 
-	// Generate agent keypair.
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	// v1.11 — Generate agent key via the platform-aware backend.
+	// On macOS this returns a Secure-Enclave-backed P-256 key; on
+	// Linux/CI (with DOP_ALLOW_FILE_KEYS=1) it falls back to a
+	// file-backed P-256 key; otherwise ed25519 legacy.
+	store, err := agentkey.Create(paths, lookupID, "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop claim: keygen: %v\n", err)
 		return 1
 	}
-	pubHex := hex.EncodeToString(pub)
+	pubHex := hex.EncodeToString(store.PublicKey())
+	keyType := store.KeyType()
 	claimedAt := time.Now().UTC().Truncate(time.Second)
 
 	// Passphrase-gated approval (v1.6). Skippable for unattended flows.
@@ -233,8 +238,9 @@ func runClaim(args []string) int {
 
 	// Rewrite bundle with updated binding + new generation.
 	newEnvBinding := &capability.EnvelopeBinding{
-		Kind:   vault.BindingKindPIN,
-		Pubkey: pubHex,
+		Kind:    vault.BindingKindPIN,
+		Pubkey:  pubHex,
+		KeyType: keyType,
 	}
 	newBundlePath := bundlePath + ".tmp"
 	f, err := os.Create(newBundlePath)
@@ -265,6 +271,7 @@ func runClaim(args []string) int {
 	crec.Binding = &vault.Binding{
 		Kind:      vault.BindingKindPIN,
 		Pubkey:    pubHex,
+		KeyType:   keyType,
 		ClaimedAt: claimedAt,
 	}
 	rec := vaultCapability2Record(crec, capIDHex)
@@ -288,12 +295,10 @@ func runClaim(args []string) int {
 	// Failure between (3) and (4): everything exec needs is on disk;
 	// only the vault's own view lags. Re-running claim will observe
 	// bundle+sidecar already updated and skip.
-	keyPath, err := writeAgentKey(paths, lookupID, priv)
-	if err != nil {
-		os.Remove(newBundlePath)
-		fmt.Fprintf(os.Stderr, "dop claim: persist key: %v\n", err)
-		return 1
-	}
+	// v1.11 — key already persisted by agentkey.Create at generation
+	// time; nothing to do here except surface where it lives for the
+	// success message and the audit log.
+	keyPath := store.StorageDescription()
 	if err := os.Rename(newBundlePath, bundlePath); err != nil {
 		fmt.Fprintf(os.Stderr, "dop claim: swap bundle: %v\n", err)
 		return 1
@@ -561,7 +566,12 @@ func runClaimRemote(paths *config.Paths, tokenFile, pinArg string) int {
 	// Persist the private key BEFORE staging in the vault. If push
 	// fails, admin can retry approve — but they need the pubkey, which
 	// only the agent's local key produces.
-	keyPath, err := writeAgentKey(paths, lookupID, priv)
+	//
+	// v1.11 — remote-claim still uses ed25519 file storage because the
+	// remoteclaim.Request signature format is Ed25519-baked. Migrating
+	// the remote-claim protocol to P-256 is a follow-up (this path is
+	// CI/headless-only and the file backend is the expected mode there).
+	keyPath, err := writeAgentKeyLegacyEd25519(paths, lookupID, priv)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop claim --remote: persist key: %v\n", err)
 		return 1
@@ -1071,10 +1081,16 @@ func displayHost(bind string) string {
 	return "127.0.0.1"
 }
 
-// writeAgentKey persists the ed25519 private key to
-// <paths.Root>/agent-keys/<lookup_id>.key with restrictive perms.
-// Returns the file path.
-func writeAgentKey(paths *config.Paths, lookupID string, priv ed25519.PrivateKey) (string, error) {
+
+// v1.11 — loadAgentKey was removed. Callers now use
+// internal/agentkey.Open which supports both the legacy file-backed
+// ed25519 keys AND the new SE-backed P-256 keys transparently.
+
+// writeAgentKey persists a raw ed25519 private key. Kept ONLY for the
+// remote-claim path (runClaimRemote), which still signs a request
+// out-of-band with the ed25519 key material. New primary claims go
+// through agentkey.Create → the platform-aware backend.
+func writeAgentKeyLegacyEd25519(paths *config.Paths, lookupID string, priv ed25519.PrivateKey) (string, error) {
 	dir := filepath.Join(paths.Root, "agent-keys")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
@@ -1087,29 +1103,4 @@ func writeAgentKey(paths *config.Paths, lookupID string, priv ed25519.PrivateKey
 		return "", err
 	}
 	return p, nil
-}
-
-// loadAgentKey returns the ed25519 private key for a given lookupID, or
-// nil if absent. Also enforces mode 0600 (refuses to load a key with
-// looser permissions).
-func loadAgentKey(paths *config.Paths, lookupID string) (ed25519.PrivateKey, error) {
-	p := filepath.Join(paths.Root, "agent-keys", lookupID+".key")
-	fi, err := os.Stat(p)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("%s: permissions %o are too permissive (want 0600)", p, fi.Mode().Perm())
-	}
-	b, err := os.ReadFile(p)
-	if err != nil {
-		return nil, err
-	}
-	if len(b) != ed25519.PrivateKeySize {
-		return nil, errors.New("agent key: wrong size")
-	}
-	return ed25519.PrivateKey(b), nil
 }

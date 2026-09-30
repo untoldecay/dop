@@ -19,6 +19,7 @@ trap 'rm -rf "$WORKROOT"' EXIT
 export HOME="$WORKROOT/home"
 mkdir -p "$HOME"
 export DOP_NO_TUI=1
+export DOP_NO_KEYCHAIN=1
 export DOP_NO_NOTIFY=1
 
 PASS="pass-word-long-enough"

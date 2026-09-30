@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,19 @@ import (
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/vault"
 )
+
+// vaultOriginURL returns the git origin URL of the vault repo, or ""
+// if the vault has no origin (rare — a fresh local-only setup) or git
+// fails for some other reason. Callers should treat "" as "fall back
+// to the old 'same one you cloned from' hint".
+func vaultOriginURL(vaultDir string) string {
+	cmd := exec.Command("git", "-C", vaultDir, "remote", "get-url", "origin")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
 
 func runTeamInvite(args []string) int {
 	fs := flag.NewFlagSet("team invite", flag.ExitOnError)
@@ -124,9 +138,16 @@ func runTeamInvite(args []string) int {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Admin invite for", *name)
 	fmt.Fprintf(os.Stderr, "  PIN:        %s   (valid %s)\n", pin, pinDur)
-	fmt.Fprintln(os.Stderr, "  vault URL: same one you cloned this vault from")
-	fmt.Fprintln(os.Stderr, "  on the new machine run:")
-	fmt.Fprintf(os.Stderr, "    dop admin join <VAULT-URL> %s\n", pin)
+	vaultURL := vaultOriginURL(paths.Vault)
+	if vaultURL != "" {
+		fmt.Fprintf(os.Stderr, "  vault URL:  %s\n", vaultURL)
+		fmt.Fprintln(os.Stderr, "  on the new machine run:")
+		fmt.Fprintf(os.Stderr, "    dop admin join %s %s\n", vaultURL, pin)
+	} else {
+		fmt.Fprintln(os.Stderr, "  vault URL:  (no git origin — copy the URL you cloned this vault from)")
+		fmt.Fprintln(os.Stderr, "  on the new machine run:")
+		fmt.Fprintf(os.Stderr, "    dop admin join <VAULT-URL> %s\n", pin)
+	}
 	fmt.Fprintln(os.Stderr)
 
 	// Poll for M2's response.
