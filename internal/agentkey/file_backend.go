@@ -49,19 +49,34 @@ func (b *FileBackend) p256Path(lookupID string) string {
 	return filepath.Join(b.dir(), lookupID+".p256")
 }
 
-// Load tries ed25519 first (the pre-v1.11 layout), then P-256.
+// Load tries P-256 first (newer, harder to steal even in file form)
+// then ed25519. When a caller knows the target type, LoadByType is
+// deterministic — used by verifyBinding after reading the record's
+// key_type.
 func (b *FileBackend) Load(lookupID string) (Store, error) {
-	if s, err := b.loadEd25519(lookupID); err == nil {
-		return s, nil
-	} else if !errors.Is(err, ErrNotFound) {
-		return nil, err
-	}
 	if s, err := b.loadP256(lookupID); err == nil {
 		return s, nil
 	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
+	if s, err := b.loadEd25519(lookupID); err == nil {
+		return s, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
 	return nil, ErrNotFound
+}
+
+// LoadByType returns the store matching keyType exactly, or ErrNotFound.
+func (b *FileBackend) LoadByType(lookupID, keyType string) (Store, error) {
+	switch keyType {
+	case "", "ed25519":
+		return b.loadEd25519(lookupID)
+	case "p256":
+		return b.loadP256(lookupID)
+	default:
+		return nil, ErrNotFound
+	}
 }
 
 func (b *FileBackend) loadEd25519(lookupID string) (Store, error) {

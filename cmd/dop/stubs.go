@@ -324,6 +324,9 @@ func runDoctor(args []string) int {
 	dopCheckGrantPrefixCollisions(c, paths, line)
 	dopCheckPendingInvites(paths, line)
 
+	// v1.11 — agent-key backend summary.
+	dopCheckAgentKeys(paths, line)
+
 	// --- security ---
 	if *securityMode {
 		fmt.Println("\n  --- security ---")
@@ -649,3 +652,44 @@ func remainingTTL(ttlSec int64, refUnix int64) string {
 
 // hexEncodeBytes returns the lowercase hex of b. Used by tokencmd.
 func hexEncodeBytes(b []byte) string { return hex.EncodeToString(b) }
+
+// dopCheckAgentKeys is a v1.11 doctor check: enumerates all agent keys
+// on this machine and flags legacy ed25519 file storage (extractable →
+// migration recommended). Also reports pending grace-delete counts.
+func dopCheckAgentKeys(paths *config.Paths, line func(status, name, detail string)) {
+	entries, err := collectAgentKeys(paths)
+	if err != nil {
+		line("!", "agent:keys", fmt.Sprintf("couldn't enumerate: %v", err))
+		return
+	}
+	if len(entries) == 0 {
+		line("⋯", "agent:keys", "none on this machine")
+		return
+	}
+	seCount, fileEd, fileP256, pending := 0, 0, 0, 0
+	for _, e := range entries {
+		if e.Backend == "keychain-darwin" {
+			seCount++
+		} else if e.KeyType == "p256" {
+			fileP256++
+		} else {
+			fileEd++
+		}
+		if e.PendingDelete {
+			pending++
+		}
+	}
+	if seCount > 0 && fileEd == 0 && fileP256 == 0 {
+		line("✓", "agent:keys", fmt.Sprintf("all %d hardened in Secure Enclave", seCount))
+	} else if fileEd > 0 {
+		line("!", "agent:keys",
+			fmt.Sprintf("%d Secure Enclave · %d ed25519 file (LEGACY, extractable — run `dop agent migrate <lookup>` to harden) · %d p256 file",
+				seCount, fileEd, fileP256))
+	} else {
+		line("✓", "agent:keys",
+			fmt.Sprintf("%d Secure Enclave · %d p256 file", seCount, fileP256))
+	}
+	if pending > 0 {
+		line("⋯", "agent:keys-pending", fmt.Sprintf("%d legacy key(s) in 12h grace-delete window — will be removed automatically", pending))
+	}
+}

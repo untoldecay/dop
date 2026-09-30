@@ -1139,6 +1139,7 @@ func capability2VaultCapability(r capability.Record) vault.Capability {
 			Kind:      r.Binding.Kind,
 			PinExpiry: r.Binding.PinExpiry,
 			Pubkey:    r.Binding.Pubkey,
+			KeyType:   r.Binding.KeyType,
 			ClaimedAt: r.Binding.ClaimedAt,
 		}
 	}
@@ -1164,6 +1165,7 @@ func vaultCapability2Record(c vault.Capability, capIDHex string) capability.Reco
 			Kind:      c.Binding.Kind,
 			PinExpiry: c.Binding.PinExpiry,
 			Pubkey:    c.Binding.Pubkey,
+			KeyType:   c.Binding.KeyType,
 			ClaimedAt: c.Binding.ClaimedAt,
 		}
 	}

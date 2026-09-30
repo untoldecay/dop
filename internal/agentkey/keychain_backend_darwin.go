@@ -33,12 +33,14 @@ package agentkey
 import (
 	"errors"
 	"os"
-	"runtime"
 )
 
-// KeychainBackend will hold the SE-backed P-256 store implementation.
-// For now, all methods return "not implemented" so callers fall through
-// to the file backend during v1.11 branch development.
+// KeychainBackend holds the SE-backed P-256 store implementation.
+// When cgo is enabled (keychain_darwin_cgo.go build tag), init()
+// there rewires seLoad/seGenerate/seDelete/seAvailable to real
+// Security.framework calls. Without cgo, this file's stub versions
+// stand in — Available() returns false so callers fall through to
+// the file backend.
 type KeychainBackend struct {
 	// AppTagPrefix is the string prefixed to lookup ids when storing
 	// keys under kSecAttrApplicationTag. Kept configurable so tests
@@ -46,42 +48,54 @@ type KeychainBackend struct {
 	AppTagPrefix string
 }
 
-// NewKeychainBackend returns a KeychainBackend. On non-darwin builds
-// this file is excluded via the build tag; on darwin builds it exists
-// but returns "not yet implemented" for every operation until the cgo
-// bridge lands. Callers should combine it with a FileBackend fallback.
+// NewKeychainBackend returns a KeychainBackend. Actual availability
+// is decided at call time by Available() — which uses seAvailable
+// (wired by the cgo file when built with cgo).
 func NewKeychainBackend() *KeychainBackend {
 	return &KeychainBackend{AppTagPrefix: "dop.agent."}
 }
 
 func (b *KeychainBackend) Name() string { return "keychain-darwin" }
 
-// Available returns true when the SE-backed backend should be tried.
-// v1.11-checkpoint: always returns false because the cgo bridge isn't
-// there yet. Once implemented, this checks kSecAttrTokenIDSecureEnclave
-// availability + macOS version + presence of a Keychain session.
+// The following four package-level function vars are the seam between
+// the "stub, always fails" build (no cgo) and the "real, calls into
+// Security.framework" build (cgo). The cgo file's init() overwrites
+// them at process start when the tag is set.
+
+var (
+	seAvailable = func() bool {
+		// Escape hatch for headless CI runs where the SE bridge exists
+		// but the test wants to exercise the file backend path.
+		return os.Getenv("DOP_KEYCHAIN_STUB") == "1"
+	}
+	seLoad = func(_ *KeychainBackend, _ string) (Store, error) {
+		return nil, errors.New("keychain-darwin: cgo bridge not built (build with CGO_ENABLED=1)")
+	}
+	seGenerate = func(_ *KeychainBackend, _, _ string) (Store, error) {
+		return nil, errors.New("keychain-darwin: cgo bridge not built (build with CGO_ENABLED=1)")
+	}
+	seDelete = func(_ *KeychainBackend, _ string) error {
+		return errors.New("keychain-darwin: cgo bridge not built")
+	}
+)
+
+// Available reports whether the SE-backed backend can be used right
+// now. The cgo build overrides seAvailable with a real probe.
 func (b *KeychainBackend) Available() bool {
-	// Guardrails while the bridge is a stub — never let this backend
-	// silently claim to work.
-	if runtime.GOOS != "darwin" {
+	if os.Getenv("DOP_NO_KEYCHAIN") == "1" {
 		return false
 	}
-	if os.Getenv("DOP_KEYCHAIN_STUB") == "1" {
-		// Tests can flip this to exercise the "backend prefers keychain
-		// but falls back to file on error" path.
-		return true
-	}
-	return false
+	return seAvailable()
 }
 
 func (b *KeychainBackend) Load(lookupID string) (Store, error) {
-	return nil, errors.New("keychain-darwin: Load not yet implemented (v1.11 branch checkpoint)")
+	return seLoad(b, lookupID)
 }
 
 func (b *KeychainBackend) Generate(lookupID, keyType string) (Store, error) {
-	return nil, errors.New("keychain-darwin: Generate not yet implemented (v1.11 branch checkpoint)")
+	return seGenerate(b, lookupID, keyType)
 }
 
 func (b *KeychainBackend) Delete(lookupID string) error {
-	return errors.New("keychain-darwin: Delete not yet implemented (v1.11 branch checkpoint)")
+	return seDelete(b, lookupID)
 }

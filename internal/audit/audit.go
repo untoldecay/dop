@@ -36,6 +36,8 @@ const (
 	EventInvite         = "invite"          // M1 opens an invite
 	EventInviteResponse = "invite_response" // M2 replies
 	EventInviteComplete = "invite_complete" // M1 accepts, admin added
+	// v1.11 — agent key operations.
+	EventAgentMigrated = "agent_migrated" // ed25519 → P-256 re-enrollment
 )
 
 // Event is one line in the log.
