@@ -318,6 +318,7 @@ func runAdminStatus(args []string) int {
 		absRemaining = 0
 	}
 	fmt.Println("unlocked")
+	fmt.Printf("  version:          %s\n", versionString())
 	fmt.Printf("  admin pubkey:     %s\n", st.AdminPubkey)
 	fmt.Printf("  age recipient:    %s\n", st.AgeRecipient)
 	fmt.Printf("  idle TTL left:    %s\n", roundDur(idleRemaining))

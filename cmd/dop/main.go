@@ -1,4 +1,4 @@
-// dop — Doors of Perception CLI (v1.0).
+// dop — Doors of Perception CLI.
 //
 // Two authority planes:
 //   - Administrative plane (admin session): manages the vault.
@@ -13,12 +13,19 @@ import (
 	"os"
 
 	"github.com/fray/dop/internal/tui"
+	"github.com/fray/dop/internal/version"
 )
 
-const usage = `dop — Doors of Perception (v1.0)
+// versionString wraps the version package for backwards-compat with
+// existing call sites in this file.
+func versionString() string { return version.String() }
+
+const usage = `dop — Doors of Perception
 
 usage:
   dop                                            interactive TUI (default when on a TTY)
+  dop version | -v | --version                   print version + commit + build date
+  dop uninstall [--force]                        wipe DOP from this machine (alias for admin reset)
   dop help                                       this message
 
   # Admin plane
@@ -130,6 +137,14 @@ func main() {
 		os.Exit(runWatch(os.Args[2:]))
 	case "credential-helper":
 		os.Exit(runCredentialHelper(os.Args[2:]))
+	case "uninstall":
+		// v1.10.4 — top-level alias for `dop admin reset` so the "wipe
+		// this machine" action is discoverable without knowing about
+		// the admin subcommand tree.
+		os.Exit(runAdminReset(os.Args[2:]))
+	case "version", "-v", "--version":
+		fmt.Println(versionString())
+		return
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return

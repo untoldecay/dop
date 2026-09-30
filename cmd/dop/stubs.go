@@ -148,6 +148,11 @@ func runTeamRemove(args []string) int {
 		}
 	}
 	delete(v.Admins, *name)
+	// v1.10.4 — signal saveVaultViaDaemon that this SHRINK is intentional.
+	// The guard checks this env var and skips the "would lock out N admins"
+	// refusal, letting the legitimate remove path through.
+	os.Setenv("DOP_ALLOW_ADMIN_SHRINK", "1")
+	defer os.Unsetenv("DOP_ALLOW_ADMIN_SHRINK")
 	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
 		fmt.Fprintf(os.Stderr, "dop team remove: %v\n", err)
 		return 1
