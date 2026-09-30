@@ -47,6 +47,49 @@ func TestFileBackend_Ed25519_Roundtrip(t *testing.T) {
 	}
 }
 
+// v1.12: MigrateLookupID renames the file and keeps the key valid.
+func TestFileBackend_MigrateLookupID(t *testing.T) {
+	t.Setenv("DOP_ALLOW_FILE_KEYS", "1")
+	b := tmpBackend(t)
+	s, err := b.Generate("lookup-old", vault.KeyTypeP256)
+	if err != nil {
+		t.Fatalf("gen: %v", err)
+	}
+	oldPub := s.PublicKey()
+	migrator, ok := s.(LookupMigrator)
+	if !ok {
+		t.Fatal("fileP256Store should implement LookupMigrator")
+	}
+	if err := migrator.MigrateLookupID("lookup-new"); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if s.LookupID() != "lookup-new" {
+		t.Fatalf("LookupID after migrate: %s", s.LookupID())
+	}
+	// Same key: pubkey unchanged, sign still verifies.
+	if !PubkeyEqual(s.PublicKey(), oldPub) {
+		t.Fatal("pubkey changed after migrate")
+	}
+	sig, err := s.Sign([]byte("chal"))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := Verify(vault.KeyTypeP256, oldPub, []byte("chal"), sig); err != nil {
+		t.Fatalf("post-migrate verify: %v", err)
+	}
+	// Old file gone, new file present.
+	loaded, err := b.Load("lookup-new")
+	if err != nil {
+		t.Fatalf("load new: %v", err)
+	}
+	if !PubkeyEqual(loaded.PublicKey(), oldPub) {
+		t.Fatal("loaded pubkey mismatch")
+	}
+	if _, err := b.Load("lookup-old"); err == nil {
+		t.Fatal("old lookup should be gone after migrate")
+	}
+}
+
 // v1.12: SharedSecret returns ErrECDHUnsupported for ed25519.
 func TestFileBackend_Ed25519_SharedSecret_Unsupported(t *testing.T) {
 	b := tmpBackend(t)

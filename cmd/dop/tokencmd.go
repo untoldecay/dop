@@ -38,7 +38,7 @@ import (
 
 func runToken(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop token <issue|list|show|revoke|repin|reseal> ...")
+		fmt.Fprintln(os.Stderr, "usage: dop token <issue|list|show|revoke|repin|reseal|add-grant|remove-grant|rotate> ...")
 		return 2
 	}
 	switch args[0] {
@@ -54,6 +54,12 @@ func runToken(args []string) int {
 		return runTokenRepin(args[1:])
 	case "reseal":
 		return runTokenReseal(args[1:])
+	case "add-grant":
+		return runTokenAddGrant(args[1:])
+	case "remove-grant":
+		return runTokenRemoveGrant(args[1:])
+	case "rotate":
+		return runTokenRotate(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop token: unknown subcommand %q\n", args[0])
 		return 2
@@ -108,12 +114,26 @@ func runTokenShow(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop token show: no token matches %q\n", needle)
 		return 1
 	}
+	// v1.12 — after a rotation, one subject has two records (old
+	// status=rotated, new status=active). Prefer active on ambiguity;
+	// only error if there are still multiple active hits.
 	if len(hits) > 1 {
-		fmt.Fprintf(os.Stderr, "dop token show: %d tokens match %q — narrow with more prefix chars:\n", len(hits), needle)
+		var active []string
 		for _, h := range hits {
-			fmt.Fprintf(os.Stderr, "  %s  %s\n", h[:12], v.Capabilities[h].Subject)
+			if v.Capabilities[h].Status == capability.RecordStatusActive {
+				active = append(active, h)
+			}
 		}
-		return 1
+		if len(active) == 1 {
+			matchID = active[0]
+			match = v.Capabilities[matchID]
+		} else {
+			fmt.Fprintf(os.Stderr, "dop token show: %d tokens match %q — narrow with more prefix chars:\n", len(hits), needle)
+			for _, h := range hits {
+				fmt.Fprintf(os.Stderr, "  %s  %s  (status=%s)\n", h[:12], v.Capabilities[h].Subject, v.Capabilities[h].Status)
+			}
+			return 1
+		}
 	}
 
 	// Resolve each grant → integration/token/env-var.
@@ -1130,15 +1150,21 @@ func syncSidecars(client *admin.Client, paths *config.Paths, v *vault.Vault) err
 		return err
 	}
 	// 1) Update / (re-)sign every active record whose sidecar drifted.
+	// v1.12 — status=rotated records also stay alive because their
+	// BearerWrapped envelope is the mechanism by which the agent
+	// picks up the new bearer. They get pruned only on explicit
+	// revoke or after admin confirms the rotation is complete.
 	for capID, c := range v.Capabilities {
 		p := filepath.Join(dir, c.LookupID+".record")
-		if c.Status != capability.RecordStatusActive {
-			// Non-active — kill the sidecar (bundle is deleted by revoke
-			// path; leave it be if still present so we don't double-delete
-			// mid-operation).
+		if c.Status == capability.RecordStatusRevoked {
+			// Explicitly revoked — kill the sidecar (bundle is deleted
+			// by revoke path; leave it be if still present so we don't
+			// double-delete mid-operation).
 			_ = os.Remove(p)
 			continue
 		}
+		// Both active and rotated flow through the resign + sidecar
+		// path so the on-disk copy stays coherent.
 		if sidecarMatches(p, c) {
 			continue
 		}
@@ -1162,7 +1188,10 @@ func syncSidecars(client *admin.Client, paths *config.Paths, v *vault.Vault) err
 	}
 	known := map[string]bool{}
 	for _, c := range v.Capabilities {
-		if c.Status == capability.RecordStatusActive {
+		// v1.12: keep both active and rotated lookups alive on disk.
+		// Rotated records still serve the BearerWrapped envelope until
+		// their agent picks up the rotation.
+		if c.Status == capability.RecordStatusActive || c.Status == capability.RecordStatusRotated {
 			known[c.LookupID] = true
 		}
 	}
@@ -1611,6 +1640,412 @@ func runTokenReseal(args []string) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "dop token reseal: sealed env for %s (gen %d)\n", match.Subject, rec.Generation)
+	return 0
+}
+
+// runTokenAddGrant adds a grant to an existing bearer's grant set,
+// bumps the generation, and re-seals the wrapped env so the agent's
+// next `dop exec` sees the new env WITHOUT a re-claim.
+//
+// v1.12 direct-availability: only meaningful for P-256-bound bearers
+// (ECDH re-encrypt requires the agent's SE pubkey). Ed25519 bearers
+// return a clear "migrate first, or revoke+reissue" error.
+func runTokenAddGrant(args []string) int {
+	return runTokenGrantMutation(args, "add")
+}
+
+// runTokenRemoveGrant removes a grant from an existing bearer's grant
+// set. Symmetric to add-grant.
+func runTokenRemoveGrant(args []string) int {
+	return runTokenGrantMutation(args, "remove")
+}
+
+// runTokenGrantMutation is the shared body of add-grant / remove-grant.
+// mode is "add" or "remove".
+func runTokenGrantMutation(args []string, mode string) int {
+	if len(args) != 2 {
+		fmt.Fprintf(os.Stderr, "usage: dop token %s-grant <lookup|subject> <grant-id>\n", mode)
+		return 2
+	}
+	needle := args[0]
+	grantID := args[1]
+
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token %s-grant: %v\n", mode, err)
+		return 1
+	}
+	v, vaultPath, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token %s-grant: %v\n", mode, err)
+		return 1
+	}
+
+	// Match the target token.
+	var matchID string
+	var hits int
+	for id, c := range v.Capabilities {
+		if c.Status != capability.RecordStatusActive {
+			continue
+		}
+		if strings.HasPrefix(id, needle) || strings.HasPrefix(c.LookupID, needle) || strings.EqualFold(c.Subject, needle) {
+			hits++
+			matchID = id
+		}
+	}
+	if hits == 0 {
+		fmt.Fprintf(os.Stderr, "dop token %s-grant: no active token matches %q\n", mode, needle)
+		return 1
+	}
+	if hits > 1 {
+		fmt.Fprintf(os.Stderr, "dop token %s-grant: %d active tokens match %q — narrow with more prefix chars\n", mode, hits, needle)
+		return 1
+	}
+	match := v.Capabilities[matchID]
+
+	// Direct-availability requires a P-256 SE key on the agent's side —
+	// nothing to encrypt the fresh env to on ed25519 bearers. Error
+	// clearly so operators know their options.
+	if match.Binding == nil || match.Binding.Pubkey == "" {
+		fmt.Fprintf(os.Stderr,
+			"dop token %s-grant: this bearer is not yet claimed (no bound pubkey) — reserve grant edits until after `dop claim`\n",
+			mode)
+		return 1
+	}
+	kt := match.Binding.KeyType
+	if kt == "" {
+		kt = vault.KeyTypeEd25519
+	}
+	if kt != vault.KeyTypeP256 {
+		fmt.Fprintf(os.Stderr,
+			"dop token %s-grant: bearer is bound to %s key — direct grant edits require P-256\n"+
+				"  Options:\n"+
+				"    1) run `dop agent migrate %s` on the agent's machine (upgrades to P-256, keeps bearer)\n"+
+				"    2) revoke this bearer and issue a fresh one with the wider/narrower grant set\n",
+			mode, kt, match.LookupID)
+		return 1
+	}
+
+	// Validate the grant argument.
+	if mode == "add" {
+		if _, ok := v.Grants[grantID]; !ok {
+			fmt.Fprintf(os.Stderr, "dop token add-grant: no grant %q in vault (see `dop grant list`)\n", grantID)
+			return 1
+		}
+		for _, g := range match.Grants {
+			if g == grantID {
+				fmt.Fprintf(os.Stderr, "dop token add-grant: bearer already has grant %q\n", grantID)
+				return 1
+			}
+		}
+	} else { // remove
+		found := false
+		for _, g := range match.Grants {
+			if g == grantID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "dop token remove-grant: bearer doesn't have grant %q\n", grantID)
+			return 1
+		}
+	}
+
+	// Apply the mutation.
+	newGrants := make([]string, 0, len(match.Grants)+1)
+	if mode == "add" {
+		newGrants = append(newGrants, match.Grants...)
+		newGrants = append(newGrants, grantID)
+	} else {
+		for _, g := range match.Grants {
+			if g == grantID {
+				continue
+			}
+			newGrants = append(newGrants, g)
+		}
+	}
+	match.Grants = newGrants
+	// Bumping generation ensures a) cached agents notice the change via
+	// the min-generation floor, b) the AEAD AAD on the resealed env
+	// differs from prior seals (defense against replay of a partial mid-
+	// mutation state).
+	match.Generation = v.BumpGeneration(match.Subject)
+
+	// Reseal EnvWrapped to reflect the new grants (env resolved fresh
+	// from the current vault → bearer's env changes take effect on the
+	// agent's next dop exec, no re-claim required).
+	rec := vaultCapability2Record(match, matchID)
+	wrapped, err := sealEnvWrapped(v, &rec)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token %s-grant: reseal: %v\n", mode, err)
+		return 1
+	}
+	rec.EnvWrapped = wrapped
+
+	if err := signRecordViaDaemon(client, &rec); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token %s-grant: sign: %v\n", mode, err)
+		return 1
+	}
+	v.Capabilities[matchID] = capability2VaultCapability(rec)
+	if err := writeRecordSidecar(paths, rec); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token %s-grant: write sidecar: %v\n", mode, err)
+		return 1
+	}
+	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token %s-grant: %v\n", mode, err)
+		return 1
+	}
+
+	verb := "added"
+	prep := "to"
+	if mode == "remove" {
+		verb = "removed"
+		prep = "from"
+	}
+	fmt.Fprintf(os.Stderr,
+		"dop token %s-grant: %s %s %s %s (gen bumped to %d, env resealed — agent's next `dop exec` picks it up)\n",
+		mode, verb, grantID, prep, match.Subject, rec.Generation)
+	return 0
+}
+
+// runTokenRotate rotates the bearer for an existing P-256-bound
+// capability, in place. It writes a fresh bundle + record at a NEW
+// lookup id (derived from the new bearer), then marks the OLD record
+// `status = rotated` and attaches a BearerWrapped envelope that
+// tells the agent (via ECDH to their SE pubkey) both the new bearer
+// and the new lookup id. The agent's next `dop exec` decrypts,
+// re-tags its SE key, and switches to the new bearer transparently.
+//
+// The agent's P-256 pubkey is preserved across rotation — same
+// physical key, same admin trust chain, just a new bearer + new
+// file location. Ed25519 bearers cannot rotate (no ECDH) — clear
+// error tells the operator to `dop agent migrate` first.
+func runTokenRotate(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: dop token rotate <lookup|subject>")
+		return 2
+	}
+	needle := args[0]
+
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token rotate: %v\n", err)
+		return 1
+	}
+	v, vaultPath, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token rotate: %v\n", err)
+		return 1
+	}
+
+	// Match the target token.
+	var oldCapID string
+	var hits int
+	for id, c := range v.Capabilities {
+		if c.Status != capability.RecordStatusActive {
+			continue
+		}
+		if strings.HasPrefix(id, needle) || strings.HasPrefix(c.LookupID, needle) || strings.EqualFold(c.Subject, needle) {
+			hits++
+			oldCapID = id
+		}
+	}
+	if hits == 0 {
+		fmt.Fprintf(os.Stderr, "dop token rotate: no active token matches %q\n", needle)
+		return 1
+	}
+	if hits > 1 {
+		fmt.Fprintf(os.Stderr, "dop token rotate: %d active tokens match %q — narrow with more prefix chars\n", hits, needle)
+		return 1
+	}
+	old := v.Capabilities[oldCapID]
+
+	if old.Binding == nil || old.Binding.Pubkey == "" {
+		fmt.Fprintln(os.Stderr, "dop token rotate: bearer is not yet claimed — rotate only makes sense post-claim")
+		return 1
+	}
+	kt := old.Binding.KeyType
+	if kt == "" {
+		kt = vault.KeyTypeEd25519
+	}
+	if kt != vault.KeyTypeP256 {
+		fmt.Fprintf(os.Stderr,
+			"dop token rotate: bearer bound to %s — rotation requires P-256 (needs ECDH to wrap the new bearer).\n"+
+				"  Options:\n"+
+				"    1) run `dop agent migrate %s` on the agent (upgrades to P-256)\n"+
+				"    2) revoke + issue a new bearer manually (loses transparent rotation)\n",
+			kt, old.LookupID)
+		return 1
+	}
+
+	agentPub, err := hex.DecodeString(old.Binding.Pubkey)
+	if err != nil || len(agentPub) != 65 || agentPub[0] != 0x04 {
+		fmt.Fprintf(os.Stderr, "dop token rotate: bad binding pubkey (want 65B X9.62): %v\n", err)
+		return 1
+	}
+
+	// Generate the new bearer and derive its lookup id.
+	newBearer, err := capability.NewBearer()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token rotate: new bearer: %v\n", err)
+		return 1
+	}
+	vaultCtx, _ := hex.DecodeString(v.VaultContext)
+	newLookupID := capability.LookupID(vaultCtx, newBearer)
+	if newLookupID == old.LookupID {
+		fmt.Fprintln(os.Stderr, "dop token rotate: new lookup id collided with old (128-bit unlucky) — retry")
+		return 1
+	}
+
+	// Fresh generation for the new record.
+	newGen := v.BumpGeneration(old.Subject)
+
+	// Write the new bundle at the new lookup id (encrypted with the
+	// new bearer). The envelope's env can be minimal — the record's
+	// EnvWrapped is authoritative for v1.12+ P-256 bearers — but we
+	// populate it with the current resolved env for backward-compat
+	// with any future v1.11 verifier that might read it.
+	envBundle := resolveGrantsToEnv(v, old.Grants)
+	newCapIDRaw, err := capability.NewCapabilityID()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token rotate: new capID: %v\n", err)
+		return 1
+	}
+	newCapIDHex := hex.EncodeToString(newCapIDRaw[:])
+	newBundlePath := filepath.Join(paths.Vault, "capabilities", newLookupID+".bundle")
+	if err := os.MkdirAll(filepath.Dir(newBundlePath), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token rotate: mkdir: %v\n", err)
+		return 1
+	}
+	f, err := os.Create(newBundlePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token rotate: create bundle: %v\n", err)
+		return 1
+	}
+	newBundleBytes, err := capability.Write(f, capability.WriteOpts{
+		CapabilityID: newCapIDRaw,
+		Bearer:       newBearer,
+		Generation:   newGen,
+		ExpiresAt:    old.ExpiresAt,
+		Subject:      old.Subject,
+		Env:          envBundle,
+		Binding: &capability.EnvelopeBinding{
+			Kind:    vault.BindingKindPubkey,
+			Pubkey:  old.Binding.Pubkey,
+			KeyType: vault.KeyTypeP256,
+		},
+	})
+	f.Close()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token rotate: write bundle: %v\n", err)
+		return 1
+	}
+	newBundleHash := capability.HashBundle(newBundleBytes)
+
+	// Build the new record (already-bound, no PIN — inherits pubkey).
+	newRec := capability.Record{
+		CapabilityID: newCapIDHex,
+		Subject:      old.Subject,
+		Grants:       append([]string(nil), old.Grants...),
+		CreatedAt:    time.Now().UTC().Truncate(time.Second),
+		ExpiresAt:    old.ExpiresAt,
+		Generation:   newGen,
+		LookupID:     newLookupID,
+		BundleHash:   newBundleHash,
+		Status:       capability.RecordStatusActive,
+		Binding: &capability.RecordBinding{
+			Kind:      vault.BindingKindPubkey,
+			Pubkey:    old.Binding.Pubkey,
+			KeyType:   vault.KeyTypeP256,
+			ClaimedAt: time.Now().UTC().Truncate(time.Second),
+		},
+	}
+	// Fresh EnvWrapped for the new record.
+	wrapped, err := sealEnvWrapped(v, &newRec)
+	if err != nil {
+		_ = os.Remove(newBundlePath)
+		fmt.Fprintf(os.Stderr, "dop token rotate: seal new record env: %v\n", err)
+		return 1
+	}
+	newRec.EnvWrapped = wrapped
+	if err := signRecordViaDaemon(client, &newRec); err != nil {
+		_ = os.Remove(newBundlePath)
+		fmt.Fprintf(os.Stderr, "dop token rotate: sign new record: %v\n", err)
+		return 1
+	}
+
+	// Wrap the new bearer + new lookup id for the agent.
+	payload, err := json.Marshal(struct {
+		Bearer   string `json:"bearer"`
+		LookupID string `json:"lookup_id"`
+	}{Bearer: newBearer, LookupID: newLookupID})
+	if err != nil {
+		_ = os.Remove(newBundlePath)
+		fmt.Fprintf(os.Stderr, "dop token rotate: marshal payload: %v\n", err)
+		return 1
+	}
+	// AAD binds the wrapped payload to the OLD record's identity
+	// (lookup + new_generation). Prevents splicing across rotations.
+	aad := []byte(fmt.Sprintf("dop-bearerwrap-v1|old_lookup=%s|new_gen=%d", old.LookupID, newGen))
+	sealed, err := envseal.Seal(agentPub, payload, aad)
+	if err != nil {
+		_ = os.Remove(newBundlePath)
+		fmt.Fprintf(os.Stderr, "dop token rotate: seal bearer payload: %v\n", err)
+		return 1
+	}
+	m := sealed.ToHex()
+
+	// Mutate the OLD record: status=rotated + attach BearerWrapped.
+	// Note: we bump the OLD record's generation too so a stale copy
+	// can't be confused with the mutation.
+	oldRec := vaultCapability2Record(old, oldCapID)
+	oldRec.Status = capability.RecordStatusRotated
+	oldRec.Generation = newGen
+	oldRec.BearerWrapped = &capability.WrappedBearer{
+		AdminEphemPub: m["admin_ephem_pub"],
+		Salt:          m["salt"],
+		Nonce:         m["nonce"],
+		Ciphertext:    m["ciphertext"],
+		SealedAt:      time.Now().UTC().Truncate(time.Second),
+		NewGeneration: newGen,
+	}
+	if err := signRecordViaDaemon(client, &oldRec); err != nil {
+		_ = os.Remove(newBundlePath)
+		fmt.Fprintf(os.Stderr, "dop token rotate: sign old record: %v\n", err)
+		return 1
+	}
+
+	// Both records back into vault.Capabilities.
+	if v.Capabilities == nil {
+		v.Capabilities = map[string]vault.Capability{}
+	}
+	v.Capabilities[oldCapID] = capability2VaultCapability(oldRec)
+	v.Capabilities[newCapIDHex] = capability2VaultCapability(newRec)
+
+	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
+		_ = os.Remove(newBundlePath)
+		fmt.Fprintf(os.Stderr, "dop token rotate: save vault: %v (rolled back new bundle)\n", err)
+		return 1
+	}
+	// Sidecar writes — old changes shape, new is fresh.
+	if err := writeRecordSidecar(paths, oldRec); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token rotate: write old sidecar: %v\n", err)
+		return 1
+	}
+	if err := writeRecordSidecar(paths, newRec); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token rotate: write new sidecar: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(os.Stderr,
+		"dop token rotate: rotated %s\n"+
+			"  old lookup: %s (status=rotated; BearerWrapped attached)\n"+
+			"  new lookup: %s (status=active; gen %d)\n"+
+			"  → agent's next `dop exec` decrypts BearerWrapped, migrates SE key, switches\n",
+		old.Subject, old.LookupID[:12], newLookupID[:12], newGen)
 	return 0
 }
 
