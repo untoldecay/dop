@@ -174,7 +174,35 @@ type Capability struct {
 	IssuedBy   string    `yaml:"issued_by"`
 	Status     string    `yaml:"status"`
 	Binding    *Binding  `yaml:"binding,omitempty"`
-	Signature  string    `yaml:"signature"`
+	// v1.12 — mirror of capability.Record.EnvWrapped / BearerWrapped
+	// so syncSidecars doesn't lose the wrapped envelopes on re-write.
+	// yaml/json tags match the record's JSON keys so a stored
+	// capability round-trips cleanly through vault → record → sidecar.
+	EnvWrapped    *WrappedEnv    `yaml:"env_wrapped,omitempty" json:"env_wrapped,omitempty"`
+	BearerWrapped *WrappedBearer `yaml:"bearer_wrapped,omitempty" json:"bearer_wrapped,omitempty"`
+	Signature     string         `yaml:"signature"`
+}
+
+// WrappedEnv / WrappedBearer mirror the identically-named types in
+// internal/capability. Duplicated here (rather than imported) so the
+// vault package stays free of any capability-package dependency —
+// vault is currently a leaf that many other packages depend on.
+type WrappedEnv struct {
+	AdminEphemPub string    `yaml:"admin_ephem_pub" json:"admin_ephem_pub"`
+	Salt          string    `yaml:"salt" json:"salt"`
+	Nonce         string    `yaml:"nonce" json:"nonce"`
+	Ciphertext    string    `yaml:"ciphertext" json:"ciphertext"`
+	SealedAt      time.Time `yaml:"sealed_at" json:"sealed_at"`
+	Generation    uint64    `yaml:"generation" json:"generation"`
+}
+
+type WrappedBearer struct {
+	AdminEphemPub string    `yaml:"admin_ephem_pub" json:"admin_ephem_pub"`
+	Salt          string    `yaml:"salt" json:"salt"`
+	Nonce         string    `yaml:"nonce" json:"nonce"`
+	Ciphertext    string    `yaml:"ciphertext" json:"ciphertext"`
+	SealedAt      time.Time `yaml:"sealed_at" json:"sealed_at"`
+	NewGeneration uint64    `yaml:"new_generation" json:"new_generation"`
 }
 
 // Binding tracks how a bearer proves it belongs to the intended agent.

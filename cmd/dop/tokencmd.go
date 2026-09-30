@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -30,13 +31,14 @@ import (
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/envseal"
 	"github.com/fray/dop/internal/trust"
 	"github.com/fray/dop/internal/vault"
 )
 
 func runToken(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop token <issue|list|revoke|repin> ...")
+		fmt.Fprintln(os.Stderr, "usage: dop token <issue|list|show|revoke|repin|reseal> ...")
 		return 2
 	}
 	switch args[0] {
@@ -50,6 +52,8 @@ func runToken(args []string) int {
 		return runTokenRevoke(args[1:])
 	case "repin":
 		return runTokenRepin(args[1:])
+	case "reseal":
+		return runTokenReseal(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop token: unknown subcommand %q\n", args[0])
 		return 2
@@ -1217,6 +1221,32 @@ func sidecarMatches(path string, c vault.Capability) bool {
 			return false
 		}
 	}
+	// v1.12 — wrapped envelopes participate in the "did anything
+	// change?" check so a reseal flushes to the sidecar.
+	if (existing.EnvWrapped == nil) != (c.EnvWrapped == nil) {
+		return false
+	}
+	if existing.EnvWrapped != nil && c.EnvWrapped != nil {
+		if existing.EnvWrapped.AdminEphemPub != c.EnvWrapped.AdminEphemPub ||
+			existing.EnvWrapped.Salt != c.EnvWrapped.Salt ||
+			existing.EnvWrapped.Nonce != c.EnvWrapped.Nonce ||
+			existing.EnvWrapped.Ciphertext != c.EnvWrapped.Ciphertext ||
+			existing.EnvWrapped.Generation != c.EnvWrapped.Generation {
+			return false
+		}
+	}
+	if (existing.BearerWrapped == nil) != (c.BearerWrapped == nil) {
+		return false
+	}
+	if existing.BearerWrapped != nil && c.BearerWrapped != nil {
+		if existing.BearerWrapped.AdminEphemPub != c.BearerWrapped.AdminEphemPub ||
+			existing.BearerWrapped.Salt != c.BearerWrapped.Salt ||
+			existing.BearerWrapped.Nonce != c.BearerWrapped.Nonce ||
+			existing.BearerWrapped.Ciphertext != c.BearerWrapped.Ciphertext ||
+			existing.BearerWrapped.NewGeneration != c.BearerWrapped.NewGeneration {
+			return false
+		}
+	}
 	return true
 }
 
@@ -1291,6 +1321,26 @@ func capability2VaultCapability(r capability.Record) vault.Capability {
 			ClaimedAt: r.Binding.ClaimedAt,
 		}
 	}
+	if r.EnvWrapped != nil {
+		c.EnvWrapped = &vault.WrappedEnv{
+			AdminEphemPub: r.EnvWrapped.AdminEphemPub,
+			Salt:          r.EnvWrapped.Salt,
+			Nonce:         r.EnvWrapped.Nonce,
+			Ciphertext:    r.EnvWrapped.Ciphertext,
+			SealedAt:      r.EnvWrapped.SealedAt,
+			Generation:    r.EnvWrapped.Generation,
+		}
+	}
+	if r.BearerWrapped != nil {
+		c.BearerWrapped = &vault.WrappedBearer{
+			AdminEphemPub: r.BearerWrapped.AdminEphemPub,
+			Salt:          r.BearerWrapped.Salt,
+			Nonce:         r.BearerWrapped.Nonce,
+			Ciphertext:    r.BearerWrapped.Ciphertext,
+			SealedAt:      r.BearerWrapped.SealedAt,
+			NewGeneration: r.BearerWrapped.NewGeneration,
+		}
+	}
 	return c
 }
 
@@ -1315,6 +1365,26 @@ func vaultCapability2Record(c vault.Capability, capIDHex string) capability.Reco
 			Pubkey:    c.Binding.Pubkey,
 			KeyType:   c.Binding.KeyType,
 			ClaimedAt: c.Binding.ClaimedAt,
+		}
+	}
+	if c.EnvWrapped != nil {
+		r.EnvWrapped = &capability.WrappedEnv{
+			AdminEphemPub: c.EnvWrapped.AdminEphemPub,
+			Salt:          c.EnvWrapped.Salt,
+			Nonce:         c.EnvWrapped.Nonce,
+			Ciphertext:    c.EnvWrapped.Ciphertext,
+			SealedAt:      c.EnvWrapped.SealedAt,
+			Generation:    c.EnvWrapped.Generation,
+		}
+	}
+	if c.BearerWrapped != nil {
+		r.BearerWrapped = &capability.WrappedBearer{
+			AdminEphemPub: c.BearerWrapped.AdminEphemPub,
+			Salt:          c.BearerWrapped.Salt,
+			Nonce:         c.BearerWrapped.Nonce,
+			Ciphertext:    c.BearerWrapped.Ciphertext,
+			SealedAt:      c.BearerWrapped.SealedAt,
+			NewGeneration: c.BearerWrapped.NewGeneration,
 		}
 	}
 	return r
@@ -1403,6 +1473,145 @@ func resolveGrantsToEnv(v *vault.Vault, grants []string) map[string]string {
 		}
 	}
 	return out
+}
+
+// v1.12 — sealEnvWrapped resolves env from record.Grants using the
+// live vault, seals it to the agent's P-256 pubkey (from
+// record.Binding), and returns a *capability.WrappedEnv ready to
+// attach to the record. Caller re-signs the record afterwards.
+//
+// Errors surface loudly — this path is admin-driven and can't
+// silently misfire. The one soft edge is "no P-256 pubkey on
+// binding" which returns a plain error so callers can distinguish
+// "nothing to reseal, agent is legacy" from "seal actually failed".
+func sealEnvWrapped(v *vault.Vault, rec *capability.Record) (*capability.WrappedEnv, error) {
+	if rec.Binding == nil || rec.Binding.Pubkey == "" {
+		return nil, errNoAgentPubkey
+	}
+	kt := rec.Binding.KeyType
+	if kt == "" {
+		kt = vault.KeyTypeEd25519
+	}
+	if kt != vault.KeyTypeP256 {
+		return nil, fmt.Errorf("token bound to %s key (not p256) — run `dop agent migrate <lookup>` on the agent first", kt)
+	}
+	pubBytes, err := hex.DecodeString(rec.Binding.Pubkey)
+	if err != nil {
+		return nil, fmt.Errorf("binding pubkey not hex: %w", err)
+	}
+	if len(pubBytes) != 65 || pubBytes[0] != 0x04 {
+		return nil, fmt.Errorf("binding pubkey wrong format: want 65B uncompressed X9.62, got %dB", len(pubBytes))
+	}
+	env := resolveGrantsToEnv(v, rec.Grants)
+	// The plaintext is JSON so that a v1.13 change to the env shape
+	// (e.g. per-grant provenance) is backward compatible with v1.12
+	// openers — they just JSON-decode into a plain map[string]string.
+	blob, err := json.Marshal(struct {
+		Env map[string]string `json:"env"`
+	}{Env: env})
+	if err != nil {
+		return nil, fmt.Errorf("marshal env: %w", err)
+	}
+	// AAD binds the ciphertext to this specific record + generation so
+	// a stale envelope can't be spliced onto a fresh record. Every byte
+	// under aad must be reproducible by the agent at open time from the
+	// (verified) record fields.
+	aad := envSealAAD(rec.LookupID, rec.Generation)
+	sealed, err := envseal.Seal(pubBytes, blob, aad)
+	if err != nil {
+		return nil, fmt.Errorf("envseal: %w", err)
+	}
+	m := sealed.ToHex()
+	return &capability.WrappedEnv{
+		AdminEphemPub: m["admin_ephem_pub"],
+		Salt:          m["salt"],
+		Nonce:         m["nonce"],
+		Ciphertext:    m["ciphertext"],
+		SealedAt:      time.Now().UTC().Truncate(time.Second),
+		Generation:    rec.Generation,
+	}, nil
+}
+
+// envSealAAD returns the deterministic byte string bound under the
+// AEAD auth tag when sealing/opening EnvWrapped. Its contents must
+// be reproducible by the agent from record fields alone.
+func envSealAAD(lookupID string, generation uint64) []byte {
+	return []byte(fmt.Sprintf("dop-envwrap-v1|lookup=%s|gen=%d", lookupID, generation))
+}
+
+// errNoAgentPubkey is returned by sealEnvWrapped when the record's
+// binding has no pubkey yet (unclaimed PIN bearer). Not a hard
+// failure — callers reseal after claim completes.
+var errNoAgentPubkey = errors.New("agent pubkey not on binding yet (unclaimed PIN bearer)")
+
+// runTokenReseal regenerates record.EnvWrapped from the current
+// vault grants, using the agent's P-256 pubkey. This is what makes
+// grant edits reach a bound agent without a re-claim: the admin
+// mutates grants (or vault.yaml integrations), runs reseal, and the
+// agent's next `dop exec` picks up the fresh env via ECDH.
+//
+// Only meaningful for bearers bound to a P-256 SE key. Ed25519
+// bearers get a clear "migrate first" error.
+func runTokenReseal(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: dop token reseal <lookup-id-prefix|subject>")
+		return 2
+	}
+	needle := args[0]
+
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token reseal: %v\n", err)
+		return 1
+	}
+	v, vaultPath, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token reseal: %v\n", err)
+		return 1
+	}
+	var (
+		match   vault.Capability
+		matchID string
+		hits    []string
+	)
+	for id, c := range v.Capabilities {
+		if strings.HasPrefix(id, needle) || strings.HasPrefix(c.LookupID, needle) || strings.EqualFold(c.Subject, needle) {
+			hits = append(hits, id)
+			match = c
+			matchID = id
+		}
+	}
+	if len(hits) == 0 {
+		fmt.Fprintf(os.Stderr, "dop token reseal: no token matches %q\n", needle)
+		return 1
+	}
+	if len(hits) > 1 {
+		fmt.Fprintf(os.Stderr, "dop token reseal: %d tokens match %q — narrow with more prefix chars\n", len(hits), needle)
+		return 1
+	}
+	rec := vaultCapability2Record(match, matchID)
+	wrapped, err := sealEnvWrapped(v, &rec)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token reseal: %v\n", err)
+		return 1
+	}
+	rec.EnvWrapped = wrapped
+	if err := signRecordViaDaemon(client, &rec); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token reseal: sign: %v\n", err)
+		return 1
+	}
+	v.Capabilities[matchID] = capability2VaultCapability(rec)
+	if err := writeRecordSidecar(paths, rec); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token reseal: write sidecar: %v\n", err)
+		return 1
+	}
+	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token reseal: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "dop token reseal: sealed env for %s (gen %d)\n", match.Subject, rec.Generation)
+	return 0
 }
 
 // splitFlagsAndPositionals separates a raw argv slice into things that
