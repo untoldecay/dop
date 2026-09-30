@@ -14,6 +14,7 @@ fail() { echo "  ✗ $*" >&2; exit 1; }
 WORKROOT=$(mktemp -d /tmp/dop-remote-XXXX)
 trap 'rm -rf "$WORKROOT"' EXIT
 export DOP_NO_TUI=1
+export DOP_NO_KEYCHAIN=1
 export DOP_NO_NOTIFY=1
 
 BARE="$WORKROOT/bare"

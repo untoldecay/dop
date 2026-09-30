@@ -295,6 +295,12 @@ func runAdminLogin(args []string) int {
 	//   - opt out with DOP_NO_AUTO_PULL=1 (mirrors DOP_NO_AUTO_PUSH)
 	//   - skipped entirely if vault isn't a git repo yet
 	autoPullVault(paths)
+	// v1.11 — sweep expired 12h grace markers on legacy ed25519 keys
+	// that were migrated to P-256. Silent unless something got
+	// removed, so the login output stays quiet in the common case.
+	if n, err := sweepLegacyGrace(paths); err == nil && n > 0 {
+		fmt.Fprintf(os.Stderr, "dop admin login: swept %d expired legacy agent key(s).\n", n)
+	}
 	return 0
 }
 
@@ -343,7 +349,38 @@ func runAdminStatus(args []string) int {
 	fmt.Printf("  age recipient:    %s\n", st.AgeRecipient)
 	fmt.Printf("  idle TTL left:    %s\n", roundDur(idleRemaining))
 	fmt.Printf("  absolute TTL left: %s\n", roundDur(absRemaining))
+	// v1.11 — one-line summary of agent-key storage across all
+	// claimed bearers on this machine.
+	if summary := agentKeysSummary(paths); summary != "" {
+		fmt.Printf("  agent keys:       %s\n", summary)
+	}
 	return 0
+}
+
+// agentKeysSummary returns a compact "SE=N file=M (K pending migration)"
+// line, or the empty string if there are no agent keys. Called from
+// admin status + doctor.
+func agentKeysSummary(paths *config.Paths) string {
+	entries, err := collectAgentKeys(paths)
+	if err != nil || len(entries) == 0 {
+		return ""
+	}
+	seCount, fileCount, pending := 0, 0, 0
+	for _, e := range entries {
+		if e.Backend == "keychain-darwin" {
+			seCount++
+		} else {
+			fileCount++
+		}
+		if e.PendingDelete {
+			pending++
+		}
+	}
+	out := fmt.Sprintf("SE=%d file=%d", seCount, fileCount)
+	if pending > 0 {
+		out += fmt.Sprintf(" (%d pending grace-delete)", pending)
+	}
+	return out
 }
 
 // runAdminSessionDaemon is the daemon-side entry: read keys from stdin,
