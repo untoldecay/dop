@@ -47,6 +47,55 @@ func TestFileBackend_Ed25519_Roundtrip(t *testing.T) {
 	}
 }
 
+// v1.12: SharedSecret returns ErrECDHUnsupported for ed25519.
+func TestFileBackend_Ed25519_SharedSecret_Unsupported(t *testing.T) {
+	b := tmpBackend(t)
+	s, err := b.Generate("lookup-ed", vault.KeyTypeEd25519)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	_, err = s.SharedSecret(make([]byte, 65))
+	if err == nil {
+		t.Fatal("ed25519 SharedSecret should return ErrECDHUnsupported")
+	}
+	if err != ErrECDHUnsupported {
+		t.Fatalf("wrong error: %v", err)
+	}
+}
+
+// v1.12: P-256 file-backed key's SharedSecret is a symmetric-key
+// candidate — proves the store contract for the pure-Go path.
+// The SE-backed store is exercised through Sign in field tests; this
+// test protects the Go-side plumbing.
+func TestFileBackend_P256_SharedSecret_Symmetric(t *testing.T) {
+	t.Setenv("DOP_ALLOW_FILE_KEYS", "1")
+	// Two independent P-256 keys — simulate admin ephemeral + agent.
+	b := tmpBackend(t)
+	agentStore, err := b.Generate("lookup-ecdh", vault.KeyTypeP256)
+	if err != nil {
+		t.Fatalf("agent gen: %v", err)
+	}
+	peerStore, err := b.Generate("lookup-ecdh-peer", vault.KeyTypeP256)
+	if err != nil {
+		t.Fatalf("peer gen: %v", err)
+	}
+	// Alice's shared(peer_pub) must equal Bob's shared(alice_pub).
+	sharedA, err := agentStore.SharedSecret(peerStore.PublicKey())
+	if err != nil {
+		t.Fatalf("agent side: %v", err)
+	}
+	sharedB, err := peerStore.SharedSecret(agentStore.PublicKey())
+	if err != nil {
+		t.Fatalf("peer side: %v", err)
+	}
+	if string(sharedA) != string(sharedB) {
+		t.Fatalf("ECDH not symmetric: A=%x B=%x", sharedA, sharedB)
+	}
+	if len(sharedA) != 32 {
+		t.Fatalf("P-256 shared secret should be 32B, got %d", len(sharedA))
+	}
+}
+
 func TestFileBackend_P256_RequiresOptIn(t *testing.T) {
 	b := tmpBackend(t)
 	// Without the env var — refuse.
