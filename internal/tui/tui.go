@@ -19,6 +19,7 @@ import (
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/pendingclaim"
+	"github.com/fray/dop/internal/version"
 )
 
 // Run is the TUI entry point. Blocks until the user quits.
@@ -151,18 +152,21 @@ func (m *rootModel) rebuildMenu() {
 			{label: "Attach vault", hint: "join an existing vault as agent", key: "a", fn: (*rootModel).openAttachAgent},
 			{label: "Join existing vault", hint: "become an admin device via invite PIN (v1.9)", key: "j", fn: (*rootModel).openJoin},
 			{label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
+			{label: "Uninstall", hint: "wipe DOP from this machine", fn: (*rootModel).openReset},
 			{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
 		}
 	case m.install == installAdmin && m.session == sessionLocked:
 		m.menu = []menuItem{
 			{label: "Login", hint: "unlock admin session", key: "l", fn: (*rootModel).openLogin},
 			{label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
+			{label: "Uninstall", hint: "wipe DOP from this machine", fn: (*rootModel).openReset},
 			{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
 		}
 	case m.install == installAdmin && m.session == sessionUnlocked && !vaultAttached(m.paths):
 		m.menu = []menuItem{
 			{label: "Attach vault", hint: "clone/link a vault repo", key: "a", fn: (*rootModel).openAttachAdmin},
 			{label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
+			{label: "Uninstall", hint: "wipe DOP from this machine", fn: (*rootModel).openReset},
 			{label: "Logout", hint: "end admin session", key: "o", fn: (*rootModel).doLogout},
 			{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
 		}
@@ -195,7 +199,7 @@ func (m *rootModel) rebuildMenu() {
 			{section: "System", label: "Status", hint: "session state", key: "s", fn: (*rootModel).openStatus},
 			{section: "System", label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
 			{section: "System", label: "Logout", hint: "end admin session", key: "o", fn: (*rootModel).doLogout},
-			{section: "System", label: "Reset (wipe local state)", hint: "delete every DOP file on this machine", fn: (*rootModel).openReset},
+			{section: "System", label: "Uninstall", hint: "wipe every DOP file on this machine (keeps the vault repo)", fn: (*rootModel).openReset},
 			{section: "System", label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
 		}
 	}
@@ -282,8 +286,9 @@ func (m *rootModel) View() string {
 	}
 	var b strings.Builder
 
-	// Header — title + one-line state.
-	b.WriteString(titleSt.Render("dop — Doors of Perception") + "\n")
+	// Header — title (with version) + one-line state.
+	b.WriteString(titleSt.Render("dop — Doors of Perception") + "  " +
+		mutedSt.Render(version.Short()) + "\n")
 	b.WriteString(mutedSt.Render(m.stateLine()) + "\n")
 
 	// v1.7 — pending-claim banner. Draws attention when an agent is

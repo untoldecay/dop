@@ -697,6 +697,20 @@ func saveVaultViaDaemon(client *admin.Client, paths *config.Paths, vaultPath str
 		}
 	}
 
+	// v1.10.4 SAFETY GUARD — after the self-bootstrap has ensured we're
+	// in the admin list, refuse to write a vault that would lock out
+	// OTHER admins vs. what admins.trust currently says. This class of
+	// bug caused a silent multi-day divergence in the field: load
+	// returned an incomplete v.Admins, save re-encrypted for only one
+	// recipient, and the other machine was permanently orphaned. If
+	// load ever returns fewer entries than what's committed on disk,
+	// we refuse rather than commit the damage. Deliberate removals go
+	// through the `dop team remove` path which sets
+	// DOP_ALLOW_ADMIN_SHRINK=1 before saving.
+	if err := guardAdminShrink(paths, v); err != nil {
+		return err
+	}
+
 	// v1.6.3 — sync sidecar records against the vault BEFORE writing
 	// the vault. Any capability whose metadata drifted (e.g. via
 	// `dop vault edit`) gets re-signed and its `.record` file
@@ -858,6 +872,74 @@ func autoPullAndMerge(paths *config.Paths) error {
 		return fmt.Errorf("finalize merge: %w", err)
 	}
 	return nil
+}
+
+// guardAdminShrink refuses to save v if it would remove admin entries
+// vs. the current on-disk vault. This is a defensive net: every legit
+// path to remove an admin (dop team remove, dop team invite finalization
+// when it also drops someone, etc.) sets DOP_ALLOW_ADMIN_SHRINK=1
+// beforehand. Every OTHER save path (token issue, revoke, integration
+// add, grant edit, vault edit through the daemon, auto-merge writes)
+// should preserve the current admin set — if v.Admins is smaller, load
+// dropped entries silently and we're one write away from cryptographic
+// divergence. Fail loudly, don't commit the damage.
+func guardAdminShrink(paths *config.Paths, v *vault.Vault) error {
+	if os.Getenv("DOP_ALLOW_ADMIN_SHRINK") == "1" {
+		return nil
+	}
+	vaultPath := filepath.Join(paths.Vault, "vault.yaml")
+	fi, err := os.Stat(vaultPath)
+	if err != nil || fi.Size() == 0 {
+		return nil // fresh vault, nothing to compare against
+	}
+	// Read the on-disk state WITHOUT going through the daemon (which
+	// would be a nested request). Prefer admins.trust — it's the
+	// plaintext sidecar and doesn't require decryption. It's written
+	// by every successful save alongside vault.yaml.
+	trustPath := filepath.Join(paths.Vault, "admins.trust")
+	tb, err := os.ReadFile(trustPath)
+	if err != nil {
+		// No trust file yet (fresh install) — nothing to protect.
+		return nil
+	}
+	var trust struct {
+		Admins []struct {
+			Ed25519Pubkey string `json:"ed25519_pubkey"`
+			AgeRecipient  string `json:"age_recipient"`
+			Name          string `json:"name"`
+		} `json:"admins"`
+	}
+	if err := json.Unmarshal(tb, &trust); err != nil {
+		return nil // can't parse; be permissive rather than block real saves
+	}
+	// Collect current-vault pubkeys for O(1) lookup.
+	inNew := map[string]struct{}{}
+	for _, a := range v.Admins {
+		inNew[strings.ToLower(a.Ed25519Pubkey)] = struct{}{}
+	}
+	missing := []string{}
+	for _, a := range trust.Admins {
+		if _, ok := inNew[strings.ToLower(a.Ed25519Pubkey)]; !ok {
+			label := a.Name
+			if label == "" {
+				label = a.Ed25519Pubkey[:16] + "…"
+			}
+			missing = append(missing, label)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"refusing to save a vault that would lock out %d admin(s): %s\n"+
+			"  This save would drop them from the recipient list and cryptographically\n"+
+			"  strand them from future updates. That should never happen unless you\n"+
+			"  explicitly ran `dop team remove`.\n"+
+			"  Likely cause: the vault was loaded incorrectly (partial parse, stale state,\n"+
+			"  race). Fix: re-run the command, or `dop pull` first to refresh.\n"+
+			"  If you REALLY meant to remove those admins, use `dop team remove --name <label>`\n"+
+			"  (or set DOP_ALLOW_ADMIN_SHRINK=1 for the current command)",
+		len(missing), strings.Join(missing, ", "))
 }
 
 // adminPubkeyPresent returns true if any admin entry in the vault
