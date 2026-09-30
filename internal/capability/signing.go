@@ -43,9 +43,52 @@ type Record struct {
 	Status       string    `json:"status"`      // "active" | "revoked"
 	Binding      *RecordBinding `json:"binding,omitempty"`
 
+	// v1.12 — env resolved from Grants, sealed to the agent's P-256
+	// pubkey via ECDH. Present ⇒ dop exec MUST prefer this over the
+	// bundle env (loud failure if it can't open — no silent
+	// downgrade). Absent ⇒ legacy bundle-env path (used by ed25519
+	// bearers and by P-256 bearers issued before v1.12).
+	EnvWrapped *WrappedEnv `json:"env_wrapped,omitempty"`
+
+	// v1.12 — replacement bearer sealed to the agent's P-256 pubkey.
+	// Written when admin runs `dop token rotate <tok>`. Agent's next
+	// dop exec decrypts, atomically replaces the on-disk bearer, and
+	// proceeds with the new one. Absent ⇒ no rotation pending.
+	BearerWrapped *WrappedBearer `json:"bearer_wrapped,omitempty"`
+
 	// Signature over the canonical form of every other field. Excluded
 	// from that canonical form during signing/verification.
 	Signature string `json:"signature"`
+}
+
+// WrappedEnv is the envseal.Sealed output plus the generation it
+// commits to. Fields are hex-encoded to match the rest of the
+// codebase's on-disk format (bundle_hash, signature, ...).
+//
+// Generation is the record.Generation at the time this envelope was
+// sealed. On open, the agent's dop exec MUST verify Generation
+// matches record.Generation; a mismatch means someone glued a stale
+// envelope to a fresher record (git rollback attack). Also included
+// under the AEAD's AAD so a bit-flip in either place fails auth.
+type WrappedEnv struct {
+	AdminEphemPub string    `json:"admin_ephem_pub"` // hex, 65B uncompressed X9.62
+	Salt          string    `json:"salt"`            // hex, 32B
+	Nonce         string    `json:"nonce"`           // hex, 24B (XChaCha20)
+	Ciphertext    string    `json:"ciphertext"`      // hex, encrypts JSON({"env": {..}})
+	SealedAt      time.Time `json:"sealed_at"`
+	Generation    uint64    `json:"generation"`
+}
+
+// WrappedBearer wraps a bearer string sealed to the agent's P-256
+// pubkey. NewGeneration is the generation that will apply once the
+// agent picks up this bearer.
+type WrappedBearer struct {
+	AdminEphemPub string    `json:"admin_ephem_pub"`
+	Salt          string    `json:"salt"`
+	Nonce         string    `json:"nonce"`
+	Ciphertext    string    `json:"ciphertext"` // encrypts UTF-8 bearer string
+	SealedAt      time.Time `json:"sealed_at"`
+	NewGeneration uint64    `json:"new_generation"`
 }
 
 // RecordBinding is the vault-side view. Mirrors vault.Binding but lives
@@ -90,10 +133,41 @@ func (r Record) SigningPayload() ([]byte, error) {
 		if r.Binding.Pubkey != "" {
 			bindingMap["pubkey"] = r.Binding.Pubkey
 		}
+		// NOTE: r.Binding.KeyType is intentionally excluded from the
+		// signing payload for backward compatibility with v1.11
+		// records. Adding it here would invalidate every P-256 record
+		// signed pre-v1.12. Key type is protected instead by the
+		// signature over IssuedBy + BundleHash — the agent's pubkey is
+		// what gets attacked in a type-confusion scenario, and that
+		// pubkey IS covered indirectly via the bundle hash's
+		// dependency on binding fields at issue time.
 		if !r.Binding.ClaimedAt.IsZero() {
 			bindingMap["claimed_at"] = r.Binding.ClaimedAt.UTC().Format(time.RFC3339Nano)
 		}
 		m["binding"] = bindingMap
+	}
+	// v1.12 — the wrapped envelopes are covered by the record signature
+	// so tampering with them (or splicing them onto a different record)
+	// breaks verification.
+	if r.EnvWrapped != nil {
+		m["env_wrapped"] = map[string]any{
+			"admin_ephem_pub": r.EnvWrapped.AdminEphemPub,
+			"salt":            r.EnvWrapped.Salt,
+			"nonce":           r.EnvWrapped.Nonce,
+			"ciphertext":      r.EnvWrapped.Ciphertext,
+			"sealed_at":       r.EnvWrapped.SealedAt.UTC().Format(time.RFC3339Nano),
+			"generation":      r.EnvWrapped.Generation,
+		}
+	}
+	if r.BearerWrapped != nil {
+		m["bearer_wrapped"] = map[string]any{
+			"admin_ephem_pub": r.BearerWrapped.AdminEphemPub,
+			"salt":            r.BearerWrapped.Salt,
+			"nonce":           r.BearerWrapped.Nonce,
+			"ciphertext":      r.BearerWrapped.Ciphertext,
+			"sealed_at":       r.BearerWrapped.SealedAt.UTC().Format(time.RFC3339Nano),
+			"new_generation":  r.BearerWrapped.NewGeneration,
+		}
 	}
 	// Deterministic key order.
 	keys := make([]string, 0, len(m))

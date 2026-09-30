@@ -43,6 +43,7 @@ usage:
   dop token show <lookup|subject> [--json]       detail view: subject, expiry, binding, grants (admin-required)
   dop token revoke <name>                        revoke a capability (admin-required)
   dop token repin --subject S [--pin-ttl D]      reissue an expired/consumed PIN (admin-required)
+  dop token reseal <lookup|subject>              re-encrypt grant env to the agent's SE key (v1.12; admin-required)
   dop integration add --name N --token N=V:NOTE  add/update an integration (admin-required)
   dop integration list                           list integrations (admin-required)
   dop integration remove --name N [--force]      remove an integration (admin-required)

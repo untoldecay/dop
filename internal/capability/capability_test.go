@@ -267,6 +267,87 @@ func TestRecord_VerifyDetectsForgedSig(t *testing.T) {
 	}
 }
 
+// v1.12: signature covers env_wrapped — mutation there breaks verify.
+func TestRecord_VerifyDetectsEnvWrappedMutation(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	rec := Record{
+		CapabilityID: "abc", Subject: "s",
+		Grants: []string{"g"}, Generation: 1,
+		LookupID: "l", BundleHash: "h", Status: RecordStatusActive,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().Add(time.Hour).UTC(),
+		EnvWrapped: &WrappedEnv{
+			AdminEphemPub: "04aa",
+			Salt:          "beef",
+			Nonce:         "cafe",
+			Ciphertext:    "1234",
+			SealedAt:      time.Now().UTC().Round(time.Second),
+			Generation:    1,
+		},
+	}
+	if err := rec.Sign(priv); err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := rec.Verify(); err != nil {
+		t.Fatalf("verify (fresh): %v", err)
+	}
+	// Flip one byte of the ciphertext post-sign → verify fails.
+	rec.EnvWrapped.Ciphertext = "1235"
+	if err := rec.Verify(); err == nil {
+		t.Fatal("expected verify to fail after env_wrapped mutation")
+	}
+}
+
+// v1.12: signature covers bearer_wrapped — mutation there breaks verify.
+func TestRecord_VerifyDetectsBearerWrappedMutation(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	rec := Record{
+		CapabilityID: "abc", Subject: "s",
+		Grants: []string{"g"}, Generation: 1,
+		LookupID: "l", BundleHash: "h", Status: RecordStatusActive,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().Add(time.Hour).UTC(),
+		BearerWrapped: &WrappedBearer{
+			AdminEphemPub: "04aa",
+			Salt:          "beef",
+			Nonce:         "cafe",
+			Ciphertext:    "1234",
+			SealedAt:      time.Now().UTC().Round(time.Second),
+			NewGeneration: 2,
+		},
+	}
+	if err := rec.Sign(priv); err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := rec.Verify(); err != nil {
+		t.Fatalf("verify (fresh): %v", err)
+	}
+	rec.BearerWrapped.NewGeneration = 999
+	if err := rec.Verify(); err == nil {
+		t.Fatal("expected verify to fail after bearer_wrapped mutation")
+	}
+}
+
+// v1.12: a record signed WITHOUT env_wrapped verifies with new code
+// (backward compat with every v1.11 signed record).
+func TestRecord_VerifyLegacyRecordNoWrapping(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	rec := Record{
+		CapabilityID: "abc", Subject: "legacy",
+		Grants: []string{"g"}, Generation: 1,
+		LookupID: "l", BundleHash: "h", Status: RecordStatusActive,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().Add(time.Hour).UTC(),
+		// No EnvWrapped, no BearerWrapped — v1.11-style record.
+	}
+	if err := rec.Sign(priv); err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := rec.Verify(); err != nil {
+		t.Fatalf("legacy record should still verify: %v", err)
+	}
+}
+
 // tiny helper to avoid pulling encoding/hex in the test file directly
 func hexEncode(b []byte) string {
 	const hexDigits = "0123456789abcdef"

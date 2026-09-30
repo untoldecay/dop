@@ -22,6 +22,7 @@ import (
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/envseal"
 	"github.com/fray/dop/internal/trust"
 	"github.com/fray/dop/internal/vault"
 )
@@ -320,7 +321,8 @@ func resolveBearer(bearer string) (map[string]string, resolveResult, error) {
 	// v1.6.2 — verify signed capability record BEFORE decrypting the
 	// bundle. The record's admin signature is the actual root of trust;
 	// the bundle envelope alone only proves bearer possession.
-	if err := verifySignedRecord(paths, lookupID, bundleBytes); err != nil {
+	rec, err := verifyAndLoadRecord(paths, lookupID, bundleBytes)
+	if err != nil {
 		return nil, resolveResult{}, fmt.Errorf("record verify: %w", err)
 	}
 
@@ -346,7 +348,19 @@ func resolveBearer(bearer string) (map[string]string, resolveResult, error) {
 	if subject == "" {
 		subject = "unknown"
 	}
-	return env.Env, resolveResult{
+	effectiveEnv := env.Env
+	// v1.12 — EnvWrapped takes precedence over the bundle env. Any
+	// error is HARD: we do NOT silently fall back to bundle env
+	// (which would be a downgrade an attacker could force by
+	// corrupting the wrapped envelope).
+	if rec.EnvWrapped != nil {
+		wrappedEnv, oerr := openEnvWrapped(paths, rec)
+		if oerr != nil {
+			return nil, resolveResult{}, fmt.Errorf("env_wrapped: %w", oerr)
+		}
+		effectiveEnv = wrappedEnv
+	}
+	return effectiveEnv, resolveResult{
 		subject:    subject,
 		generation: hdr.Generation,
 		expiresAt:  time.Unix(hdr.ExpiresAtUnix, 0),
@@ -354,6 +368,68 @@ func resolveBearer(bearer string) (map[string]string, resolveResult, error) {
 		lookupID:   lookupID,
 		binding:    env.Binding,
 	}, nil
+}
+
+// openEnvWrapped decrypts record.EnvWrapped using the local agent's
+// SE (or file-backed P-256) key. Hard-fails on any error per v1.12
+// design decision: no silent downgrade to bundle env.
+//
+// Anti-rollback check: the generation baked under the AEAD's AAD
+// must match record.Generation. A mismatch means someone glued a
+// stale sealed envelope onto a fresher record; the admin signature
+// covers env_wrapped's fields so any splicing also breaks the record
+// signature, but the AAD adds belt-and-suspenders.
+func openEnvWrapped(paths *config.Paths, rec *capability.Record) (map[string]string, error) {
+	if rec.EnvWrapped == nil {
+		return nil, errors.New("no env_wrapped on record")
+	}
+	if rec.EnvWrapped.Generation != rec.Generation {
+		return nil, fmt.Errorf("env_wrapped gen %d ≠ record gen %d (stale envelope)",
+			rec.EnvWrapped.Generation, rec.Generation)
+	}
+	if rec.Binding == nil {
+		return nil, errors.New("record has env_wrapped but no binding — malformed")
+	}
+	expectedType := vault.KeyTypeEd25519
+	if rec.Binding.KeyType != "" {
+		expectedType = rec.Binding.KeyType
+	}
+	if expectedType != vault.KeyTypeP256 {
+		return nil, fmt.Errorf("env_wrapped requires p256 key, record binding is %s", expectedType)
+	}
+	store, err := agentkey.OpenByType(paths, rec.LookupID, expectedType)
+	if err != nil {
+		return nil, fmt.Errorf("open agent key: %w", err)
+	}
+	// Rebuild envseal.Sealed from the hex fields on the record.
+	sealed, err := envseal.FromHex(map[string]string{
+		"admin_ephem_pub": rec.EnvWrapped.AdminEphemPub,
+		"salt":            rec.EnvWrapped.Salt,
+		"nonce":           rec.EnvWrapped.Nonce,
+		"ciphertext":      rec.EnvWrapped.Ciphertext,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("decode sealed fields: %w", err)
+	}
+	// Compute the shared secret via the store (SE or file-backed).
+	shared, err := store.SharedSecret(sealed.AdminEphemPub)
+	if err != nil {
+		return nil, fmt.Errorf("ecdh: %w", err)
+	}
+	// AAD must match what the admin sealed with — reproduce it from
+	// the same record fields.
+	aad := []byte(fmt.Sprintf("dop-envwrap-v1|lookup=%s|gen=%d", rec.LookupID, rec.Generation))
+	plaintext, err := envseal.OpenWithShared(shared, sealed, aad)
+	if err != nil {
+		return nil, fmt.Errorf("open: %w", err)
+	}
+	var payload struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(plaintext, &payload); err != nil {
+		return nil, fmt.Errorf("decode plaintext: %w", err)
+	}
+	return payload.Env, nil
 }
 
 // readVaultContextFromVault tries to pull vault_context from a plaintext
@@ -536,47 +612,56 @@ func bearerFingerprint(bearer string) string {
 // contract) to "any bearer + a bundle whose record was signed by a
 // currently-trusted admin".
 func verifySignedRecord(paths *config.Paths, lookupID string, bundleBytes []byte) error {
+	_, err := verifyAndLoadRecord(paths, lookupID, bundleBytes)
+	return err
+}
+
+// verifyAndLoadRecord runs the same signed-record checks as
+// verifySignedRecord and returns the parsed, verified record — v1.12
+// callers (resolveBearer) need it to inspect EnvWrapped without a
+// re-read.
+func verifyAndLoadRecord(paths *config.Paths, lookupID string, bundleBytes []byte) (*capability.Record, error) {
 	recPath := filepath.Join(paths.Vault, "capabilities", lookupID+".record")
 	blob, err := os.ReadFile(recPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("no signed record for this bearer (%s missing)", recPath)
+			return nil, fmt.Errorf("no signed record for this bearer (%s missing)", recPath)
 		}
-		return err
+		return nil, err
 	}
 	var rec capability.Record
 	if err := json.Unmarshal(blob, &rec); err != nil {
-		return fmt.Errorf("record json: %w", err)
+		return nil, fmt.Errorf("record json: %w", err)
 	}
 
 	if rec.Status != capability.RecordStatusActive {
-		return fmt.Errorf("record status is %q", rec.Status)
+		return nil, fmt.Errorf("record status is %q", rec.Status)
 	}
 	if rec.LookupID != lookupID {
-		return fmt.Errorf("record lookup_id mismatch")
+		return nil, fmt.Errorf("record lookup_id mismatch")
 	}
 	if want := capability.HashBundle(bundleBytes); rec.BundleHash != want {
-		return fmt.Errorf("bundle hash mismatch (record %s ≠ file %s) — bundle tampered or out of sync",
+		return nil, fmt.Errorf("bundle hash mismatch (record %s ≠ file %s) — bundle tampered or out of sync",
 			short(rec.BundleHash), short(want))
 	}
 	trusted, err := trust.Load(paths)
 	if err != nil {
-		return fmt.Errorf("load trust: %w", err)
+		return nil, fmt.Errorf("load trust: %w", err)
 	}
 	if len(trusted) == 0 {
 		trustPath := trust.Path(paths)
 		if _, statErr := os.Stat(trustPath); statErr == nil {
-			return fmt.Errorf("admins.trust at %s lists zero admins — nothing to verify against", trustPath)
+			return nil, fmt.Errorf("admins.trust at %s lists zero admins — nothing to verify against", trustPath)
 		}
-		return fmt.Errorf("no admins.trust file at %s (agent install must `dop pull` after the admin has bootstrapped it)", trustPath)
+		return nil, fmt.Errorf("no admins.trust file at %s (agent install must `dop pull` after the admin has bootstrapped it)", trustPath)
 	}
 	if !trusted[strings.ToLower(rec.IssuedBy)] && !trusted[rec.IssuedBy] {
-		return fmt.Errorf("record signed by unknown admin: %s", short(rec.IssuedBy))
+		return nil, fmt.Errorf("record signed by unknown admin: %s", short(rec.IssuedBy))
 	}
 	if err := rec.Verify(); err != nil {
-		return fmt.Errorf("signature: %w", err)
+		return nil, fmt.Errorf("signature: %w", err)
 	}
-	return nil
+	return &rec, nil
 }
 
 func short(s string) string {
