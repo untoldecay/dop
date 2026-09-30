@@ -400,6 +400,12 @@ func (v *teamListView) View() string {
 		b.WriteString(fmt.Sprintf("- %s\n    age:     %s\n    ed25519: %s\n    note:    %s\n",
 			n, a.AgeRecipient, a.Ed25519Pubkey, note))
 	}
+	// v1.10.3 — quiet note explaining shared-identity's implication so
+	// people who used "same identity" on their Add-a-device don't
+	// wonder why the second machine isn't shown here.
+	b.WriteString("\n" + mutedSt.Render("This list shows distinct admin identities.") + "\n")
+	b.WriteString(mutedSt.Render("Devices you added with 'same identity' share one entry with the machine that invited them.") + "\n")
+	b.WriteString(mutedSt.Render("If you want two separate rows here, invite the second device with 'separate identity'.") + "\n")
 	b.WriteString("\n" + helpSt.Render("any key to go back"))
 	return b.String()
 }

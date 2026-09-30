@@ -16,34 +16,53 @@ import (
 	"github.com/fray/dop/internal/config"
 )
 
-// ---------- Add integration ----------
+// ---------- Add integration (v1.10.3 rewrite) ----------
+//
+// Same look-and-feel as Issue Token: every row visible at once, the
+// active row highlighted with a cursor bar, values fill in as you
+// go. One credential per Add flow — additional credentials go through
+// the integration edit path (a future release will unify these).
+//
+// The steps map to on-screen rows:
+//   0 Service name         (e.g. notion, github, db-primary)
+//   1 What it's for        (optional description)
+//   2 Base URL             (optional; sets an env var like NOTION_BASE_URL)
+//   3 Credential name      (prefilled from service name; user can edit)
+//   4 Credential value     (masked as you type)
+//   5 What can it do       (optional scope note — e.g. "read-only")
+//   6 Save                 (enter to persist)
+//   7 Running
+//   100 Done
 
-type integrationTokenDraft struct {
-	name, value, scope string
-}
+const (
+	integAddStepName   = 0
+	integAddStepDesc   = 1
+	integAddStepURL    = 2
+	integAddStepCred   = 3
+	integAddStepValue  = 4
+	integAddStepScope  = 5
+	integAddStepSave   = 6
+	integAddStepRun    = 7
+	integAddStepDone   = 100
+	integAddFieldCount = 7 // rows shown (0..6)
+)
 
 type addIntegrationView struct {
 	client *admin.Client
 	paths  *config.Paths
 
-	step    int
-	nameBuf strings.Builder
-	descBuf strings.Builder
-	urlBuf  strings.Builder
-	// The currently-active token's field buffers. Reset when a token is
-	// finalized and we start collecting the next one.
-	tokenNameBuf  strings.Builder
-	tokenValueBuf strings.Builder
-	tokenScopeBuf strings.Builder
-	tokens        []integrationTokenDraft
-	err           string
-	flash         string
-	done          bool
+	step       int
+	nameBuf    strings.Builder
+	descBuf    strings.Builder
+	urlBuf     strings.Builder
+	credBuf    strings.Builder
+	valueBuf   strings.Builder
+	scopeBuf   strings.Builder
+	credEdited bool // true once the operator changed the prefill
 
-	// step 4 = "add another token?" y/n
-	// step 5 = confirm
-	// step 6 = running
-	// step 100 = success
+	err   string
+	flash string
+	done  bool
 }
 
 func newAddIntegrationView(c *admin.Client, p *config.Paths) *addIntegrationView {
@@ -60,44 +79,33 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case integrationAddedMsg:
 		if mm.err != "" {
 			v.err = mm.err
-			v.step = 5 // back to confirm
+			v.step = integAddStepSave
 			return v, nil
 		}
-		v.step = 100
+		v.step = integAddStepDone
 	case tea.KeyMsg:
 		switch mm.String() {
 		case "esc", "ctrl+c":
 			v.done = true
 			return v, nil
 		}
-		if v.step == 100 {
+		if v.step == integAddStepDone {
 			v.done = true
 			v.flash = "integration saved"
-			return v, nil
-		}
-		if v.step == 4 {
-			switch mm.String() {
-			case "y", "Y":
-				// buffers already reset in advance(); go back to token name.
-				v.step = 1
-			case "n", "N", "enter":
-				v.step = 5 // confirm
-			}
-			return v, nil
-		}
-		if v.step == 5 {
-			switch mm.String() {
-			case "y", "Y", "enter":
-				v.step = 6
-				return v, v.save()
-			case "n", "N":
-				v.done = true
-			}
 			return v, nil
 		}
 		switch mm.String() {
 		case "enter":
 			return v.advance()
+		case "tab", "down":
+			if v.step < integAddStepSave {
+				v.step++
+				v.prefillIfNeeded()
+			}
+		case "shift+tab", "up":
+			if v.step > integAddStepName {
+				v.step--
+			}
 		case "backspace":
 			buf := v.curBuf()
 			s := buf.String()
@@ -105,80 +113,86 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				buf.Reset()
 				buf.WriteString(s[:len(s)-1])
 			}
+			if v.step == integAddStepCred {
+				v.credEdited = true
+			}
 		default:
-			if len(mm.Runes) > 0 {
+			if len(mm.Runes) > 0 && v.step >= integAddStepName && v.step <= integAddStepScope {
 				v.curBuf().WriteString(string(mm.Runes))
+				if v.step == integAddStepCred {
+					v.credEdited = true
+				}
 			}
 		}
 	}
 	return v, nil
 }
 
-// curBuf returns the buffer for the currently-active text-input step.
-// Never returns a copy — each buffer lives on the struct and outlives
-// the caller.
 func (v *addIntegrationView) curBuf() *strings.Builder {
 	switch v.step {
-	case 0:
+	case integAddStepName:
 		return &v.nameBuf
-	case 10:
+	case integAddStepDesc:
 		return &v.descBuf
-	case 11:
+	case integAddStepURL:
 		return &v.urlBuf
-	case 1:
-		return &v.tokenNameBuf
-	case 2:
-		return &v.tokenValueBuf
-	case 3:
-		return &v.tokenScopeBuf
+	case integAddStepCred:
+		return &v.credBuf
+	case integAddStepValue:
+		return &v.valueBuf
+	case integAddStepScope:
+		return &v.scopeBuf
 	}
-	// Steps 4/5/6/100 aren't text-input; the input handler ignores
-	// them. Return a throwaway.
 	var scratch strings.Builder
 	return &scratch
 }
 
+// prefillIfNeeded seeds the credential-name buffer with the service
+// name the first time we arrive at that step. The operator can still
+// edit it — but the default is what most single-credential services
+// need, and it makes the redundancy ("why two names?") obvious.
+func (v *addIntegrationView) prefillIfNeeded() {
+	if v.step == integAddStepCred && v.credBuf.Len() == 0 && !v.credEdited {
+		v.credBuf.WriteString(strings.TrimSpace(v.nameBuf.String()))
+	}
+}
+
 func (v *addIntegrationView) advance() (tea.Model, tea.Cmd) {
 	switch v.step {
-	case 0:
+	case integAddStepName:
 		if strings.TrimSpace(v.nameBuf.String()) == "" {
-			v.err = "name required"
+			v.err = "service name is required"
 			return v, nil
 		}
 		v.err = ""
-		v.step = 10
-	case 10:
-		v.step = 11
-	case 11:
-		v.step = 1 // start collecting the first token
-	case 1:
-		if strings.TrimSpace(v.tokenNameBuf.String()) == "" {
-			v.err = "token name required"
+		v.step = integAddStepDesc
+	case integAddStepDesc:
+		v.err = ""
+		v.step = integAddStepURL
+	case integAddStepURL:
+		v.err = ""
+		v.step = integAddStepCred
+		v.prefillIfNeeded()
+	case integAddStepCred:
+		if strings.TrimSpace(v.credBuf.String()) == "" {
+			v.err = "credential name is required"
 			return v, nil
 		}
 		v.err = ""
-		v.step = 2
-	case 2:
-		if strings.TrimSpace(v.tokenValueBuf.String()) == "" {
-			v.err = "token value required"
+		v.step = integAddStepValue
+	case integAddStepValue:
+		if strings.TrimSpace(v.valueBuf.String()) == "" {
+			v.err = "credential value is required"
 			return v, nil
 		}
 		v.err = ""
-		v.step = 3
-	case 3:
-		scope := strings.TrimSpace(v.tokenScopeBuf.String())
-		if scope == "" {
-			scope = "read-only"
-		}
-		v.tokens = append(v.tokens, integrationTokenDraft{
-			name:  strings.TrimSpace(v.tokenNameBuf.String()),
-			value: strings.TrimSpace(v.tokenValueBuf.String()),
-			scope: scope,
-		})
-		v.tokenNameBuf.Reset()
-		v.tokenValueBuf.Reset()
-		v.tokenScopeBuf.Reset()
-		v.step = 4
+		v.step = integAddStepScope
+	case integAddStepScope:
+		v.err = ""
+		v.step = integAddStepSave
+	case integAddStepSave:
+		v.step = integAddStepRun
+		return v, v.save()
 	}
 	return v, nil
 }
@@ -187,7 +201,12 @@ func (v *addIntegrationView) save() tea.Cmd {
 	name := strings.TrimSpace(v.nameBuf.String())
 	desc := strings.TrimSpace(v.descBuf.String())
 	url := strings.TrimSpace(v.urlBuf.String())
-	tokens := v.tokens
+	cred := strings.TrimSpace(v.credBuf.String())
+	value := strings.TrimSpace(v.valueBuf.String())
+	scope := strings.TrimSpace(v.scopeBuf.String())
+	if scope == "" {
+		scope = "-"
+	}
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		args := []string{"integration", "add", "--name", name}
@@ -197,9 +216,7 @@ func (v *addIntegrationView) save() tea.Cmd {
 		if url != "" {
 			args = append(args, "--base-url", url)
 		}
-		for _, t := range tokens {
-			args = append(args, "--token", fmt.Sprintf("%s=%s:%s", t.name, t.value, t.scope))
-		}
+		args = append(args, "--token", fmt.Sprintf("%s=%s:%s", cred, value, scope))
 		cmd := exec.Command(self, args...)
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
 		var stderr bytes.Buffer
@@ -213,75 +230,74 @@ func (v *addIntegrationView) save() tea.Cmd {
 
 func (v *addIntegrationView) View() string {
 	var b strings.Builder
-	b.WriteString(titleSt.Render("Add integration") + "\n\n")
-	if v.step == 100 {
+	b.WriteString(titleSt.Render("Add integration") + "\n")
+	b.WriteString(mutedSt.Render("Register a service and one credential for it. You can add more credentials later from the integration list.") + "\n\n")
+
+	if v.step == integAddStepDone {
 		b.WriteString(okSt.Render("✓ integration saved") + "\n\n")
-		b.WriteString(mutedSt.Render("You'll typically add a grant next (`dop grant add`).") + "\n\n")
+		b.WriteString(mutedSt.Render("Next: create a grant that binds a name (like `notion.read`) to this credential,") + "\n")
+		b.WriteString(mutedSt.Render("then `Issue token` to hand a bearer to your agent.") + "\n\n")
 		b.WriteString(helpSt.Render("any key to return"))
 		return b.String()
 	}
-	// Summary above the prompt.
-	if v.nameBuf.Len() > 0 {
-		b.WriteString(mutedSt.Render("Integration: "+v.nameBuf.String()) + "\n")
+
+	// Rows mirror the Issue Token style — all visible at once, active
+	// row highlighted, past rows shown as filled-in.
+	rows := []struct {
+		label string
+		value string
+		hint  string
+		mask  bool
+	}{
+		{"Service name", v.nameBuf.String(), "e.g. notion, github, db-primary", false},
+		{"What it's for", v.descBuf.String(), "optional — a one-line description", false},
+		{"Base URL", v.urlBuf.String(), "optional — sets an env var like NOTION_BASE_URL", false},
+		{"Credential name", v.credBuf.String(), "prefilled from the service name — edit if you'll have multiple credentials", false},
+		{"Credential value", v.valueBuf.String(), "the actual API key / token / password", true},
+		{"What it can do", v.scopeBuf.String(), "optional — e.g. read-only on /docs", false},
 	}
-	if v.descBuf.Len() > 0 {
-		b.WriteString(mutedSt.Render("Description: "+v.descBuf.String()) + "\n")
-	}
-	if v.urlBuf.Len() > 0 {
-		b.WriteString(mutedSt.Render("Base URL:    "+v.urlBuf.String()) + "\n")
-	}
-	for i, t := range v.tokens {
-		b.WriteString(mutedSt.Render(fmt.Sprintf("Token %d:     %s (scope=%s)", i+1, t.name, t.scope)) + "\n")
-	}
-	if v.nameBuf.Len() > 0 || len(v.tokens) > 0 {
+	for i, r := range rows {
+		style := mutedSt
+		if i == v.step {
+			style = cursorSt
+		}
+		b.WriteString(style.Render(r.label) + ": ")
+		display := r.value
+		if r.mask && !(i == v.step) {
+			display = strings.Repeat("•", len(r.value))
+		} else if r.mask && i == v.step {
+			display = strings.Repeat("•", len(r.value))
+		}
+		b.WriteString(display)
+		if i == v.step {
+			b.WriteString(cursorSt.Render("▎"))
+		}
 		b.WriteString("\n")
+		if i == v.step && r.hint != "" {
+			b.WriteString("    " + mutedSt.Render(r.hint) + "\n")
+		}
 	}
 
-	prompt := ""
-	value := ""
-	switch v.step {
-	case 0:
-		prompt = "Integration name (e.g. notion, boiler)"
-		value = v.nameBuf.String()
-	case 10:
-		prompt = "Description (optional — press enter to skip)"
-		value = v.descBuf.String()
-	case 11:
-		prompt = "Base URL (optional, e.g. https://api.notion.com/v1)"
-		value = v.urlBuf.String()
-	case 1:
-		prompt = "Token name (e.g. read, write, admin)"
-		value = v.tokenNameBuf.String()
-	case 2:
-		prompt = "Token VALUE (the real bearer from the upstream service)"
-		value = v.tokenValueBuf.String()
-	case 3:
-		prompt = "Scope note (default: read-only)"
-		value = v.tokenScopeBuf.String()
-	case 4:
-		b.WriteString("Add another token? (y/n)\n")
-		if v.err != "" {
-			b.WriteString("\n" + failSt.Render(v.err) + "\n")
-		}
-		b.WriteString("\n" + helpSt.Render("y add another · n / enter done · esc cancel"))
-		return b.String()
-	case 5:
-		b.WriteString("Ready to save? (y/n)\n")
-		if v.err != "" {
-			b.WriteString("\n" + failSt.Render(v.err) + "\n")
-		}
-		b.WriteString("\n" + helpSt.Render("y save · n cancel · esc back"))
-		return b.String()
-	case 6:
-		b.WriteString("saving…")
-		return b.String()
+	// Save row.
+	b.WriteString("\n")
+	saveStyle := mutedSt
+	if v.step == integAddStepSave {
+		saveStyle = cursorSt
 	}
-	b.WriteString(cursorSt.Render(prompt) + "\n")
-	b.WriteString("  " + value + cursorSt.Render("▎") + "\n")
+	b.WriteString("    " + saveStyle.Render("[ Save ]"))
+	if v.step == integAddStepSave {
+		b.WriteString("   " + mutedSt.Render("← press enter to save"))
+	}
+	b.WriteString("\n")
+
+	if v.step == integAddStepRun {
+		b.WriteString("\n" + mutedSt.Render("saving…") + "\n")
+	}
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("enter next · esc cancel"))
+
+	b.WriteString("\n" + helpSt.Render("enter next · tab/↑↓ jump between rows · esc cancel"))
 	return b.String()
 }
 
