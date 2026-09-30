@@ -30,10 +30,19 @@ func runExec(args []string) int {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
 	agentName := fs.String("agent-name", "", "self-reported label for audit")
 	tokenFile := fs.String("token-file", "", "read bearer from file (alternative to $DOP_TOKEN)")
-	cleanEnv := fs.Bool("clean-env", false, "strip inherited env, keep only PATH/HOME/USER + injected")
+	// v1.11 — flipped default. `--clean-env` used to be opt-in; the
+	// child inherited the parent's whole env by default, which leaked
+	// unrelated secrets (Nostr keys, editor auth tokens, harness
+	// config, previous DOP_TOKENs) to whatever the agent invoked. Now
+	// the default is clean; keep-parent-env is opt-in via --inherit-env.
+	// The legacy --clean-env flag remains as a silent no-op so old
+	// wrappers don't break.
+	inheritEnv := fs.Bool("inherit-env", false, "let the child see the parent process's env (LEGACY behaviour — leaks unrelated secrets)")
+	_ = fs.Bool("clean-env", true, "deprecated: clean is now the default; use --inherit-env to opt back into parent-env passthrough")
 	noPull := fs.Bool("no-pull", false, "skip auto-pull freshness check")
 	_ = fs.Parse(args)
 	_ = noPull // freshness check is a Phase 5 polish
+	cleanEnv := !*inheritEnv
 
 	child := fs.Args()
 	if len(child) == 0 {
@@ -69,7 +78,7 @@ func runExec(args []string) int {
 	})
 	fmt.Fprintf(os.Stderr, "dop exec: agent=%q subject=%q gen=%d env_keys=%d\n",
 		*agentName, res.subject, res.generation, len(env))
-	if err := execChild(child, env, *cleanEnv); err != nil {
+	if err := execChild(child, env, cleanEnv); err != nil {
 		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
 		return 1
 	}
@@ -435,6 +444,13 @@ func execChild(argv []string, env map[string]string, cleanEnv bool) error {
 	} else {
 		finalEnv = append(finalEnv, os.Environ()...)
 	}
+	// v1.11 — unconditionally strip DOP_TOKEN / DOP_TOKEN_FILE from
+	// the child, regardless of clean/inherit mode. A compromised child
+	// process inheriting the bearer can just re-invoke `dop env` and
+	// dump every credential — which defeats the whole point of the
+	// binding gate. The bearer is only meant to be visible to `dop`
+	// itself, never the process being run.
+	finalEnv = stripEnv(finalEnv, []string{"DOP_TOKEN", "DOP_TOKEN_FILE"})
 	// v1.5 env-hardening — when the child is `git`, strip external
 	// config + disable hooks + refuse ext protocols BEFORE injecting
 	// credential env. Prevents a hostile repo's hooks or a rogue

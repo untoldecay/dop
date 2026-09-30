@@ -11,13 +11,37 @@ before:
     - go mod tidy
 
 builds:
-  - id: dop
+  # v1.11 — darwin split so the Secure Enclave cgo bridge
+  # (internal/agentkey/keychain_darwin_cgo.go) gets compiled in.
+  # macOS Security.framework is only linkable when building ON macOS,
+  # so this only works when goreleaser runs on Apple Silicon.
+  #
+  # Runs on this dev machine (arm64) — darwin_arm64 gets a real
+  # SE-backed binary. darwin_amd64 is cross-compiled from arm64 macOS
+  # with cgo, which the built-in clang supports for the same OS.
+  - id: dop-darwin
+    main: ./cmd/dop
+    binary: dop
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/fray/dop/internal/version.Version=v{{.Version}}
+      - -X github.com/fray/dop/internal/version.Commit={{.Commit}}
+      - -X github.com/fray/dop/internal/version.Date={{.Date}}
+  # Linux stays cgo-free — no SE there anyway, and pure-Go static
+  # binaries cross-compile cleanly for both arches.
+  - id: dop-linux
     main: ./cmd/dop
     binary: dop
     env:
       - CGO_ENABLED=0
     goos:
-      - darwin
       - linux
     goarch:
       - amd64
@@ -27,6 +51,7 @@ builds:
       - -X github.com/fray/dop/internal/version.Version=v{{.Version}}
       - -X github.com/fray/dop/internal/version.Commit={{.Commit}}
       - -X github.com/fray/dop/internal/version.Date={{.Date}}
+  # dop-credential-git is a tiny helper — no crypto backend, stays cgo-free.
   - id: dop-credential-git
     main: ./cmd/dop-credential-git
     binary: dop-credential-git
@@ -44,9 +69,12 @@ builds:
 archives:
   - id: dop
     formats: [tar.gz]
-    # Bundle both binaries into one archive per (os, arch).
+    # Bundle both binaries into one archive per (os, arch). The dop
+    # binary comes from either dop-darwin or dop-linux depending on
+    # goos; goreleaser matches by build id + arch automatically.
     ids:
-      - dop
+      - dop-darwin
+      - dop-linux
       - dop-credential-git
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
