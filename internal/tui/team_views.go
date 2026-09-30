@@ -60,6 +60,9 @@ func (v *revokeView) load() tea.Msg {
 		if errors.Is(err, vault.ErrNotAttached) {
 			return revokeLoadedMsg{err: renderNoVault("tokens")}
 		}
+		if errors.Is(err, vault.ErrSessionEnded) {
+			return revokeLoadedMsg{err: renderSessionEnded()}
+		}
 		return revokeLoadedMsg{err: err.Error()}
 	}
 	items := []revokeItem{}
@@ -84,7 +87,7 @@ func (v *revokeView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.step = 1
 			return v, nil
 		}
-		v.flash = "revoked"
+		v.flash = "revoked · synced with team"
 		v.done = true
 	case tea.KeyMsg:
 		switch mm.String() {
@@ -215,7 +218,7 @@ func (v *teamAddView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.step = 3
 			return v, nil
 		}
-		v.flash = "team member added"
+		v.flash = "team member added · synced with team"
 		v.done = true
 	case tea.KeyMsg:
 		switch mm.String() {
@@ -359,6 +362,9 @@ func (v *teamListView) load() tea.Msg {
 		if errors.Is(err, vault.ErrNotAttached) {
 			return teamListLoadedMsg{err: renderNoVault("team members")}
 		}
+		if errors.Is(err, vault.ErrSessionEnded) {
+			return teamListLoadedMsg{err: renderSessionEnded()}
+		}
 		return teamListLoadedMsg{err: err.Error()}
 	}
 	return teamListLoadedMsg{admins: vlt.Admins}
@@ -453,6 +459,9 @@ func (v *teamRemoveView) load() tea.Msg {
 		if errors.Is(err, vault.ErrNotAttached) {
 			return teamRemoveLoadedMsg{err: renderNoVault("team members")}
 		}
+		if errors.Is(err, vault.ErrSessionEnded) {
+			return teamRemoveLoadedMsg{err: renderSessionEnded()}
+		}
 		return teamRemoveLoadedMsg{err: err.Error()}
 	}
 	names := make([]string, 0, len(vlt.Admins))
@@ -484,7 +493,7 @@ func (v *teamRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.step = 1
 			return v, nil
 		}
-		v.flash = "team member removed"
+		v.flash = "team member removed · synced with team"
 		v.done = true
 	case tea.KeyMsg:
 		switch mm.String() {

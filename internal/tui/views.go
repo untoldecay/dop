@@ -816,6 +816,9 @@ func (v *listView) load() tea.Msg {
 	if bytes.Contains(raw, []byte("\nsops:")) || bytes.HasPrefix(raw, []byte("sops:")) {
 		plain, err := v.client.DecryptVault(vp)
 		if err != nil {
+			if isDaemonUnreachable(err) {
+				return listLoadedMsg{err: renderSessionEnded()}
+			}
 			return listLoadedMsg{err: friendlyDecryptError(err).Error()}
 		}
 		raw = plain
@@ -898,7 +901,7 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.mode = listModeAction
 			return v, nil
 		}
-		v.flash = "revoked — reloading list"
+		v.flash = "revoked · synced with team — reloading list"
 		v.mode = listModeList
 		v.err = ""
 		return v, v.load

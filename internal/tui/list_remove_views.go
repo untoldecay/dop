@@ -66,6 +66,9 @@ func (v *integrationListView) load() tea.Msg {
 		if errors.Is(err, vault.ErrNotAttached) {
 			return integListLoadedMsg{err: renderNoVault("integrations")}
 		}
+		if errors.Is(err, vault.ErrSessionEnded) {
+			return integListLoadedMsg{err: renderSessionEnded()}
+		}
 		return integListLoadedMsg{err: err.Error()}
 	}
 	return integListLoadedMsg{items: vlt.Integrations, grants: vlt.Grants}
@@ -127,7 +130,7 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.mode = integModeAction
 			return v, nil
 		}
-		v.flash = "integration removed"
+		v.flash = "integration removed · synced with team"
 		v.mode = integModeList
 		return v, v.load
 	case tea.KeyMsg:
@@ -487,6 +490,9 @@ func (v *integrationRemoveView) load() tea.Msg {
 		if errors.Is(err, vault.ErrNotAttached) {
 			return integListLoadedMsg{err: renderNoVault("integrations")}
 		}
+		if errors.Is(err, vault.ErrSessionEnded) {
+			return integListLoadedMsg{err: renderSessionEnded()}
+		}
 		return integListLoadedMsg{err: err.Error()}
 	}
 	// reuse integListLoadedMsg for the initial load — we only need names.
@@ -528,7 +534,7 @@ func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.step = 1
 			return v, nil
 		}
-		v.flash = "integration removed"
+		v.flash = "integration removed · synced with team"
 		v.done = true
 	case tea.KeyMsg:
 		switch mm.String() {
@@ -694,6 +700,9 @@ func (v *grantListView) load() tea.Msg {
 		if errors.Is(err, vault.ErrNotAttached) {
 			return grantListLoadedMsg{err: renderNoVault("grants")}
 		}
+		if errors.Is(err, vault.ErrSessionEnded) {
+			return grantListLoadedMsg{err: renderSessionEnded()}
+		}
 		return grantListLoadedMsg{err: err.Error()}
 	}
 	return grantListLoadedMsg{items: vlt.Grants}
@@ -749,9 +758,9 @@ func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		if mm.kind == "edit" {
-			v.flash = "grant metadata updated"
+			v.flash = "grant metadata updated · synced with team"
 		} else {
-			v.flash = "grant removed"
+			v.flash = "grant removed · synced with team"
 		}
 		v.mode = grantModeList
 		return v, v.load
@@ -1177,6 +1186,9 @@ func (v *grantRemoveView) load() tea.Msg {
 		if errors.Is(err, vault.ErrNotAttached) {
 			return grantListLoadedMsg{err: renderNoVault("grants")}
 		}
+		if errors.Is(err, vault.ErrSessionEnded) {
+			return grantListLoadedMsg{err: renderSessionEnded()}
+		}
 		return grantListLoadedMsg{err: err.Error()}
 	}
 	return grantListLoadedMsg{items: vlt.Grants}
@@ -1196,7 +1208,7 @@ func (v *grantRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.step = 1
 			return v, nil
 		}
-		v.flash = "grant removed"
+		v.flash = "grant removed · synced with team"
 		v.done = true
 	case tea.KeyMsg:
 		switch mm.String() {
