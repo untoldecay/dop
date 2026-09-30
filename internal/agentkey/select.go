@@ -14,63 +14,90 @@ import (
 )
 
 // Open loads the agent key for lookupID from the best-available
-// backend. Preference order:
-//   1. Keychain (macOS Secure Enclave), if Available()
-//   2. File backend (looks for .key ed25519 then .p256)
-// Returns ErrNotFound if no backend has a key for this lookup.
+// backend. When multiple key types exist for the same lookup (e.g.
+// mid-migration, an ed25519 file lingers alongside a fresh p256), the
+// file backend's default preference is p256 → ed25519. If the caller
+// knows which type it wants, use OpenByType — verifyBinding does that
+// after reading the record's key_type.
 func Open(paths *config.Paths, lookupID string) (Store, error) {
+	return OpenByType(paths, lookupID, "")
+}
+
+// OpenByType loads the agent key for lookupID, preferring the store
+// whose KeyType() matches expectedType. Falls back to any available
+// key if expectedType is empty. Returns ErrNotFound if no backend has
+// a key for this lookup.
+func OpenByType(paths *config.Paths, lookupID, expectedType string) (Store, error) {
 	kc := NewKeychainBackend()
 	if kc.Available() {
 		if s, err := kc.Load(lookupID); err == nil {
-			return s, nil
+			if expectedType == "" || s.KeyType() == expectedType {
+				return s, nil
+			}
+			// SE has a key but not the type we want; check file too.
 		} else if err != ErrNotFound {
-			// Real error from the SE path — fall through to file
-			// backend so a legacy key still works, but keep the
-			// original error for surfacing if the file backend also
-			// misses.
 			if fs, ferr := NewFileBackend(paths.Root).Load(lookupID); ferr == nil {
 				return fs, nil
 			}
 			return nil, err
 		}
 	}
-	return NewFileBackend(paths.Root).Load(lookupID)
-}
-
-// Create generates a new agent key for lookupID. Policy:
-//   - macOS desktop + Available(): SE-backed P-256
-//   - macOS without SE (rare): refuse unless DOP_ALLOW_FILE_KEYS=1
-//   - Linux/CI: file P-256 with DOP_ALLOW_FILE_KEYS=1, else refuse
-//
-// The keyType parameter is a hint; if the target backend can't honor
-// it (e.g. SE only supports p256, file backend refuses p256 without
-// opt-in), the error is surfaced rather than silently swapped.
-func Create(paths *config.Paths, lookupID, keyType string) (Store, error) {
-	if keyType == "" {
-		// Default: prefer P-256 on macOS (SE-backed), keep Ed25519
-		// on non-macOS so existing verifiers keep working. When the
-		// file P-256 backend is opt-in only, this default sidesteps
-		// the "you need DOP_ALLOW_FILE_KEYS to use dop on Linux at
-		// all" trap.
-		if runtime.GOOS == "darwin" {
-			keyType = vault.KeyTypeP256
-		} else {
-			keyType = vault.KeyTypeEd25519
+	// File backend: prefer the exact type when the caller specified one.
+	fb := NewFileBackend(paths.Root)
+	if expectedType != "" {
+		if s, err := fb.LoadByType(lookupID, expectedType); err == nil {
+			return s, nil
+		} else if err != ErrNotFound {
+			return nil, err
 		}
 	}
+	return fb.Load(lookupID)
+}
+
+// Create generates a new agent key for lookupID. Policy is layered:
+//
+//   Explicit keyType passed:
+//     "p256"    → try Keychain first; if unavailable, refuse on macOS
+//                 desktop unless DOP_ALLOW_FILE_KEYS=1 opts in to the
+//                 extractable file backend. Non-macOS uses file backend
+//                 (also gated by DOP_ALLOW_FILE_KEYS=1).
+//     "ed25519" → file backend (legacy). Works on every platform, no
+//                 opt-in required — this is the pre-v1.11 behavior.
+//
+//   No keyType (auto): pick the best available option that works right
+//   now without prompting for opt-in. Preference:
+//     1. Keychain SE P-256 (macOS, when the cgo bridge is live)
+//     2. Ed25519 legacy file (universally works, unchanged v1.10 shape)
+//
+//   Note: the "auto" path deliberately does NOT default to P-256 file
+//   storage — that would silently ship an extractable key with the
+//   same threat profile as v1.10 while claiming a v1.11 label.
+func Create(paths *config.Paths, lookupID, keyType string) (Store, error) {
 	kc := NewKeychainBackend()
-	if kc.Available() && keyType == vault.KeyTypeP256 {
-		return kc.Generate(lookupID, keyType)
+
+	// Auto: SE if available, else legacy ed25519.
+	if keyType == "" {
+		if kc.Available() {
+			return kc.Generate(lookupID, vault.KeyTypeP256)
+		}
+		return NewFileBackend(paths.Root).Generate(lookupID, vault.KeyTypeEd25519)
 	}
-	// Fall-back path — file backend. Refuse macOS desktop file fallback
-	// unless explicitly opted in, so nobody accidentally ships an
-	// extractable key on a machine that has SE available.
-	if runtime.GOOS == "darwin" && keyType == vault.KeyTypeP256 && os.Getenv("DOP_ALLOW_FILE_KEYS") != "1" {
-		return nil, fmt.Errorf(
-			"macOS Secure Enclave is required for P-256 agent keys on this platform.\n" +
-				"  If SE is unavailable (rare) and you understand the risk of extractable keys,\n" +
-				"  set DOP_ALLOW_FILE_KEYS=1 to allow the file backend as a fallback.")
+
+	// Explicit p256: try SE first; if unavailable, gate on opt-in.
+	if keyType == vault.KeyTypeP256 {
+		if kc.Available() {
+			return kc.Generate(lookupID, keyType)
+		}
+		if runtime.GOOS == "darwin" && os.Getenv("DOP_ALLOW_FILE_KEYS") != "1" {
+			return nil, fmt.Errorf(
+				"macOS Secure Enclave is required for P-256 agent keys on this platform.\n" +
+					"  If SE is unavailable and you understand the risk of extractable keys,\n" +
+					"  set DOP_ALLOW_FILE_KEYS=1 to allow the file backend as a fallback.")
+		}
+		return NewFileBackend(paths.Root).Generate(lookupID, keyType)
 	}
+
+	// Explicit ed25519: always the file backend.
 	return NewFileBackend(paths.Root).Generate(lookupID, keyType)
 }
 

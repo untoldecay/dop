@@ -54,6 +54,7 @@ type RecordBinding struct {
 	Kind      string    `json:"kind"`
 	PinExpiry time.Time `json:"pin_expiry,omitempty"`
 	Pubkey    string    `json:"pubkey,omitempty"`
+	KeyType   string    `json:"key_type,omitempty"` // v1.11 — ed25519 (default) or p256
 	ClaimedAt time.Time `json:"claimed_at,omitempty"`
 }
 

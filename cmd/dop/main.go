@@ -53,6 +53,12 @@ usage:
   dop team remove --name W [--force]             remove admin (with rotation checklist)
   dop vault edit                                 open decrypted vault in $EDITOR
 
+  # Agent keys (v1.11)
+  dop agent list                                 show agent-key backend + type for each bearer
+  dop agent info <lookup>                        details for one key
+  dop agent migrate <lookup>                     re-enroll a legacy ed25519 key → SE-backed P-256
+  dop agent sweep                                remove legacy keys past their 12h grace window
+
   # Agent / execution plane
   dop init --cache <url|path>                    clone vault as agent (no admin keys generated)
   dop claim <PIN> [--token-file PATH]            bind this agent to a bearer via PIN (v1.3)
@@ -137,6 +143,11 @@ func main() {
 		os.Exit(runWatch(os.Args[2:]))
 	case "credential-helper":
 		os.Exit(runCredentialHelper(os.Args[2:]))
+	case "agent":
+		// v1.11 — `dop agent <subcommand>` for agent-key operations
+		// (migrate ed25519 → SE P-256, list, doctor). Kept separate
+		// from `dop admin` because these are per-bearer operations.
+		os.Exit(runAgent(os.Args[2:]))
 	case "uninstall":
 		// v1.10.4 — top-level alias for `dop admin reset` so the "wipe
 		// this machine" action is discoverable without knowing about
