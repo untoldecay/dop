@@ -56,7 +56,40 @@ type Store interface {
 	//   "file: /home/ci/.config/dop/…/abc.p256 (p256, explicit opt-in)"
 	// Used by dop doctor and dop admin status.
 	StorageDescription() string
+
+	// SharedSecret runs ECDH between this key and peerPub, returning
+	// the raw shared secret (32 bytes for P-256 — the X-coordinate of
+	// peerPub × thisPriv). Required for the v1.12 admin-to-agent
+	// secure channel: internal/envseal.OpenWithShared consumes the
+	// output. Only meaningful for P-256 keys; ed25519 implementations
+	// return ErrECDHUnsupported.
+	//
+	// peerPub is uncompressed X9.62 P-256 encoding (65 bytes,
+	// 0x04 || X || Y). Any other form is rejected.
+	SharedSecret(peerPub []byte) ([]byte, error)
 }
+
+// LookupMigrator is optionally implemented by Stores that support
+// re-tagging their key to a different lookup id — needed for v1.12
+// transparent bearer rotation, where the new bearer's lookup id
+// differs from the old one but the agent's key material should stay
+// bound to the same pubkey.
+//
+// Implementations:
+//   - File backend: rename the .p256/.key file on disk.
+//   - Keychain (SE) backend: SecItemUpdate on kSecAttrApplicationTag.
+//
+// A Store that doesn't implement this returns "not supported" — the
+// caller then knows to fall back to a full re-claim.
+type LookupMigrator interface {
+	MigrateLookupID(newLookupID string) error
+}
+
+// ErrECDHUnsupported is returned by Store.SharedSecret for keys whose
+// algorithm cannot perform ECDH (e.g. ed25519 without an explicit
+// Ed25519→X25519 conversion, which dop deliberately does not do —
+// legacy bearers stay on the bundle-only path).
+var ErrECDHUnsupported = errors.New("ECDH not supported for this key type (only P-256)")
 
 // ErrNotFound is returned by Backend.Load when no key exists for
 // the given lookup id.
