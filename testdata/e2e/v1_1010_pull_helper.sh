@@ -79,27 +79,41 @@ echo "  B state: ahead=$AHEAD behind=$BEHIND"
 (( AHEAD > 0 && BEHIND > 0 )) || fail "test setup failed to diverge (ahead=$AHEAD behind=$BEHIND)"
 pass "divergence forced (B ahead by $AHEAD, behind by $BEHIND)"
 
-echo "=== [4] dop pull reports diverged + suggests options"
-PULL_OUT=$(HOME="$HOME_B" "$DOP" pull 2>&1 || true)
-echo "$PULL_OUT" | grep -qi "diverged" || { echo "$PULL_OUT"; fail "expected 'diverged' in output"; }
-echo "$PULL_OUT" | grep -q -- "--take-theirs" || { echo "$PULL_OUT"; fail "expected --take-theirs suggestion"; }
-echo "$PULL_OUT" | grep -q -- "--take-ours" || { echo "$PULL_OUT"; fail "expected --take-ours suggestion"; }
-echo "$PULL_OUT" | grep -qi "sops-encrypted" || { echo "$PULL_OUT"; fail "expected sops warning"; }
-pass "diverged pull reports diagnosis + all 3 options"
+echo "=== [4] dop pull --no-merge reports plain-English diagnosis"
+PULL_OUT=$(HOME="$HOME_B" "$DOP" pull --no-merge 2>&1 || true)
+# No git jargon: no "diverged", "branch", "commit ahead/behind", "origin/main".
+if echo "$PULL_OUT" | grep -qwi 'diverged\|origin/main\|ff-only'; then
+    echo "$PULL_OUT"
+    fail "found git jargon in the plain-English output"
+fi
+echo "$PULL_OUT" | grep -qi "team" || { echo "$PULL_OUT"; fail "should mention 'team' explanation"; }
+echo "$PULL_OUT" | grep -q -- "--keep-mine" || { echo "$PULL_OUT"; fail "should offer --keep-mine"; }
+echo "$PULL_OUT" | grep -q -- "--keep-team" || { echo "$PULL_OUT"; fail "should offer --keep-team"; }
+pass "plain-English diagnosis + both escape hatches offered"
 
-echo "=== [5] dop pull --take-theirs resets B to origin"
-HOME="$HOME_B" "$DOP" pull --take-theirs 2>&1 | tail -2
+echo "=== [5] dop pull --keep-team resets B to origin"
+HOME="$HOME_B" "$DOP" pull --keep-team 2>&1 | tail -2
 cd "$B_VAULT"
 B_AHEAD=$(git rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
 B_BEHIND=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
-(( B_AHEAD == 0 && B_BEHIND == 0 )) || fail "after --take-theirs, still diverged (ahead=$B_AHEAD behind=$B_BEHIND)"
-[[ ! -f .local-marker ]] || fail "--take-theirs left the local-only file behind"
-pass "--take-theirs restored B to origin (local commit discarded)"
+(( B_AHEAD == 0 && B_BEHIND == 0 )) || fail "after --keep-team, still off from team (ours=$B_AHEAD behind=$B_BEHIND)"
+[[ ! -f .local-marker ]] || fail "--keep-team left the local-only file behind"
+pass "--keep-team synced B to the team"
 
-echo "=== [6] mutually exclusive flags"
-BOTH_OUT=$(HOME="$HOME_B" "$DOP" pull --take-theirs --take-ours 2>&1 || true)
-echo "$BOTH_OUT" | grep -qi "mutually exclusive" || { echo "$BOTH_OUT"; fail "should refuse both flags"; }
-pass "--take-theirs + --take-ours refused together"
+echo "=== [6] mutually exclusive flags rejected"
+BOTH_OUT=$(HOME="$HOME_B" "$DOP" pull --keep-team --keep-mine 2>&1 || true)
+echo "$BOTH_OUT" | grep -qi "pick one" || { echo "$BOTH_OUT"; fail "should refuse both flags"; }
+pass "--keep-mine + --keep-team refused together"
+
+echo "=== [7] back-compat aliases (--take-theirs / --take-ours) still work"
+# Re-diverge with a fresh local commit.
+echo "another-local" > .local-marker2
+git add .local-marker2 && git commit -m "B: another marker" >/dev/null
+HOME="$HOME_A" "$DOP" token issue --no-bind --grants notion.read --name third >/dev/null 2>&1
+cd "$B_VAULT"
+git fetch origin 2>&1 | tail -1
+HOME="$HOME_B" "$DOP" pull --take-theirs 2>&1 | tail -1 | grep -q "team" || fail "--take-theirs alias should still work"
+pass "--take-theirs still accepted as alias for --keep-team"
 
 pkill -9 -f "dop admin __session-daemon" 2>/dev/null || true
 echo "V1.10.1 pull helper e2e: PASS"
