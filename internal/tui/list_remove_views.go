@@ -4,6 +4,7 @@ package tui
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -62,6 +63,9 @@ type integActionMsg struct{ err string }
 func (v *integrationListView) load() tea.Msg {
 	vlt, _, err := loadVaultForListing(v.client, v.paths)
 	if err != nil {
+		if errors.Is(err, vault.ErrNotAttached) {
+			return integListLoadedMsg{err: renderNoVault("integrations")}
+		}
 		return integListLoadedMsg{err: err.Error()}
 	}
 	return integListLoadedMsg{items: vlt.Integrations, grants: vlt.Grants}
@@ -480,6 +484,9 @@ type integrationRemoveResultMsg struct{ err string }
 func (v *integrationRemoveView) load() tea.Msg {
 	vlt, _, err := loadVaultForListing(v.client, v.paths)
 	if err != nil {
+		if errors.Is(err, vault.ErrNotAttached) {
+			return integListLoadedMsg{err: renderNoVault("integrations")}
+		}
 		return integListLoadedMsg{err: err.Error()}
 	}
 	// reuse integListLoadedMsg for the initial load — we only need names.
@@ -684,6 +691,9 @@ type grantActionMsg struct {
 func (v *grantListView) load() tea.Msg {
 	vlt, _, err := loadVaultForListing(v.client, v.paths)
 	if err != nil {
+		if errors.Is(err, vault.ErrNotAttached) {
+			return grantListLoadedMsg{err: renderNoVault("grants")}
+		}
 		return grantListLoadedMsg{err: err.Error()}
 	}
 	return grantListLoadedMsg{items: vlt.Grants}
@@ -1164,6 +1174,9 @@ type grantRemoveResultMsg struct{ err string }
 func (v *grantRemoveView) load() tea.Msg {
 	vlt, _, err := loadVaultForListing(v.client, v.paths)
 	if err != nil {
+		if errors.Is(err, vault.ErrNotAttached) {
+			return grantListLoadedMsg{err: renderNoVault("grants")}
+		}
 		return grantListLoadedMsg{err: err.Error()}
 	}
 	return grantListLoadedMsg{items: vlt.Grants}

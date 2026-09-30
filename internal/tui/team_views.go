@@ -4,6 +4,7 @@ package tui
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -56,6 +57,9 @@ type revokeResultMsg struct{ err string }
 func (v *revokeView) load() tea.Msg {
 	vlt, _, err := loadVaultForListing(v.client, v.paths)
 	if err != nil {
+		if errors.Is(err, vault.ErrNotAttached) {
+			return revokeLoadedMsg{err: renderNoVault("tokens")}
+		}
 		return revokeLoadedMsg{err: err.Error()}
 	}
 	items := []revokeItem{}
@@ -352,6 +356,9 @@ type teamListLoadedMsg struct {
 func (v *teamListView) load() tea.Msg {
 	vlt, _, err := loadVaultForListing(v.client, v.paths)
 	if err != nil {
+		if errors.Is(err, vault.ErrNotAttached) {
+			return teamListLoadedMsg{err: renderNoVault("team members")}
+		}
 		return teamListLoadedMsg{err: err.Error()}
 	}
 	return teamListLoadedMsg{admins: vlt.Admins}
@@ -443,6 +450,9 @@ type teamRemoveResultMsg struct{ err string }
 func (v *teamRemoveView) load() tea.Msg {
 	vlt, _, err := loadVaultForListing(v.client, v.paths)
 	if err != nil {
+		if errors.Is(err, vault.ErrNotAttached) {
+			return teamRemoveLoadedMsg{err: renderNoVault("team members")}
+		}
 		return teamRemoveLoadedMsg{err: err.Error()}
 	}
 	names := make([]string, 0, len(vlt.Admins))

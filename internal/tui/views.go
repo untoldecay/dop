@@ -808,12 +808,15 @@ func (v *listView) load() tea.Msg {
 	vp := v.paths.Vault + "/vault.yaml"
 	raw, err := os.ReadFile(vp)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return listLoadedMsg{err: renderNoVault("tokens")}
+		}
 		return listLoadedMsg{err: err.Error()}
 	}
 	if bytes.Contains(raw, []byte("\nsops:")) || bytes.HasPrefix(raw, []byte("sops:")) {
 		plain, err := v.client.DecryptVault(vp)
 		if err != nil {
-			return listLoadedMsg{err: err.Error()}
+			return listLoadedMsg{err: friendlyDecryptError(err).Error()}
 		}
 		raw = plain
 	}

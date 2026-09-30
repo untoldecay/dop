@@ -138,7 +138,9 @@ func runClaim(args []string) int {
 	oldBundleBytes, err := os.ReadFile(bundlePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Fprintln(os.Stderr, "dop claim: unknown bearer (bundle not found)")
+			fmt.Fprintln(os.Stderr, "dop claim: this token isn't recognized by this machine's vault yet.")
+			fmt.Fprintln(os.Stderr, "  Common cause: the token was issued on another machine and hasn't been pulled here.")
+			fmt.Fprintln(os.Stderr, "  Try: dop pull, then re-run this claim.")
 			return 1
 		}
 		fmt.Fprintf(os.Stderr, "dop claim: %v\n", err)
