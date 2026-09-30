@@ -15,17 +15,37 @@ import (
 
 // ---------- Setup admin (first-run admin init) ----------
 
-// setupAdminView prompts for a passphrase (twice), then shells to
-// `dop admin init --passphrase-stdin`. On success it auto-triggers a
-// login so the user lands in the unlocked menu.
+// setupAdminView is the first-run TUI. It collects BOTH passphrases
+// DOP requires — admin (wraps the key, typed on every `dop admin login`)
+// AND approval (typed on the phone to approve agent claims) — before
+// shelling out to `dop admin init --passphrase-stdin`, which reads them
+// in the same order.
+//
+// v1.10.5 — previous version only asked for the admin passphrase and
+// fed one line to the CLI. The CLI then failed with "approval passphrase
+// must be at least 10 characters" after having already written the
+// admin key to disk. Users were left in a half-installed state with a
+// confusing error. Now every field is on-screen with hints explaining
+// what each passphrase is for.
+const (
+	setupStepAdminPass    = 0
+	setupStepAdminConfirm = 1
+	setupStepApprovalPass = 2
+	setupStepApprovalConf = 3
+	setupStepRunning      = 4
+	setupStepLoggingIn    = 5
+)
+
 type setupAdminView struct {
-	paths   *config.Paths
-	step    int    // 0 = passphrase, 1 = confirm, 2 = running, 3 = login
-	pass1   strings.Builder
-	pass2   strings.Builder
-	err     string
-	done    bool
-	flash   string
+	paths       *config.Paths
+	step        int
+	adminPass1  strings.Builder
+	adminPass2  strings.Builder
+	approvPass1 strings.Builder
+	approvPass2 strings.Builder
+	err         string
+	done        bool
+	flash       string
 }
 
 func newSetupAdminView(paths *config.Paths) *setupAdminView {
@@ -35,7 +55,10 @@ func (v *setupAdminView) Init() tea.Cmd { return nil }
 func (v *setupAdminView) Done() bool    { return v.done }
 func (v *setupAdminView) Flash() string { return v.flash }
 
-type setupInitDone struct{ err string; pass string }
+type setupInitDone struct {
+	err  string
+	pass string
+}
 type setupLoginDone struct{ err string }
 
 func (v *setupAdminView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -43,12 +66,16 @@ func (v *setupAdminView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case setupInitDone:
 		if mm.err != "" {
 			v.err = mm.err
-			v.step = 0
-			v.pass1.Reset()
-			v.pass2.Reset()
+			// Restart from the first passphrase — buffers cleared so the
+			// user can't accidentally re-submit a bad one.
+			v.step = setupStepAdminPass
+			v.adminPass1.Reset()
+			v.adminPass2.Reset()
+			v.approvPass1.Reset()
+			v.approvPass2.Reset()
 			return v, nil
 		}
-		v.step = 3
+		v.step = setupStepLoggingIn
 		return v, v.login(mm.pass)
 	case setupLoginDone:
 		if mm.err != "" {
@@ -61,29 +88,21 @@ func (v *setupAdminView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.done = true
 		return v, nil
 	case tea.KeyMsg:
-		if v.step == 2 || v.step == 3 {
-			return v, nil // running
+		if v.step >= setupStepRunning {
+			return v, nil // running / logging in — ignore keys
 		}
 		switch mm.String() {
 		case "esc", "ctrl+c":
 			v.done = true
 		case "enter":
-			switch v.step {
-			case 0:
-				if v.pass1.Len() < 8 {
-					v.err = "passphrase must be at least 8 characters"
-					return v, nil
-				}
-				v.err = ""
-				v.step = 1
-			case 1:
-				if v.pass1.String() != v.pass2.String() {
-					v.err = "passphrases don't match"
-					v.pass2.Reset()
-					return v, nil
-				}
-				v.step = 2
-				return v, v.doInit()
+			return v.advance()
+		case "tab", "down":
+			if v.step < setupStepApprovalConf {
+				v.step++
+			}
+		case "shift+tab", "up":
+			if v.step > setupStepAdminPass {
+				v.step--
 			}
 		case "backspace":
 			buf := v.currentBuf()
@@ -101,26 +120,79 @@ func (v *setupAdminView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return v, nil
 }
 
-func (v *setupAdminView) currentBuf() *strings.Builder {
-	if v.step == 0 {
-		return &v.pass1
+func (v *setupAdminView) advance() (tea.Model, tea.Cmd) {
+	switch v.step {
+	case setupStepAdminPass:
+		if v.adminPass1.Len() < 8 {
+			v.err = "admin passphrase must be at least 8 characters"
+			return v, nil
+		}
+		v.err = ""
+		v.step = setupStepAdminConfirm
+	case setupStepAdminConfirm:
+		if v.adminPass1.String() != v.adminPass2.String() {
+			v.err = "admin passphrases don't match"
+			v.adminPass2.Reset()
+			return v, nil
+		}
+		v.err = ""
+		v.step = setupStepApprovalPass
+	case setupStepApprovalPass:
+		if v.approvPass1.Len() < 10 {
+			v.err = "approval passphrase must be at least 10 characters"
+			return v, nil
+		}
+		if v.approvPass1.String() == v.adminPass1.String() {
+			v.err = "the approval passphrase must be different from the admin passphrase"
+			return v, nil
+		}
+		v.err = ""
+		v.step = setupStepApprovalConf
+	case setupStepApprovalConf:
+		if v.approvPass1.String() != v.approvPass2.String() {
+			v.err = "approval passphrases don't match"
+			v.approvPass2.Reset()
+			return v, nil
+		}
+		v.err = ""
+		v.step = setupStepRunning
+		return v, v.doInit()
 	}
-	return &v.pass2
+	return v, nil
+}
+
+func (v *setupAdminView) currentBuf() *strings.Builder {
+	switch v.step {
+	case setupStepAdminPass:
+		return &v.adminPass1
+	case setupStepAdminConfirm:
+		return &v.adminPass2
+	case setupStepApprovalPass:
+		return &v.approvPass1
+	case setupStepApprovalConf:
+		return &v.approvPass2
+	}
+	var scratch strings.Builder
+	return &scratch
 }
 
 func (v *setupAdminView) doInit() tea.Cmd {
-	pass := v.pass1.String()
+	adminPass := v.adminPass1.String()
+	approvPass := v.approvPass1.String()
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "admin", "init", "--passphrase-stdin")
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
-		cmd.Stdin = strings.NewReader(pass)
+		// CLI reads two lines when --passphrase-stdin is set:
+		//   line 1 → admin passphrase
+		//   line 2 → approval passphrase
+		cmd.Stdin = strings.NewReader(adminPass + "\n" + approvPass + "\n")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
 			return setupInitDone{err: strings.TrimSpace(stderr.String())}
 		}
-		return setupInitDone{pass: pass}
+		return setupInitDone{pass: adminPass}
 	}
 }
 
@@ -141,31 +213,49 @@ func (v *setupAdminView) login(pass string) tea.Cmd {
 
 func (v *setupAdminView) View() string {
 	var b strings.Builder
-	b.WriteString(titleSt.Render("Setup admin") + "\n\n")
-	if v.step == 2 || v.step == 3 {
-		if v.step == 2 {
-			b.WriteString("Generating admin keys…\n")
-		} else {
-			b.WriteString("Signing in…\n")
-		}
+	b.WriteString(titleSt.Render("Setup admin") + "\n")
+	b.WriteString(mutedSt.Render("First-run: choose TWO passphrases — they do different jobs.") + "\n\n")
+
+	if v.step == setupStepRunning {
+		b.WriteString("Generating admin keys…\n")
 		return b.String()
 	}
-	b.WriteString("This generates a passphrase-wrapped admin key on this machine.\n")
-	b.WriteString(mutedSt.Render("The passphrase is never stored — you'll type it at each `dop admin login`.") + "\n\n")
+	if v.step == setupStepLoggingIn {
+		b.WriteString("Signing in…\n")
+		return b.String()
+	}
 
-	if v.step == 0 {
-		b.WriteString(cursorSt.Render("Passphrase") + ": ")
-		b.WriteString(strings.Repeat("•", v.pass1.Len()) + cursorSt.Render("▎") + "\n")
-		b.WriteString(mutedSt.Render("Confirm") + ": " + mutedSt.Render("(next)") + "\n")
-	} else {
-		b.WriteString(mutedSt.Render("Passphrase") + ": " + strings.Repeat("•", v.pass1.Len()) + "\n")
-		b.WriteString(cursorSt.Render("Confirm") + ": ")
-		b.WriteString(strings.Repeat("•", v.pass2.Len()) + cursorSt.Render("▎") + "\n")
+	// Explanations, always visible.
+	b.WriteString(mutedSt.Render("• admin passphrase (≥ 8 chars) — wraps your admin private key.") + "\n")
+	b.WriteString(mutedSt.Render("  You'll type this at every `dop admin login`.") + "\n")
+	b.WriteString(mutedSt.Render("• approval passphrase (≥ 10 chars, DIFFERENT) — separate secret.") + "\n")
+	b.WriteString(mutedSt.Render("  You'll type this on your phone to approve agent claims.") + "\n\n")
+
+	rows := []struct {
+		label string
+		val   string
+	}{
+		{"Admin passphrase", v.adminPass1.String()},
+		{"Confirm admin passphrase", v.adminPass2.String()},
+		{"Approval passphrase", v.approvPass1.String()},
+		{"Confirm approval passphrase", v.approvPass2.String()},
+	}
+	for i, r := range rows {
+		style := mutedSt
+		if i == v.step {
+			style = cursorSt
+		}
+		b.WriteString(style.Render(r.label) + ": ")
+		b.WriteString(strings.Repeat("•", len(r.val)))
+		if i == v.step {
+			b.WriteString(cursorSt.Render("▎"))
+		}
+		b.WriteString("\n")
 	}
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("enter next · esc cancel"))
+	b.WriteString("\n" + helpSt.Render("enter next · tab/↑↓ jump between fields · esc cancel"))
 	return b.String()
 }
 
