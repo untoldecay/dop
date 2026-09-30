@@ -53,6 +53,44 @@ type Tunnel struct {
 	stopped bool
 }
 
+// KillStrays finds and terminates any lingering `cloudflared tunnel
+// --url http://localhost:...` processes from prior sessions (e.g.
+// SIGKILL'd parent, force-quit terminal, crash). Returns the number
+// killed. Non-fatal: any error is swallowed since this is best-effort
+// cleanup at the start of a new claim.
+//
+// v1.11.1 — Fizz reported "tunnel returns 530" after a prior claim
+// died hard, leaving cloudflared orphaned but still holding the
+// ephemeral URL registration on Cloudflare's edge. The new claim's
+// own tunnel would compete with the dead one. Silent auto-cleanup
+// prevents this without a user-visible step.
+func KillStrays() int {
+	// Only match cloudflared quick tunnels dop would have started —
+	// don't touch named tunnels, other users' cloudflared, etc.
+	out, err := exec.Command("pgrep", "-f", "cloudflared tunnel --url http://localhost:").Output()
+	if err != nil {
+		return 0
+	}
+	killed := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		pid := strings.TrimSpace(line)
+		if pid == "" {
+			continue
+		}
+		// SIGTERM first, then SIGKILL after a brief wait.
+		p, err := exec.Command("kill", "-TERM", pid).Output()
+		_ = p
+		if err == nil {
+			killed++
+		}
+	}
+	if killed > 0 {
+		time.Sleep(100 * time.Millisecond)
+		_, _ = exec.Command("pkill", "-KILL", "-f", "cloudflared tunnel --url http://localhost:").Output()
+	}
+	return killed
+}
+
 // Available reports whether the cloudflared binary is on $PATH.
 func Available() bool {
 	_, err := exec.LookPath("cloudflared")

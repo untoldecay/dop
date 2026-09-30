@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/vault"
 )
@@ -264,12 +265,108 @@ func runGrant(args []string) int {
 		return runGrantAdd(args[1:])
 	case "list":
 		return runGrantList(args[1:])
+	case "show":
+		return runGrantShow(args[1:])
 	case "remove":
 		return runGrantRemove(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop grant: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+// runGrantShow prints a single grant's details + every active token
+// that references it. Read-only; add/remove token from this view is
+// deferred to v1.12 (requires transparent bearer rotation).
+func runGrantShow(args []string) int {
+	fs := flag.NewFlagSet("grant show", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "emit JSON instead of human-readable")
+	includeRevoked := fs.Bool("all", false, "also list revoked tokens (default: active only)")
+	// Allow flag-after-positional (Go's stdlib parser doesn't by default).
+	flagArgs, posArgs := splitFlagsAndPositionals(args)
+	_ = fs.Parse(flagArgs)
+	if len(posArgs) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: dop grant show <grant-id> [--all] [--json]")
+		return 2
+	}
+	gid := posArgs[0]
+
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop grant show: %v\n", err)
+		return 1
+	}
+	v, _, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop grant show: %v\n", err)
+		return 1
+	}
+	g, ok := v.Grants[gid]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "dop grant show: no grant named %q\n", gid)
+		return 1
+	}
+	type tokView struct {
+		CapID   string `json:"cap_id"`
+		Subject string `json:"subject"`
+		Status  string `json:"status"`
+		Expires string `json:"expires"`
+		Gen     uint64 `json:"generation"`
+	}
+	var toks []tokView
+	for id, c := range v.Capabilities {
+		found := false
+		for _, cgid := range c.Grants {
+			if cgid == gid {
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		if !*includeRevoked && c.Status != capability.RecordStatusActive {
+			continue
+		}
+		toks = append(toks, tokView{
+			CapID: id[:12], Subject: c.Subject, Status: c.Status,
+			Expires: tokenExpiryDisplay(c.ExpiresAt), Gen: c.Generation,
+		})
+	}
+
+	if *asJSON {
+		emitJSON(map[string]any{
+			"id":          gid,
+			"integration": g.Integration,
+			"token":       g.Token,
+			"env_var":     g.EffectivePrefix() + "_TOKEN",
+			"projects":    g.Projects,
+			"tags":        g.Tags,
+			"tokens":      toks,
+		})
+		return 0
+	}
+	fmt.Printf("grant:       %s\n", gid)
+	fmt.Printf("integration: %s\n", g.Integration)
+	fmt.Printf("token:       %s\n", g.Token)
+	fmt.Printf("env_var:     %s_TOKEN\n", g.EffectivePrefix())
+	if len(g.Projects) > 0 {
+		fmt.Printf("projects:    %v\n", g.Projects)
+	}
+	if len(g.Tags) > 0 {
+		fmt.Printf("tags:        %v\n", g.Tags)
+	}
+	fmt.Printf("tokens (%d)", len(toks))
+	if !*includeRevoked {
+		fmt.Print("  (active only — use --all to include revoked)")
+	}
+	fmt.Println(":")
+	for _, t := range toks {
+		fmt.Printf("  - %s  subject=%s  status=%s  gen=%d  expires=%s\n",
+			t.CapID, t.Subject, t.Status, t.Gen, t.Expires)
+	}
+	return 0
 }
 
 func runGrantList(args []string) int {
