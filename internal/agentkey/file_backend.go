@@ -15,6 +15,7 @@
 package agentkey
 
 import (
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -227,6 +228,9 @@ func (s *fileEd25519Store) Extractable() bool { return true }
 func (s *fileEd25519Store) StorageDescription() string {
 	return fmt.Sprintf("file: %s (ed25519, LEGACY — extractable to any process on this uid)", s.path)
 }
+func (s *fileEd25519Store) SharedSecret(peerPub []byte) ([]byte, error) {
+	return nil, ErrECDHUnsupported
+}
 
 // --- P-256 file store ---
 
@@ -252,6 +256,51 @@ func (s *fileP256Store) Sign(challenge []byte) ([]byte, error) {
 func (s *fileP256Store) Extractable() bool { return true }
 func (s *fileP256Store) StorageDescription() string {
 	return fmt.Sprintf("file: %s (p256, EXPLICIT OPT-IN — extractable)", s.path)
+}
+// MigrateLookupID renames the underlying .p256 file to the new
+// lookup id. Used by v1.12 bearer rotation: same physical key,
+// re-tagged to bind to the new bearer's lookup id.
+func (s *fileP256Store) MigrateLookupID(newLookupID string) error {
+	dir := filepath.Dir(s.path)
+	newPath := filepath.Join(dir, newLookupID+".p256")
+	if err := os.Rename(s.path, newPath); err != nil {
+		return fmt.Errorf("agentkey/file p256: rename to %s: %w", newLookupID, err)
+	}
+	s.path = newPath
+	s.lookupID = newLookupID
+	return nil
+}
+
+// MigrateLookupID for ed25519 file keys (same file-rename semantics).
+// Bearer rotation for ed25519 bearers doesn't work end-to-end anyway
+// (no ECDH → can't unwrap BearerWrapped), but keeping the method for
+// interface symmetry.
+func (s *fileEd25519Store) MigrateLookupID(newLookupID string) error {
+	dir := filepath.Dir(s.path)
+	newPath := filepath.Join(dir, newLookupID+".key")
+	if err := os.Rename(s.path, newPath); err != nil {
+		return fmt.Errorf("agentkey/file ed25519: rename to %s: %w", newLookupID, err)
+	}
+	s.path = newPath
+	s.lookupID = newLookupID
+	return nil
+}
+
+func (s *fileP256Store) SharedSecret(peerPub []byte) ([]byte, error) {
+	// Move the ecdsa.PrivateKey into an ecdh.PrivateKey and let
+	// crypto/ecdh do the curve arithmetic + point-on-curve checks.
+	// crypto/ecdh's P256().NewPrivateKey takes the scalar as
+	// big-endian 32B; ecdsa.PrivateKey.D is a *big.Int we can format.
+	scalar := s.priv.D.FillBytes(make([]byte, 32))
+	ecdhPriv, err := ecdh.P256().NewPrivateKey(scalar)
+	if err != nil {
+		return nil, fmt.Errorf("agentkey/file: ecdh priv from ecdsa: %w", err)
+	}
+	ecdhPub, err := ecdh.P256().NewPublicKey(peerPub)
+	if err != nil {
+		return nil, fmt.Errorf("agentkey/file: peer pubkey: %w", err)
+	}
+	return ecdhPriv.ECDH(ecdhPub)
 }
 
 // sha256sum returns the SHA-256 digest of b. Kept unexported so the

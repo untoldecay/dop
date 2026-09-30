@@ -245,6 +245,134 @@ OSStatus dop_se_sign(
     return errSecSuccess;
 }
 
+// dop_se_ecdh computes ECDH between the SE-stored private key
+// identified by tag and the peer public key (uncompressed X9.62
+// P-256, 65 bytes starting with 0x04). Returns the raw shared X
+// coordinate (32 bytes) via *out_secret / *out_secret_len — caller
+// must free with free(). Returns 0 on success, non-zero OSStatus on
+// failure.
+//
+// Algorithm used: kSecKeyAlgorithmECDHKeyExchangeStandard — gives us
+// the raw shared secret without any KDF applied. We run HKDF over it
+// on the Go side (envseal.OpenWithShared) so both sides use the same
+// key derivation regardless of whether the shared secret came from
+// SE or from crypto/ecdh.
+OSStatus dop_se_ecdh(
+    const char *tag_utf8, size_t tag_len,
+    const unsigned char *peer_pub, size_t peer_pub_len,
+    unsigned char **out_secret, size_t *out_secret_len
+) {
+    CFDataRef tagData = CFDataCreate(NULL, (const UInt8 *)tag_utf8, (CFIndex)tag_len);
+    if (!tagData) return errSecAllocate;
+
+    CFMutableDictionaryRef query = CFDictionaryCreateMutable(
+        NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks
+    );
+    CFDictionarySetValue(query, kSecClass, kSecClassKey);
+    CFDictionarySetValue(query, kSecAttrApplicationTag, tagData);
+    CFDictionarySetValue(query, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom);
+    CFDictionarySetValue(query, kSecReturnRef, kCFBooleanTrue);
+
+    SecKeyRef privKey = NULL;
+    OSStatus status = SecItemCopyMatching(query, (CFTypeRef *)&privKey);
+    CFRelease(query);
+    CFRelease(tagData);
+    if (status != errSecSuccess || !privKey) return status;
+
+    // Rebuild the peer public key from raw X9.62 bytes.
+    CFDataRef peerPubData = CFDataCreate(NULL, (const UInt8 *)peer_pub, (CFIndex)peer_pub_len);
+    if (!peerPubData) { CFRelease(privKey); return errSecAllocate; }
+
+    CFMutableDictionaryRef pubAttrs = CFDictionaryCreateMutable(
+        NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks
+    );
+    CFDictionarySetValue(pubAttrs, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom);
+    CFDictionarySetValue(pubAttrs, kSecAttrKeyClass, kSecAttrKeyClassPublic);
+    int keySize = 256;
+    CFNumberRef bits = CFNumberCreate(NULL, kCFNumberIntType, &keySize);
+    CFDictionarySetValue(pubAttrs, kSecAttrKeySizeInBits, bits);
+    CFRelease(bits);
+
+    CFErrorRef pubErr = NULL;
+    SecKeyRef peerPubKey = SecKeyCreateWithData(peerPubData, pubAttrs, &pubErr);
+    CFRelease(pubAttrs);
+    CFRelease(peerPubData);
+    if (!peerPubKey) {
+        status = pubErr ? (OSStatus)CFErrorGetCode(pubErr) : errSecParam;
+        if (pubErr) CFRelease(pubErr);
+        CFRelease(privKey);
+        return status;
+    }
+
+    // The ECDH exchange itself. Empty params dict — we want the raw
+    // shared X coordinate, no wrap around anything.
+    CFDictionaryRef params = CFDictionaryCreate(
+        NULL, NULL, NULL, 0,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks
+    );
+    CFErrorRef ecdhErr = NULL;
+    CFDataRef sharedData = SecKeyCopyKeyExchangeResult(
+        privKey,
+        kSecKeyAlgorithmECDHKeyExchangeStandard,
+        peerPubKey,
+        params,
+        &ecdhErr
+    );
+    CFRelease(params);
+    CFRelease(peerPubKey);
+    CFRelease(privKey);
+    if (!sharedData) {
+        status = ecdhErr ? (OSStatus)CFErrorGetCode(ecdhErr) : errSecParam;
+        if (ecdhErr) CFRelease(ecdhErr);
+        return status;
+    }
+
+    CFIndex slen = CFDataGetLength(sharedData);
+    unsigned char *buf = (unsigned char *)malloc((size_t)slen);
+    if (!buf) { CFRelease(sharedData); return errSecAllocate; }
+    memcpy(buf, CFDataGetBytePtr(sharedData), (size_t)slen);
+    CFRelease(sharedData);
+    *out_secret = buf;
+    *out_secret_len = (size_t)slen;
+    return errSecSuccess;
+}
+
+// dop_se_rename_tag changes the kSecAttrApplicationTag of an existing
+// SE-backed key. Used by v1.12 bearer rotation to re-tag the agent's
+// SE key from the old bearer's lookup id to the new bearer's lookup
+// id without regenerating the underlying hardware key.
+//
+// Returns errSecItemNotFound if there's no key at old_tag, or a
+// non-zero OSStatus on any other Security.framework failure.
+OSStatus dop_se_rename_tag(
+    const char *old_tag_utf8, size_t old_tag_len,
+    const char *new_tag_utf8, size_t new_tag_len
+) {
+    CFDataRef oldTag = CFDataCreate(NULL, (const UInt8 *)old_tag_utf8, (CFIndex)old_tag_len);
+    if (!oldTag) return errSecAllocate;
+    CFDataRef newTag = CFDataCreate(NULL, (const UInt8 *)new_tag_utf8, (CFIndex)new_tag_len);
+    if (!newTag) { CFRelease(oldTag); return errSecAllocate; }
+
+    CFMutableDictionaryRef query = CFDictionaryCreateMutable(
+        NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks
+    );
+    CFDictionarySetValue(query, kSecClass, kSecClassKey);
+    CFDictionarySetValue(query, kSecAttrApplicationTag, oldTag);
+    CFDictionarySetValue(query, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom);
+
+    CFMutableDictionaryRef changes = CFDictionaryCreateMutable(
+        NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks
+    );
+    CFDictionarySetValue(changes, kSecAttrApplicationTag, newTag);
+
+    OSStatus status = SecItemUpdate(query, changes);
+    CFRelease(query);
+    CFRelease(changes);
+    CFRelease(oldTag);
+    CFRelease(newTag);
+    return status;
+}
+
 // dop_se_delete removes the SE key with the given tag. Returns 0 on
 // success or if the key was already absent.
 OSStatus dop_se_delete(const char *tag_utf8, size_t tag_len) {
@@ -289,6 +417,53 @@ func (s *seStore) PublicKey() []byte    { return append([]byte(nil), s.pubkey...
 func (s *seStore) Extractable() bool    { return false }
 func (s *seStore) StorageDescription() string {
 	return "macOS Secure Enclave (p256, tag=" + s.tag + ", non-extractable)"
+}
+
+// MigrateLookupID re-tags the SE key from the old lookup id to
+// newLookupID via SecItemUpdate. The underlying hardware key is
+// untouched — same private material, new applicationTag. Used by
+// v1.12 bearer rotation.
+func (s *seStore) MigrateLookupID(newLookupID string) error {
+	oldTag := s.tag
+	newTag := "dop.agent." + newLookupID
+	oldC := C.CString(oldTag)
+	defer C.free(unsafe.Pointer(oldC))
+	newC := C.CString(newTag)
+	defer C.free(unsafe.Pointer(newC))
+	status := C.dop_se_rename_tag(
+		oldC, C.size_t(len(oldTag)),
+		newC, C.size_t(len(newTag)),
+	)
+	if status != 0 {
+		return fmt.Errorf("SE tag rename %s→%s failed: OSStatus %d", oldTag, newTag, int(status))
+	}
+	s.tag = newTag
+	s.lookupID = newLookupID
+	return nil
+}
+
+// SharedSecret runs ECDH between the SE-backed key and peerPub via
+// SecKeyCopyKeyExchangeResult (v1.12). Returns the raw 32-byte X
+// coordinate; caller (envseal) applies HKDF to derive the AEAD key.
+func (s *seStore) SharedSecret(peerPub []byte) ([]byte, error) {
+	if len(peerPub) != 65 || peerPub[0] != 0x04 {
+		return nil, fmt.Errorf("SE ecdh: peer pubkey must be uncompressed X9.62 (65B starting with 0x04), got %dB", len(peerPub))
+	}
+	var outBuf *C.uchar
+	var outLen C.size_t
+	tagC := C.CString(s.tag)
+	defer C.free(unsafe.Pointer(tagC))
+	pubPtr := (*C.uchar)(unsafe.Pointer(&peerPub[0]))
+	status := C.dop_se_ecdh(
+		tagC, C.size_t(len(s.tag)),
+		pubPtr, C.size_t(len(peerPub)),
+		&outBuf, &outLen,
+	)
+	if status != 0 {
+		return nil, fmt.Errorf("SE ecdh failed: OSStatus %d", int(status))
+	}
+	defer C.free(unsafe.Pointer(outBuf))
+	return C.GoBytes(unsafe.Pointer(outBuf), C.int(outLen)), nil
 }
 
 func (s *seStore) Sign(challenge []byte) ([]byte, error) {
