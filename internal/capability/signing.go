@@ -79,14 +79,22 @@ type WrappedEnv struct {
 	Generation    uint64    `json:"generation"`
 }
 
-// WrappedBearer wraps a bearer string sealed to the agent's P-256
-// pubkey. NewGeneration is the generation that will apply once the
-// agent picks up this bearer.
+// WrappedBearer wraps a rotation payload sealed to the agent's
+// P-256 pubkey. The AEAD-encrypted ciphertext holds JSON of the
+// form:
+//
+//	{"bearer": "tok_1...", "lookup_id": "<hex>"}
+//
+// so the agent, after opening, has everything it needs to switch:
+// the new bearer to auth with, and the new lookup id to find the
+// fresh record + bundle. NewGeneration is the record.Generation
+// bumped at rotation time — used in AAD to prevent envelope
+// splicing across generations.
 type WrappedBearer struct {
 	AdminEphemPub string    `json:"admin_ephem_pub"`
 	Salt          string    `json:"salt"`
 	Nonce         string    `json:"nonce"`
-	Ciphertext    string    `json:"ciphertext"` // encrypts UTF-8 bearer string
+	Ciphertext    string    `json:"ciphertext"`
 	SealedAt      time.Time `json:"sealed_at"`
 	NewGeneration uint64    `json:"new_generation"`
 }
@@ -103,6 +111,14 @@ type RecordBinding struct {
 
 const RecordStatusActive = "active"
 const RecordStatusRevoked = "revoked"
+
+// RecordStatusRotated marks a record whose bearer has been rotated
+// via `dop token rotate`. Its BearerWrapped field carries the new
+// bearer (sealed to the agent's P-256 pubkey) plus the new lookup
+// id where the fresh record lives. An agent exec against a
+// rotated bearer decrypts BearerWrapped, migrates its SE tag, and
+// switches to the new bearer.
+const RecordStatusRotated = "rotated"
 
 // SigningPayload returns the deterministic byte sequence that a signer
 // signs and a verifier verifies. It's a JSON serialization of the record

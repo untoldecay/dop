@@ -337,6 +337,42 @@ OSStatus dop_se_ecdh(
     return errSecSuccess;
 }
 
+// dop_se_rename_tag changes the kSecAttrApplicationTag of an existing
+// SE-backed key. Used by v1.12 bearer rotation to re-tag the agent's
+// SE key from the old bearer's lookup id to the new bearer's lookup
+// id without regenerating the underlying hardware key.
+//
+// Returns errSecItemNotFound if there's no key at old_tag, or a
+// non-zero OSStatus on any other Security.framework failure.
+OSStatus dop_se_rename_tag(
+    const char *old_tag_utf8, size_t old_tag_len,
+    const char *new_tag_utf8, size_t new_tag_len
+) {
+    CFDataRef oldTag = CFDataCreate(NULL, (const UInt8 *)old_tag_utf8, (CFIndex)old_tag_len);
+    if (!oldTag) return errSecAllocate;
+    CFDataRef newTag = CFDataCreate(NULL, (const UInt8 *)new_tag_utf8, (CFIndex)new_tag_len);
+    if (!newTag) { CFRelease(oldTag); return errSecAllocate; }
+
+    CFMutableDictionaryRef query = CFDictionaryCreateMutable(
+        NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks
+    );
+    CFDictionarySetValue(query, kSecClass, kSecClassKey);
+    CFDictionarySetValue(query, kSecAttrApplicationTag, oldTag);
+    CFDictionarySetValue(query, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom);
+
+    CFMutableDictionaryRef changes = CFDictionaryCreateMutable(
+        NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks
+    );
+    CFDictionarySetValue(changes, kSecAttrApplicationTag, newTag);
+
+    OSStatus status = SecItemUpdate(query, changes);
+    CFRelease(query);
+    CFRelease(changes);
+    CFRelease(oldTag);
+    CFRelease(newTag);
+    return status;
+}
+
 // dop_se_delete removes the SE key with the given tag. Returns 0 on
 // success or if the key was already absent.
 OSStatus dop_se_delete(const char *tag_utf8, size_t tag_len) {
@@ -381,6 +417,29 @@ func (s *seStore) PublicKey() []byte    { return append([]byte(nil), s.pubkey...
 func (s *seStore) Extractable() bool    { return false }
 func (s *seStore) StorageDescription() string {
 	return "macOS Secure Enclave (p256, tag=" + s.tag + ", non-extractable)"
+}
+
+// MigrateLookupID re-tags the SE key from the old lookup id to
+// newLookupID via SecItemUpdate. The underlying hardware key is
+// untouched — same private material, new applicationTag. Used by
+// v1.12 bearer rotation.
+func (s *seStore) MigrateLookupID(newLookupID string) error {
+	oldTag := s.tag
+	newTag := "dop.agent." + newLookupID
+	oldC := C.CString(oldTag)
+	defer C.free(unsafe.Pointer(oldC))
+	newC := C.CString(newTag)
+	defer C.free(unsafe.Pointer(newC))
+	status := C.dop_se_rename_tag(
+		oldC, C.size_t(len(oldTag)),
+		newC, C.size_t(len(newTag)),
+	)
+	if status != 0 {
+		return fmt.Errorf("SE tag rename %s→%s failed: OSStatus %d", oldTag, newTag, int(status))
+	}
+	s.tag = newTag
+	s.lookupID = newLookupID
+	return nil
 }
 
 // SharedSecret runs ECDH between the SE-backed key and peerPub via

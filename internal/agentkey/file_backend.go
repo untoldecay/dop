@@ -257,6 +257,35 @@ func (s *fileP256Store) Extractable() bool { return true }
 func (s *fileP256Store) StorageDescription() string {
 	return fmt.Sprintf("file: %s (p256, EXPLICIT OPT-IN — extractable)", s.path)
 }
+// MigrateLookupID renames the underlying .p256 file to the new
+// lookup id. Used by v1.12 bearer rotation: same physical key,
+// re-tagged to bind to the new bearer's lookup id.
+func (s *fileP256Store) MigrateLookupID(newLookupID string) error {
+	dir := filepath.Dir(s.path)
+	newPath := filepath.Join(dir, newLookupID+".p256")
+	if err := os.Rename(s.path, newPath); err != nil {
+		return fmt.Errorf("agentkey/file p256: rename to %s: %w", newLookupID, err)
+	}
+	s.path = newPath
+	s.lookupID = newLookupID
+	return nil
+}
+
+// MigrateLookupID for ed25519 file keys (same file-rename semantics).
+// Bearer rotation for ed25519 bearers doesn't work end-to-end anyway
+// (no ECDH → can't unwrap BearerWrapped), but keeping the method for
+// interface symmetry.
+func (s *fileEd25519Store) MigrateLookupID(newLookupID string) error {
+	dir := filepath.Dir(s.path)
+	newPath := filepath.Join(dir, newLookupID+".key")
+	if err := os.Rename(s.path, newPath); err != nil {
+		return fmt.Errorf("agentkey/file ed25519: rename to %s: %w", newLookupID, err)
+	}
+	s.path = newPath
+	s.lookupID = newLookupID
+	return nil
+}
+
 func (s *fileP256Store) SharedSecret(peerPub []byte) ([]byte, error) {
 	// Move the ecdsa.PrivateKey into an ecdh.PrivateKey and let
 	// crypto/ecdh do the curve arithmetic + point-on-curve checks.

@@ -69,6 +69,12 @@ func runClaim(args []string) int {
 	remote := fs.Bool("remote", false, "no admin daemon on this host — stage the claim in the vault repo, admin approves + syncs via `dop approve-remote`")
 	cancel := fs.Bool("cancel", false, "cancel any in-flight pending claim for $DOP_TOKEN and exit")
 	status := fs.Bool("status", false, "print the pending-claim state for $DOP_TOKEN (json) and exit")
+	// v1.12 — force a specific agent key type. Default (empty) uses the
+	// auto-selection heuristic in agentkey.Create (SE on macOS, else
+	// ed25519 file). Explicit "p256" opts into ECDH-capable keys on
+	// systems where SE isn't reachable (Linux/CI with
+	// DOP_ALLOW_FILE_KEYS=1, or macOS dev builds without codesign).
+	keyTypeFlag := fs.String("key-type", "", "\"p256\" | \"ed25519\" | \"\" (auto). p256 required for direct grant edits (v1.12)")
 	asJSON := fs.Bool("json", false, "emit JSONL events (pending, result) on stdout instead of human-readable output on stderr")
 	_ = fs.Parse(args)
 
@@ -195,7 +201,7 @@ func runClaim(args []string) int {
 	// On macOS this returns a Secure-Enclave-backed P-256 key; on
 	// Linux/CI (with DOP_ALLOW_FILE_KEYS=1) it falls back to a
 	// file-backed P-256 key; otherwise ed25519 legacy.
-	store, err := agentkey.Create(paths, lookupID, "")
+	store, err := agentkey.Create(paths, lookupID, *keyTypeFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop claim: keygen: %v\n", err)
 		return 1

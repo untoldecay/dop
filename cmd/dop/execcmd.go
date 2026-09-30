@@ -51,12 +51,12 @@ func runExec(args []string) int {
 		return 2
 	}
 
-	bearer, err := readBearer(*tokenFile)
+	bearer, source, err := readBearerWithSource(*tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
 		return 1
 	}
-	env, res, err := resolveBearer(bearer)
+	env, res, err := resolveBearerAutoRotate(&bearer, source)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
 		return 1
@@ -199,12 +199,12 @@ func runWhoami(args []string) int {
 }
 
 func runEnv(args []string) int {
-	bearer, err := readBearer("")
+	bearer, source, err := readBearerWithSource("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop env: %v\n", err)
 		return 1
 	}
-	env, res, err := resolveBearer(bearer)
+	env, res, err := resolveBearerAutoRotate(&bearer, source)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop env: %v\n", err)
 		return 1
@@ -251,16 +251,28 @@ func runEnv(args []string) int {
 // readBearer returns the bearer from --token-file if set, else
 // $DOP_TOKEN, else $DOP_TOKEN_FILE.
 func readBearer(fileFlag string) (string, error) {
+	b, _, err := readBearerWithSource(fileFlag)
+	return b, err
+}
+
+// readBearerWithSource is v1.12-added and additionally returns the
+// writable path (file backing the bearer) or "" if the bearer came
+// from $DOP_TOKEN env — needed so bearer rotation can auto-rewrite
+// the token file when the agent has one, and cleanly warn when it
+// doesn't.
+func readBearerWithSource(fileFlag string) (bearer, sourceFile string, err error) {
 	if fileFlag != "" {
-		return readTokenFile(fileFlag)
+		b, err := readTokenFile(fileFlag)
+		return b, fileFlag, err
 	}
 	if env := os.Getenv("DOP_TOKEN"); env != "" {
-		return env, nil
+		return env, "", nil
 	}
 	if envFile := os.Getenv("DOP_TOKEN_FILE"); envFile != "" {
-		return readTokenFile(envFile)
+		b, err := readTokenFile(envFile)
+		return b, envFile, err
 	}
-	return "", errors.New("no bearer (set $DOP_TOKEN or --token-file)")
+	return "", "", errors.New("no bearer (set $DOP_TOKEN or --token-file)")
 }
 
 func readTokenFile(path string) (string, error) {
@@ -321,6 +333,22 @@ func resolveBearer(bearer string) (map[string]string, resolveResult, error) {
 	// v1.6.2 — verify signed capability record BEFORE decrypting the
 	// bundle. The record's admin signature is the actual root of trust;
 	// the bundle envelope alone only proves bearer possession.
+	//
+	// verifyAndLoadRecord accepts only active records. To detect a
+	// rotation, we read the record independently first and check for
+	// status=rotated + BearerWrapped BEFORE calling the strict verifier.
+	if rotated, err := detectAndRotate(paths, lookupID); err != nil {
+		return nil, resolveResult{}, fmt.Errorf("bearer rotation: %w", err)
+	} else if rotated != nil {
+		// The bearer we were called with is stale. The caller should
+		// re-invoke with the new bearer — resolveBearer returns a
+		// sentinel error carrying the new bearer + new lookup so the
+		// caller can retry transparently.
+		return nil, resolveResult{}, &rotationError{
+			newBearer:   rotated.newBearer,
+			newLookupID: rotated.newLookupID,
+		}
+	}
 	rec, err := verifyAndLoadRecord(paths, lookupID, bundleBytes)
 	if err != nil {
 		return nil, resolveResult{}, fmt.Errorf("record verify: %w", err)
@@ -368,6 +396,180 @@ func resolveBearer(bearer string) (map[string]string, resolveResult, error) {
 		lookupID:   lookupID,
 		binding:    env.Binding,
 	}, nil
+}
+
+// resolveBearerAutoRotate wraps resolveBearer with v1.12 transparent
+// bearer rotation. If resolveBearer returns a rotationError, this
+// helper:
+//   - Writes the new bearer to bearerSource when it points at a file
+//     (--token-file or $DOP_TOKEN_FILE); otherwise emits a warning
+//     saying the caller MUST restart with the new bearer.
+//   - Updates *bearer in place so callers downstream see the new
+//     value (verifyBinding needs it for the challenge).
+//   - Re-invokes resolveBearer once with the new bearer.
+//
+// One-shot: if the new bearer's record ALSO says "rotated", we
+// return an error rather than looping (would only happen if admin
+// rotated twice back-to-back — unusual and worth surfacing).
+func resolveBearerAutoRotate(bearer *string, bearerSource string) (map[string]string, resolveResult, error) {
+	env, res, err := resolveBearer(*bearer)
+	if err == nil {
+		return env, res, nil
+	}
+	var rot *rotationError
+	if !errors.As(err, &rot) {
+		return nil, res, err
+	}
+	// Persist the new bearer for future runs. If we can't write it,
+	// tell the user exactly what to do next.
+	if bearerSource != "" {
+		if werr := os.WriteFile(bearerSource, []byte(rot.newBearer), 0o600); werr != nil {
+			return nil, res, fmt.Errorf(
+				"bearer rotated by admin — got new bearer, but couldn't write to %q: %w\n"+
+					"  Manually set DOP_TOKEN=%s and re-run.",
+				bearerSource, werr, rot.newBearer)
+		}
+		fmt.Fprintf(os.Stderr, "dop: wrote rotated bearer to %s\n", bearerSource)
+	} else {
+		fmt.Fprintln(os.Stderr,
+			"⚠  Bearer was rotated by admin. This process is running with $DOP_TOKEN (env),\n"+
+				"   which dop cannot rewrite from here — the parent shell/agent driver\n"+
+				"   must catch this. New bearer for this rotation:")
+		fmt.Fprintln(os.Stderr, "     "+rot.newBearer)
+		fmt.Fprintln(os.Stderr,
+			"   Update $DOP_TOKEN (or switch to --token-file for auto-rotation) and re-run.")
+		return nil, res, errors.New("bearer rotated — retry with new bearer above")
+	}
+	*bearer = rot.newBearer
+	env, res, err = resolveBearer(rot.newBearer)
+	if err != nil {
+		// Second rotation attempt is unusual; surface loudly.
+		return nil, res, fmt.Errorf("after rotation: %w", err)
+	}
+	return env, res, nil
+}
+
+// rotationError is a sentinel returned by resolveBearer when the
+// record it looked up has status=rotated + a BearerWrapped envelope
+// pointing to the successor. Callers use errors.As to unwrap it and
+// re-invoke resolveBearer with newBearer.
+type rotationError struct {
+	newBearer   string
+	newLookupID string
+}
+
+func (e *rotationError) Error() string {
+	return "bearer rotated; caller must retry with the new bearer"
+}
+
+type rotationInfo struct {
+	newBearer   string
+	newLookupID string
+}
+
+// detectAndRotate inspects the record for the given lookup id. If
+// status=rotated + BearerWrapped is set, it verifies the record
+// signature, opens the wrapped bearer via the local agent SE (or
+// file P-256) key, migrates that key to the new lookup id, rewrites
+// the bearer-source file when possible, and returns the new bearer
+// + new lookup id.
+//
+// Returns nil rotationInfo (with nil error) when no rotation is
+// pending — normal path, caller proceeds with the record as-is.
+func detectAndRotate(paths *config.Paths, lookupID string) (*rotationInfo, error) {
+	recPath := filepath.Join(paths.Vault, "capabilities", lookupID+".record")
+	blob, err := os.ReadFile(recPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // fall through to normal path (will error there)
+		}
+		return nil, err
+	}
+	var rec capability.Record
+	if err := json.Unmarshal(blob, &rec); err != nil {
+		return nil, nil // let the normal path surface the parse error
+	}
+	if rec.Status != capability.RecordStatusRotated || rec.BearerWrapped == nil {
+		return nil, nil // not rotated
+	}
+
+	// Verify the signature before trusting BearerWrapped's contents.
+	// Trust checks are the same as the normal record verifier — but we
+	// skip the "must be active" gate since a rotated record is what we
+	// are here for.
+	if err := verifyRotatedRecord(paths, lookupID, &rec); err != nil {
+		return nil, fmt.Errorf("rotated record verify: %w", err)
+	}
+
+	// Only P-256 bearers can carry BearerWrapped (ed25519 can't ECDH).
+	if rec.Binding == nil || rec.Binding.KeyType != vault.KeyTypeP256 {
+		return nil, errors.New("rotated record's binding is not p256 — cannot open BearerWrapped")
+	}
+	store, err := agentkey.OpenByType(paths, lookupID, vault.KeyTypeP256)
+	if err != nil {
+		return nil, fmt.Errorf("open agent key: %w", err)
+	}
+	sealed, err := envseal.FromHex(map[string]string{
+		"admin_ephem_pub": rec.BearerWrapped.AdminEphemPub,
+		"salt":            rec.BearerWrapped.Salt,
+		"nonce":           rec.BearerWrapped.Nonce,
+		"ciphertext":      rec.BearerWrapped.Ciphertext,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("decode wrapped: %w", err)
+	}
+	shared, err := store.SharedSecret(sealed.AdminEphemPub)
+	if err != nil {
+		return nil, fmt.Errorf("ecdh: %w", err)
+	}
+	aad := []byte(fmt.Sprintf("dop-bearerwrap-v1|old_lookup=%s|new_gen=%d", lookupID, rec.BearerWrapped.NewGeneration))
+	plaintext, err := envseal.OpenWithShared(shared, sealed, aad)
+	if err != nil {
+		return nil, fmt.Errorf("open wrapped: %w", err)
+	}
+	var payload struct {
+		Bearer   string `json:"bearer"`
+		LookupID string `json:"lookup_id"`
+	}
+	if err := json.Unmarshal(plaintext, &payload); err != nil {
+		return nil, fmt.Errorf("decode payload: %w", err)
+	}
+	if payload.Bearer == "" || payload.LookupID == "" {
+		return nil, errors.New("wrapped payload missing bearer or lookup_id")
+	}
+
+	// Migrate the agent key to the new lookup id — same physical key,
+	// re-tagged. Both file and SE backends implement LookupMigrator.
+	migrator, ok := store.(agentkey.LookupMigrator)
+	if !ok {
+		return nil, errors.New("agent key backend doesn't support lookup migration")
+	}
+	if err := migrator.MigrateLookupID(payload.LookupID); err != nil {
+		return nil, fmt.Errorf("migrate agent key tag: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr,
+		"dop: bearer rotated by admin — switched to new bearer %s… (lookup %s…)\n",
+		payload.Bearer[:min(12, len(payload.Bearer))], payload.LookupID[:12])
+
+	return &rotationInfo{newBearer: payload.Bearer, newLookupID: payload.LookupID}, nil
+}
+
+// verifyRotatedRecord is verifyAndLoadRecord without the "must be
+// active" check — used for rotated records whose whole purpose is
+// to carry a BearerWrapped envelope.
+func verifyRotatedRecord(paths *config.Paths, lookupID string, rec *capability.Record) error {
+	if rec.LookupID != lookupID {
+		return errors.New("record lookup_id mismatch")
+	}
+	trusted, err := trust.Load(paths)
+	if err != nil {
+		return fmt.Errorf("load trust: %w", err)
+	}
+	if !trusted[strings.ToLower(rec.IssuedBy)] && !trusted[rec.IssuedBy] {
+		return fmt.Errorf("record signed by unknown admin: %s", short(rec.IssuedBy))
+	}
+	return rec.Verify()
 }
 
 // openEnvWrapped decrypts record.EnvWrapped using the local agent's
