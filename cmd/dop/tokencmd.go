@@ -44,6 +44,8 @@ func runToken(args []string) int {
 		return runTokenIssue(args[1:])
 	case "list":
 		return runTokenList(args[1:])
+	case "show":
+		return runTokenShow(args[1:])
 	case "revoke":
 		return runTokenRevoke(args[1:])
 	case "repin":
@@ -54,13 +56,144 @@ func runToken(args []string) int {
 	}
 }
 
+// runTokenShow prints the detail view for a single token: subject,
+// expiry, generation, status, binding, and the grants that resolve to
+// which env vars via which integrations. Read-only; grant editing
+// lives in v1.12.
+//
+// Match is a lookup-ID prefix (min 6 chars) — same style as list.
+func runTokenShow(args []string) int {
+	fs := flag.NewFlagSet("token show", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "emit JSON instead of human-readable")
+	// Go's stdlib flag parser stops at the first non-flag arg, so
+	// `dop token show subject --json` would leave --json unparsed.
+	// Pre-split so either order works.
+	flagArgs, posArgs := splitFlagsAndPositionals(args)
+	_ = fs.Parse(flagArgs)
+	if len(posArgs) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: dop token show <lookup-id-prefix|subject> [--json]")
+		return 2
+	}
+	needle := posArgs[0]
+
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token show: %v\n", err)
+		return 1
+	}
+	v, _, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token show: %v\n", err)
+		return 1
+	}
+
+	var (
+		match   vault.Capability
+		matchID string
+		hits    []string
+	)
+	for id, c := range v.Capabilities {
+		if strings.HasPrefix(id, needle) || strings.HasPrefix(c.LookupID, needle) || strings.EqualFold(c.Subject, needle) {
+			hits = append(hits, id)
+			match = c
+			matchID = id
+		}
+	}
+	if len(hits) == 0 {
+		fmt.Fprintf(os.Stderr, "dop token show: no token matches %q\n", needle)
+		return 1
+	}
+	if len(hits) > 1 {
+		fmt.Fprintf(os.Stderr, "dop token show: %d tokens match %q — narrow with more prefix chars:\n", len(hits), needle)
+		for _, h := range hits {
+			fmt.Fprintf(os.Stderr, "  %s  %s\n", h[:12], v.Capabilities[h].Subject)
+		}
+		return 1
+	}
+
+	// Resolve each grant → integration/token/env-var.
+	type grantView struct {
+		ID          string `json:"id"`
+		Integration string `json:"integration"`
+		Token       string `json:"token"`
+		EnvVar      string `json:"env_var"`
+		Missing     bool   `json:"missing,omitempty"`
+	}
+	grants := make([]grantView, 0, len(match.Grants))
+	for _, gid := range match.Grants {
+		g, ok := v.Grants[gid]
+		if !ok {
+			grants = append(grants, grantView{ID: gid, Missing: true})
+			continue
+		}
+		grants = append(grants, grantView{
+			ID: gid, Integration: g.Integration, Token: g.Token,
+			EnvVar: g.EffectivePrefix() + "_TOKEN",
+		})
+	}
+
+	bindingKind := ""
+	bindingPubkey := ""
+	bindingKeyType := ""
+	if match.Binding != nil {
+		bindingKind = match.Binding.Kind
+		bindingPubkey = match.Binding.Pubkey
+		bindingKeyType = match.Binding.EffectiveKeyType()
+	}
+
+	if *asJSON {
+		emitJSON(map[string]any{
+			"cap_id":      matchID,
+			"lookup_id":   match.LookupID,
+			"subject":     match.Subject,
+			"status":      match.Status,
+			"generation":  match.Generation,
+			"created_at":  match.CreatedAt.Format(time.RFC3339),
+			"expires_at":  tokenExpiryDisplay(match.ExpiresAt),
+			"issued_by":   match.IssuedBy,
+			"bundle_hash": match.BundleHash,
+			"binding": map[string]any{
+				"kind":     bindingKind,
+				"pubkey":   bindingPubkey,
+				"key_type": bindingKeyType,
+			},
+			"grants": grants,
+		})
+		return 0
+	}
+	fmt.Printf("cap_id:       %s\n", matchID)
+	fmt.Printf("lookup_id:    %s\n", match.LookupID)
+	fmt.Printf("subject:      %s\n", match.Subject)
+	fmt.Printf("status:       %s\n", match.Status)
+	fmt.Printf("generation:   %d\n", match.Generation)
+	fmt.Printf("created_at:   %s\n", match.CreatedAt.Format(time.RFC3339))
+	fmt.Printf("expires_at:   %s\n", tokenExpiryDisplay(match.ExpiresAt))
+	fmt.Printf("issued_by:    %s\n", match.IssuedBy)
+	if bindingKind != "" {
+		fmt.Printf("binding.kind: %s\n", bindingKind)
+		if bindingPubkey != "" {
+			fmt.Printf("binding.pubkey: %s (key_type=%s)\n", bindingPubkey, bindingKeyType)
+		}
+	}
+	fmt.Printf("grants (%d):\n", len(grants))
+	for _, g := range grants {
+		if g.Missing {
+			fmt.Printf("  - %s  ⚠  grant no longer in vault\n", g.ID)
+			continue
+		}
+		fmt.Printf("  - %s  → %s.%s  env=%s\n", g.ID, g.Integration, g.Token, g.EnvVar)
+	}
+	return 0
+}
+
 func runTokenIssue(args []string) int {
 	fs := flag.NewFlagSet("token issue", flag.ExitOnError)
 	grantsCSV := fs.String("grants", "", "comma-separated grant IDs (required unless --project)")
 	projectFilter := fs.String("project", "", "resolve grants by project name (bundles all grants tagged with this project)")
 	tagsCSV := fs.String("tags", "", "when combined with --project or --grants, keep only grants carrying ALL these tags")
 	name := fs.String("name", "", "human-readable subject/label")
-	expires := fs.String("expires", "72h", "duration until expiry (default 72h)")
+	expires := fs.String("expires", "72h", "duration until expiry (e.g. 72h, 30d, 4w) or the literal \"never\" for no expiry (revoke manually)")
 	note := fs.String("note", "", "free-text note (not used in v1.0)")
 	bindPubkey := fs.String("bind-pubkey", "", "pre-bind the bearer to this ed25519 pubkey (hex)")
 	noBind := fs.Bool("no-bind", false, "issue an unbound bearer (bearer alone grants access)")
@@ -82,14 +215,27 @@ func runTokenIssue(args []string) int {
 		return 2
 	}
 	grants := splitCSV(*grantsCSV)
-	expDur, err := parseDurationLoose(*expires)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop token issue: --expires: %v\n", err)
-		return 2
-	}
-	if expDur <= 0 {
-		fmt.Fprintln(os.Stderr, "dop token issue: --expires must be positive")
-		return 2
+	// v1.11.1 — --expires=never issues a bearer with the far-future
+	// sentinel timestamp (9999-12-31). Effectively unbounded; caller
+	// should still `dop token revoke` when the bearer is retired.
+	// Displayed as "never" in list / show output; stored as a normal
+	// (very large) unix timestamp so no schema change is needed.
+	var expiresAt time.Time
+	neverExpires := strings.EqualFold(strings.TrimSpace(*expires), "never")
+	var expDur time.Duration
+	if neverExpires {
+		expiresAt = tokenNeverSentinel()
+	} else {
+		var err error
+		expDur, err = parseDurationLoose(*expires)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop token issue: --expires: %v\n", err)
+			return 2
+		}
+		if expDur <= 0 {
+			fmt.Fprintln(os.Stderr, "dop token issue: --expires must be positive (or the literal string \"never\")")
+			return 2
+		}
 	}
 
 	paths, _ := config.Resolve()
@@ -206,7 +352,9 @@ func runTokenIssue(args []string) int {
 
 	// Bump the per-subject generation.
 	gen := v.BumpGeneration(subject)
-	expiresAt := time.Now().Add(expDur).UTC().Truncate(time.Second)
+	if !neverExpires {
+		expiresAt = time.Now().Add(expDur).UTC().Truncate(time.Second)
+	}
 	lookupID := capability.LookupID(vaultCtx, bearer)
 
 	// Resolve binding mode. Default is PIN-claim: user copies bearer+PIN
@@ -320,10 +468,10 @@ func runTokenIssue(args []string) int {
 		Extra: map[string]string{
 			"binding":    envBinding.Kind,
 			"grants":     strings.Join(grants, ","),
-			"expires_at": expiresAt.Format(time.RFC3339),
+			"expires_at": tokenExpiryDisplay(expiresAt),
 		},
 	})
-	fmt.Fprintf(os.Stderr, "dop token issue: issued %s (grants: %v, expires: %s)\n", subject, grants, expiresAt.Format(time.RFC3339))
+	fmt.Fprintf(os.Stderr, "dop token issue: issued %s (grants: %v, expires: %s)\n", subject, grants, tokenExpiryDisplay(expiresAt))
 	if pin != "" {
 		fmt.Fprintln(os.Stderr, "  bearer + PIN (shown ONCE — copy now):")
 		fmt.Println(bearer)
@@ -370,7 +518,7 @@ func runTokenList(args []string) int {
 		}
 		fmt.Printf("- %s  subject=%s  grants=%v  gen=%d  status=%s  expires=%s\n",
 			id[:12], c.Subject, c.Grants, c.Generation, c.Status,
-			c.ExpiresAt.Format(time.RFC3339))
+			tokenExpiryDisplay(c.ExpiresAt))
 		shown++
 	}
 	if shown == 0 && hidden > 0 {
@@ -1255,6 +1403,43 @@ func resolveGrantsToEnv(v *vault.Vault, grants []string) map[string]string {
 		}
 	}
 	return out
+}
+
+// splitFlagsAndPositionals separates a raw argv slice into things that
+// look like flags (start with "-") and things that don't. Used by
+// subcommands whose ergonomic form allows flags anywhere on the line
+// (Go's stdlib flag parser stops at the first non-flag arg).
+//
+// Doesn't try to be smart about `--flag value` — that only matters for
+// non-bool flags in the middle of the positionals, which none of the
+// show commands use. Both `--json` and `--all` are booleans.
+func splitFlagsAndPositionals(args []string) (flagArgs, posArgs []string) {
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			flagArgs = append(flagArgs, a)
+		} else {
+			posArgs = append(posArgs, a)
+		}
+	}
+	return
+}
+
+// tokenNeverSentinel returns the "never expires" timestamp used by
+// --expires=never. Year 9999 is picked so it round-trips through Unix
+// seconds without overflow and stays clearly distinguishable from any
+// real expiry.
+func tokenNeverSentinel() time.Time {
+	return time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+}
+
+// tokenExpiryDisplay renders an ExpiresAt for humans/logs. Returns
+// "never" for tokens issued with --expires=never (year 9999), and
+// RFC3339 otherwise.
+func tokenExpiryDisplay(t time.Time) string {
+	if t.Year() >= 9999 {
+		return "never"
+	}
+	return t.Format(time.RFC3339)
 }
 
 // parseDurationLoose extends time.ParseDuration to accept "d" for days
