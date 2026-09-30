@@ -694,6 +694,13 @@ func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex stri
 		tun       *tunnel.Tunnel
 	)
 	if !noTunnel && tunnel.Available() {
+		// v1.11.1 — sweep any orphaned cloudflared quick-tunnel processes
+		// from prior sessions before starting a fresh one. Silent by
+		// design: users hit this when the previous `dop claim` was
+		// SIGKILL'd or the shell was force-quit, leaving cloudflared
+		// alive but detached. Without cleanup, the new tunnel competes
+		// with the dead one and the phone gets 530 from Cloudflare.
+		_ = tunnel.KillStrays()
 		tctx, tcancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer tcancel()
 		t, terr := tunnel.Start(tctx, port, 15*time.Second)
