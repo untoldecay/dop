@@ -48,6 +48,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ErrNotAttached is returned when the vault directory or vault.yaml
+// doesn't exist yet — the user hasn't run `dop init --vault <URL>` or
+// `dop init --cache <URL>` on this machine. Callers should detect this
+// sentinel via errors.Is and render a plain-English "attach a vault
+// first" message rather than leaking the raw os.ReadFile error.
+var ErrNotAttached = errors.New("no vault attached to this machine yet")
+
 // SchemaVersion is the current schema label. v1 vaults MUST carry this;
 // loading refuses anything else (including numeric v0 schemas from
 // pre-v1.0 DOP builds).

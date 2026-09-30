@@ -149,7 +149,13 @@ func attachRepo(source, dest string, agentInstall bool) int {
 	}
 	fmt.Fprintf(os.Stderr, "dop init: cloning %s → %s\n", source, dest)
 	if err := runGit(os.Stderr, "", "clone", asURL(source), dest); err != nil {
-		fmt.Fprintf(os.Stderr, "dop init: %v\n", err)
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintf(os.Stderr, "dop init: couldn't clone %s.\n", source)
+		fmt.Fprintln(os.Stderr, "  Check that:")
+		fmt.Fprintln(os.Stderr, "    - the URL is spelled correctly")
+		fmt.Fprintln(os.Stderr, "    - you have access to it (does 'git clone <URL>' work on its own?)")
+		fmt.Fprintln(os.Stderr, "    - your network / VPN is up")
+		fmt.Fprintf(os.Stderr, "  Details from git: %v\n", err)
 		return 1
 	}
 	kind := "admin install"
@@ -570,7 +576,13 @@ func runPush(args []string) int {
 		pushArgs = append(pushArgs, "--force-with-lease")
 	}
 	if err := runGit(os.Stderr, paths.Vault, pushArgs...); err != nil {
-		fmt.Fprintf(os.Stderr, "dop push: %v\n", err)
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "dop push: couldn't send your changes to the team's vault.")
+		fmt.Fprintln(os.Stderr, "  Common causes:")
+		fmt.Fprintln(os.Stderr, "    - no network / VPN not connected")
+		fmt.Fprintln(os.Stderr, "    - your git credentials expired (SSH key, GitHub token)")
+		fmt.Fprintln(os.Stderr, "    - someone else pushed first (run: dop pull, then dop push)")
+		fmt.Fprintf(os.Stderr, "  Details from git: %v\n", err)
 		return 1
 	}
 	return 0

@@ -170,7 +170,11 @@ func Write(paths *config.Paths, r Record) error {
 			_ = os.Remove(p)
 			_ = os.Remove(filepath.Join(d, r.LookupID+".lock"))
 		} else {
-			return fmt.Errorf("a pending claim already exists for this capability (%s) — reject it first", p)
+			return fmt.Errorf(
+				"a claim for this token is already in-flight on this machine.\n"+
+					"  To see its status:  dop claim --status\n"+
+					"  To cancel it:       dop claim --cancel\n"+
+					"  (Then retry your claim.)")
 		}
 	}
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)

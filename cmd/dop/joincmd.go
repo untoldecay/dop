@@ -172,7 +172,10 @@ func runAdminJoin(args []string) int {
 		case <-tick.C:
 		}
 		if time.Now().After(deadline) {
-			fmt.Fprintln(os.Stderr, "\ndop admin join: timed out — no approval received.")
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintf(os.Stderr, "dop admin join: waited %s but the other admin hasn't approved yet.\n", waitTimeout)
+			fmt.Fprintln(os.Stderr, "  On the inviting machine, ask them to open the TUI and complete the")
+			fmt.Fprintln(os.Stderr, "  invite flow, or check that 'dop team invite' is still running there.")
 			return 1
 		}
 		_ = runGit(io.Discard, paths.Vault, "pull", "--ff-only")
