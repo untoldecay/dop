@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -324,8 +325,9 @@ func runDoctor(args []string) int {
 	dopCheckGrantPrefixCollisions(c, paths, line)
 	dopCheckPendingInvites(paths, line)
 
-	// v1.11 — agent-key backend summary.
+	// v1.11 — agent-key backend summary + codesign posture.
 	dopCheckAgentKeys(paths, line)
+	dopCheckCodesign(line)
 
 	// --- security ---
 	if *securityMode {
@@ -652,6 +654,44 @@ func remainingTTL(ttlSec int64, refUnix int64) string {
 
 // hexEncodeBytes returns the lowercase hex of b. Used by tokencmd.
 func hexEncodeBytes(b []byte) string { return hex.EncodeToString(b) }
+
+// dopCheckCodesign inspects the currently-running dop binary and
+// reports whether it's code-signed well enough to talk to the
+// Secure Enclave. Adhoc / linker-signed binaries fail SE keygen
+// with errSecMissingEntitlement (-34018).
+func dopCheckCodesign(line func(status, name, detail string)) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cmd := exec.Command("codesign", "--display", "--verbose=2", self)
+	var out bytes.Buffer
+	cmd.Stderr = &out
+	cmd.Stdout = &out
+	_ = cmd.Run()
+	s := out.String()
+	switch {
+	case strings.Contains(s, "not signed"):
+		line("✗", "codesign:self", "binary is unsigned — Secure Enclave keygen will fail; agent keys fall back to legacy file")
+	case strings.Contains(s, "adhoc") || strings.Contains(s, "Signature=adhoc"):
+		line("!", "codesign:self", "adhoc-signed (linker default) — Secure Enclave keygen will FAIL. Install an officially-signed release for SE-backed agent keys.")
+	case strings.Contains(s, "TeamIdentifier=not set"):
+		line("!", "codesign:self", "signed but no team identifier — SE access may not work. Reinstall a properly signed release.")
+	case strings.Contains(s, "Apple Development:"):
+		// Apple Development cert can hardened-runtime-sign but still
+		// gets errSecMissingEntitlement (-34018) from SE without an
+		// App Store provisioning profile. Distributable SE access
+		// needs Developer ID Application.
+		line("!", "codesign:self", "signed with Apple Development cert — SE keygen still returns -34018 without a provisioning profile. Distributable SE access needs a Developer ID Application cert.")
+	case strings.Contains(s, "Developer ID Application:"):
+		line("✓", "codesign:self", "signed with Developer ID Application + hardened runtime — SE access should work")
+	default:
+		line("✓", "codesign:self", "signed, SE access should work")
+	}
+}
 
 // dopCheckAgentKeys is a v1.11 doctor check: enumerates all agent keys
 // on this machine and flags legacy ed25519 file storage (extractable →

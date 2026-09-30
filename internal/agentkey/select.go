@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/vault"
@@ -66,39 +67,92 @@ func OpenByType(paths *config.Paths, lookupID, expectedType string) (Store, erro
 //
 //   No keyType (auto): pick the best available option that works right
 //   now without prompting for opt-in. Preference:
-//     1. Keychain SE P-256 (macOS, when the cgo bridge is live)
+//     1. Keychain SE P-256 (macOS, when the cgo bridge is live AND
+//        the binary is code-signed with the required entitlements)
 //     2. Ed25519 legacy file (universally works, unchanged v1.10 shape)
 //
-//   Note: the "auto" path deliberately does NOT default to P-256 file
-//   storage — that would silently ship an extractable key with the
-//   same threat profile as v1.10 while claiming a v1.11 label.
+//   v1.11.0-rc3 — if SE keygen fails at runtime (typically because the
+//   binary isn't code-signed → OSStatus -34018 errSecMissingEntitlement),
+//   the auto path falls back to legacy ed25519 file storage with a
+//   loud stderr warning. This keeps unsigned developer builds usable
+//   while making the security regression visible on every claim.
 func Create(paths *config.Paths, lookupID, keyType string) (Store, error) {
 	kc := NewKeychainBackend()
 
 	// Auto: SE if available, else legacy ed25519.
 	if keyType == "" {
 		if kc.Available() {
-			return kc.Generate(lookupID, vault.KeyTypeP256)
+			if s, err := kc.Generate(lookupID, vault.KeyTypeP256); err == nil {
+				return s, nil
+			} else if isEntitlementError(err) {
+				warnSEUnavailable(err)
+				// Fall through to legacy ed25519 file.
+			} else {
+				return nil, err
+			}
 		}
 		return NewFileBackend(paths.Root).Generate(lookupID, vault.KeyTypeEd25519)
 	}
 
-	// Explicit p256: try SE first; if unavailable, gate on opt-in.
+	// Explicit p256: try SE first; if unavailable OR unsigned, gate on opt-in.
 	if keyType == vault.KeyTypeP256 {
 		if kc.Available() {
-			return kc.Generate(lookupID, keyType)
+			if s, err := kc.Generate(lookupID, keyType); err == nil {
+				return s, nil
+			} else if !isEntitlementError(err) {
+				return nil, err
+			}
+			// Entitlement error — fall through to the file-backend
+			// gating below (which requires DOP_ALLOW_FILE_KEYS=1 on
+			// macOS desktop).
 		}
 		if runtime.GOOS == "darwin" && os.Getenv("DOP_ALLOW_FILE_KEYS") != "1" {
 			return nil, fmt.Errorf(
-				"macOS Secure Enclave is required for P-256 agent keys on this platform.\n" +
-					"  If SE is unavailable and you understand the risk of extractable keys,\n" +
-					"  set DOP_ALLOW_FILE_KEYS=1 to allow the file backend as a fallback.")
+				"macOS Secure Enclave is required for P-256 agent keys on this platform,\n" +
+					"  but this dop binary can't reach the SE (usually because it's not code-signed\n" +
+					"  with the keychain-access entitlement — OSStatus -34018).\n" +
+					"  Fix by installing an officially-signed release, or accept extractable file storage\n" +
+					"  by setting DOP_ALLOW_FILE_KEYS=1 for the current command.")
 		}
 		return NewFileBackend(paths.Root).Generate(lookupID, keyType)
 	}
 
 	// Explicit ed25519: always the file backend.
 	return NewFileBackend(paths.Root).Generate(lookupID, keyType)
+}
+
+// isEntitlementError detects the specific macOS Keychain error that
+// means "this binary can't reach the Secure Enclave because it isn't
+// code-signed with the right entitlements". Any other SE error (e.g.
+// disk full, hardware fault) surfaces as a hard failure.
+func isEntitlementError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	// errSecMissingEntitlement == -34018
+	return strings.Contains(s, "-34018") ||
+		strings.Contains(s, "errSecMissingEntitlement") ||
+		strings.Contains(s, "missing entitlement")
+}
+
+// warnSEUnavailable prints a one-off "this dop binary can't use SE"
+// warning to stderr the first time we hit the entitlement gap in this
+// process. Structured so an operator (or agent scraping the output)
+// notices the security downgrade.
+var seWarnedOnce bool
+
+func warnSEUnavailable(err error) {
+	if seWarnedOnce {
+		return
+	}
+	seWarnedOnce = true
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "⚠  Secure Enclave unavailable — this dop binary isn't code-signed for SE access.")
+	fmt.Fprintln(os.Stderr, "   Falling back to file-backed ed25519 (extractable to any process on this uid).")
+	fmt.Fprintln(os.Stderr, "   To harden: install an officially-signed dop release.")
+	fmt.Fprintln(os.Stderr, "   Details:", err)
+	fmt.Fprintln(os.Stderr, "")
 }
 
 // Delete removes the key from wherever it lives. Idempotent.

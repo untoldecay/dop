@@ -34,6 +34,28 @@ builds:
       - -X github.com/fray/dop/internal/version.Version=v{{.Version}}
       - -X github.com/fray/dop/internal/version.Commit={{.Commit}}
       - -X github.com/fray/dop/internal/version.Date={{.Date}}
+    # v1.11.0-rc3 — codesign the darwin binary with hardened runtime.
+    # A hardened-runtime signature is a prerequisite for Secure Enclave
+    # access, but NOT sufficient on its own:
+    #
+    #   * Apple Development cert + hardened runtime → SE still returns
+    #     errSecMissingEntitlement (-34018). The binary needs a
+    #     Developer ID Application cert for SE keys without an App
+    #     Store provisioning profile.
+    #   * Developer ID Application cert + hardened runtime (+ ideally
+    #     notarization for distribution) → SE works.
+    #
+    # When SE is unreachable at runtime, `dop claim` falls back to
+    # legacy ed25519 file storage with a loud stderr warning and
+    # `dop doctor` reports the codesign state.
+    #
+    # DOP_SIGN_IDENTITY is the SHA-1 of a codesigning identity in the
+    # local Keychain — see `security find-identity -v -p codesigning`.
+    # Skipped silently if the env var isn't set, so `goreleaser
+    # release --snapshot` in unattended CI still works.
+    hooks:
+      post:
+        - cmd: sh -c 'if [ -n "$DOP_SIGN_IDENTITY" ]; then codesign --force --sign "$DOP_SIGN_IDENTITY" --options runtime --timestamp "{{ .Path }}" && codesign --display --verbose=2 "{{ .Path }}" 2>&1 | grep -E "Authority|TeamIdentifier"; else echo "[warn] DOP_SIGN_IDENTITY not set — binary will be adhoc-signed and cannot reach Secure Enclave"; fi'
   # Linux stays cgo-free — no SE there anyway, and pure-Go static
   # binaries cross-compile cleanly for both arches.
   - id: dop-linux
