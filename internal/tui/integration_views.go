@@ -14,6 +14,7 @@ import (
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/vault"
 )
 
 // ---------- Add integration (v1.10.3 rewrite) ----------
@@ -60,13 +61,43 @@ type addIntegrationView struct {
 	scopeBuf   strings.Builder
 	credEdited bool // true once the operator changed the prefill
 
+	// v1.13.0-rc6 — service picker at step 0. existingServices lists
+	// vault integrations in sorted order so operators adding a second
+	// credential to an existing service don't accidentally re-type
+	// the name (which would create a near-duplicate even with rc4's
+	// case-insensitive merge). servicePickCursor: 0 = "+ Create new…",
+	// 1..N = existing services. serviceMode true = picker; false =
+	// text input (switched on when "+ Create new…" is picked).
+	existingServices  []string
+	servicePickCursor int
+	serviceMode       bool // true until operator switches to text input
+
 	err   string
 	flash string
 	done  bool
 }
 
 func newAddIntegrationView(c *admin.Client, p *config.Paths) *addIntegrationView {
-	return &addIntegrationView{client: c, paths: p}
+	v := &addIntegrationView{client: c, paths: p, serviceMode: true}
+	v.loadExistingServices()
+	return v
+}
+
+// loadExistingServices populates existingServices from the vault so
+// the step-0 picker can offer "pick a service you already have"
+// alongside the "+ Create new…" entry.
+func (v *addIntegrationView) loadExistingServices() {
+	if v.client == nil {
+		return
+	}
+	vlt, _, err := loadVaultForListing(v.client, v.paths)
+	if err != nil || vlt == nil {
+		return
+	}
+	for name := range vlt.Integrations {
+		v.existingServices = append(v.existingServices, name)
+	}
+	sort.Strings(v.existingServices)
 }
 func (v *addIntegrationView) Init() tea.Cmd { return nil }
 func (v *addIntegrationView) Done() bool    { return v.done }
@@ -94,6 +125,36 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.flash = "integration saved · synced with team"
 			return v, nil
 		}
+		// v1.13.0-rc6 — step 0 is a service picker (unless the user
+		// opted into text-input via "+ Create new…").
+		if v.step == integAddStepName && v.serviceMode {
+			total := len(v.existingServices) + 1 // +1 for "+ Create new…"
+			switch mm.String() {
+			case "up", "k":
+				if v.servicePickCursor > 0 {
+					v.servicePickCursor--
+				}
+			case "down", "j":
+				if v.servicePickCursor < total-1 {
+					v.servicePickCursor++
+				}
+			case "enter":
+				if v.servicePickCursor == 0 {
+					// "+ Create new…" — drop into text input.
+					v.serviceMode = false
+					v.nameBuf.Reset()
+					return v, nil
+				}
+				// Pick an existing service — advance to credential name.
+				svc := v.existingServices[v.servicePickCursor-1]
+				v.nameBuf.Reset()
+				v.nameBuf.WriteString(svc)
+				v.step = integAddStepCred
+				v.prefillIfNeeded()
+				return v, nil
+			}
+			return v, nil
+		}
 		switch mm.String() {
 		case "enter":
 			return v.advance()
@@ -112,6 +173,9 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(s) > 0 {
 				buf.Reset()
 				buf.WriteString(s[:len(s)-1])
+			} else if v.step == integAddStepName && !v.serviceMode {
+				// Empty name + backspace returns to the service picker.
+				v.serviceMode = true
 			}
 			if v.step == integAddStepCred {
 				v.credEdited = true
@@ -241,15 +305,57 @@ func (v *addIntegrationView) View() string {
 		return b.String()
 	}
 
+	// v1.13.0-rc6 — step 0 is a service picker when serviceMode is on.
+	// Picks either "+ Create new…" (drops into text input) or an
+	// existing service (skips to credential name).
+	if v.step == integAddStepName && v.serviceMode {
+		b.WriteString(cursorSt.Render("Service") + "\n\n")
+		entries := append([]string{"+ Create new service…"}, v.existingServices...)
+		for i, label := range entries {
+			prefix := "    "
+			styled := label
+			if i == v.servicePickCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				styled = cursorSt.Render(label)
+			}
+			if i == 0 {
+				b.WriteString(prefix + styled + "\n")
+				if len(v.existingServices) > 0 {
+					b.WriteString("    " + mutedSt.Render("— or pick an existing service below to add another credential —") + "\n\n")
+				} else {
+					b.WriteString("\n")
+				}
+				continue
+			}
+			b.WriteString(prefix + styled + "\n")
+		}
+		b.WriteString("\n" + helpSt.Render("↑↓ move · enter select · esc cancel"))
+		if v.err != "" {
+			b.WriteString("\n" + failSt.Render(v.err))
+		}
+		return b.String()
+	}
+
 	// Rows mirror the Issue Token style — all visible at once, active
 	// row highlighted, past rows shown as filled-in.
+	// v1.13.0-rc6 — the service-name hint also previews the normalized
+	// key that will actually be stored (auto-normalize is silent per
+	// the design spec; preview surfaces WHAT will be saved before you
+	// save it).
+	nameHint := "e.g. notion, github, db-primary"
+	if trimmed := strings.TrimSpace(v.nameBuf.String()); trimmed != "" {
+		norm := vault.NormalizeIntegrationName(trimmed)
+		if norm != trimmed {
+			nameHint = fmt.Sprintf("will be saved as %q (auto-normalized)", norm)
+		}
+	}
 	rows := []struct {
 		label string
 		value string
 		hint  string
 		mask  bool
 	}{
-		{"Service name", v.nameBuf.String(), "e.g. notion, github, db-primary", false},
+		{"Service name", v.nameBuf.String(), nameHint, false},
 		{"What it's for", v.descBuf.String(), "optional — a one-line description", false},
 		{"Base URL", v.urlBuf.String(), "optional — sets an env var like NOTION_BASE_URL", false},
 		{"Credential name", v.credBuf.String(), "prefilled from the service name — edit if you'll have multiple credentials", false},

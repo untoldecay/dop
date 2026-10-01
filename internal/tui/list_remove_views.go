@@ -167,20 +167,15 @@ func (v *integrationListView) updateList(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.cursor++
 		}
 	case "enter":
+		// v1.13.0-rc6 — enter drills down into the integration's
+		// detail (its tokens + referrer grants). The intermediate
+		// action menu is gone — the only destructive op (remove)
+		// lives on the main menu as "Remove integration" and the
+		// detail view surfaces it inline too.
 		if len(v.names) == 0 {
 			return v, nil
 		}
-		v.mode = integModeAction
-		v.actionCursor = 0
-	case "d":
-		if v.selectedName() != "" {
-			v.mode = integModeDetail
-		}
-	case "r":
-		if v.selectedName() != "" {
-			v.mode = integModeConfirm
-			v.pending = "remove"
-		}
+		v.mode = integModeDetail
 	}
 	return v, nil
 }
@@ -300,10 +295,12 @@ func (v *integrationListView) View() string {
 	}
 
 	// v1.13.0-rc4 — unified footer: help first, then flash/error.
+	// v1.13.0-rc6 — enter drills down to the service's tokens, no
+	// intermediate action menu (remove lives on the main menu).
 	if v.mode == integModeAction {
 		b.WriteString("\n" + v.renderActionMenu())
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter actions · esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move · enter show tokens · esc back"))
 	}
 	if v.flash != "" {
 		b.WriteString("\n" + okSt.Render(v.flash))
@@ -421,7 +418,7 @@ func (v *integrationListView) viewConfirm() string {
 	if v.err != "" {
 		b.WriteString(failSt.Render(v.err) + "\n\n")
 	}
-	b.WriteString(helpSt.Render("y confirm · n cancel"))
+	b.WriteString(helpSt.Render("y/enter confirm · n/esc cancel"))
 	return b.String()
 }
 
@@ -564,11 +561,13 @@ func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				v.step = 1
 			}
 		case 1:
+			// v1.13.0-rc6 — unified confirm keybindings:
+			// y/Y/enter confirm · n/N/esc cancel.
 			switch mm.String() {
-			case "y", "Y":
+			case "y", "Y", "enter":
 				v.step = 2
 				return v, v.doRemove()
-			case "n", "N":
+			case "n", "N", "esc":
 				v.step = 0
 			}
 		}
@@ -630,7 +629,7 @@ func (v *integrationRemoveView) View() string {
 		if v.err != "" {
 			b.WriteString(failSt.Render(v.err) + "\n\n")
 		}
-		b.WriteString(helpSt.Render("y confirm · n go back · esc cancel"))
+		b.WriteString(helpSt.Render("y/enter confirm · n/esc cancel"))
 	case 2:
 		b.WriteString("removing…\n")
 	}
@@ -1237,11 +1236,13 @@ func (v *grantRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				v.step = 1
 			}
 		case 1:
+			// v1.13.0-rc6 — unified confirm keybindings:
+			// y/Y/enter confirm · n/N/esc cancel.
 			switch mm.String() {
-			case "y", "Y":
+			case "y", "Y", "enter":
 				v.step = 2
 				return v, v.doRemove()
-			case "n", "N":
+			case "n", "N", "esc":
 				v.step = 0
 			}
 		}
@@ -1289,7 +1290,7 @@ func (v *grantRemoveView) View() string {
 		if v.err != "" {
 			b.WriteString(failSt.Render(v.err) + "\n\n")
 		}
-		b.WriteString(helpSt.Render("y confirm · n go back"))
+		b.WriteString(helpSt.Render("y/enter confirm · n/esc cancel"))
 	case 2:
 		b.WriteString("removing…\n")
 	}
