@@ -725,13 +725,24 @@ func (v *issueView) View() string {
 			// v1.13: when allow-file-keys is on, instruct the agent to
 			// claim with --key-type p256 so the token is immediately
 			// eligible for direct-availability (reseal / add-grant / rotate).
-			claimCmd := "DOP_TOKEN=" + v.bearer + " dop claim --json " + v.pin
+			// v1.13.0-rc10: dropped --json from the primary claim command
+			// (the human output includes the explicit "attach QR to chat"
+			// prose an LLM agent handles better than parsing JSON events).
+			// --json stays on the --status polling command — that one IS
+			// machine-parsed by the agent for progress updates.
+			claimCmd := "DOP_TOKEN=" + v.bearer + " dop claim " + v.pin
+			statusCmd := "DOP_TOKEN=" + v.bearer + " dop claim --status --json"
 			if v.prefs.AllowFileKeys {
-				claimCmd = "DOP_TOKEN=" + v.bearer + " DOP_ALLOW_FILE_KEYS=1 dop claim --json --key-type p256 " + v.pin
+				claimCmd = "DOP_TOKEN=" + v.bearer + " DOP_ALLOW_FILE_KEYS=1 dop claim --key-type p256 " + v.pin
 			}
 			handoff := "You have been given scoped credential access via DOP.\n\n" +
-				"Run this in your shell:\n\n" +
-				"  " + claimCmd
+				"Run this in your shell (it blocks until the admin approves):\n\n" +
+				"  " + claimCmd + "\n\n" +
+				"While that command is running (streaming / background), poll progress every ~15s so you can tell the user what's happening:\n\n" +
+				"  " + statusCmd + "\n\n" +
+				"The status command returns JSON with a 'state' field: 'pending' (keep waiting), 'approved' (claim succeeded — credential is ready), or 'expired' / absent (claim failed — ask the admin to repin or re-issue). " +
+				"When state flips to 'approved' or the blocking command exits 0, tell the user: 'approved — credential ready'. " +
+				"If the user wants to abort before approval: `DOP_TOKEN=" + v.bearer + " dop claim --cancel`."
 			b.WriteString(mutedSt.Render(handoff) + "\n\n")
 			if copyToClipboard(handoff) {
 				b.WriteString(okSt.Render("agent handoff copied to clipboard — paste into the agent chat") + "\n")
