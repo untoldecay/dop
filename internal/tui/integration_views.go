@@ -312,6 +312,11 @@ type addGrantView struct {
 	integration string
 	token       string
 	envBuf      strings.Builder
+	// v1.13.0-rc5 — parity with `dop grant add` (and with grant edit
+	// in the TUI): new fields for projects + tags, CSV in the TUI
+	// (comma-separated), split by splitCSV at save time.
+	projectsBuf strings.Builder
+	tagsBuf     strings.Builder
 
 	integrations []string           // list of integration names
 	tokensByInt  map[string][]string // upstream tokens per integration
@@ -357,7 +362,8 @@ func (v *addGrantView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case grantAddedMsg:
 		if mm.err != "" {
 			v.err = mm.err
-			v.step = 3 // back to confirm
+			// Back to tags step so operator can review before retry.
+			v.step = 5
 			return v, nil
 		}
 		v.flash = "grant saved · synced with team"
@@ -435,11 +441,10 @@ func (v *addGrantView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				v.step = 3
 			}
 		case 3:
-			// env prefix
+			// env prefix (optional — empty = auto-derive + sanitize)
 			switch mm.String() {
 			case "enter":
 				v.step = 4
-				return v, v.save()
 			case "backspace":
 				s := v.envBuf.String()
 				if len(s) > 0 {
@@ -451,6 +456,39 @@ func (v *addGrantView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					v.envBuf.WriteString(string(mm.Runes))
 				}
 			}
+		case 4:
+			// v1.13.0-rc5 — projects (CSV, optional)
+			switch mm.String() {
+			case "enter":
+				v.step = 5
+			case "backspace":
+				s := v.projectsBuf.String()
+				if len(s) > 0 {
+					v.projectsBuf.Reset()
+					v.projectsBuf.WriteString(s[:len(s)-1])
+				}
+			default:
+				if len(mm.Runes) > 0 {
+					v.projectsBuf.WriteString(string(mm.Runes))
+				}
+			}
+		case 5:
+			// v1.13.0-rc5 — tags (CSV, optional) + submit
+			switch mm.String() {
+			case "enter":
+				v.step = 6
+				return v, v.save()
+			case "backspace":
+				s := v.tagsBuf.String()
+				if len(s) > 0 {
+					v.tagsBuf.Reset()
+					v.tagsBuf.WriteString(s[:len(s)-1])
+				}
+			default:
+				if len(mm.Runes) > 0 {
+					v.tagsBuf.WriteString(string(mm.Runes))
+				}
+			}
 		}
 	}
 	return v, nil
@@ -459,6 +497,8 @@ func (v *addGrantView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (v *addGrantView) save() tea.Cmd {
 	id := strings.TrimSpace(v.idBuf.String())
 	env := strings.TrimSpace(v.envBuf.String())
+	projects := strings.TrimSpace(v.projectsBuf.String())
+	tags := strings.TrimSpace(v.tagsBuf.String())
 	integ := v.integration
 	tok := v.token
 	return func() tea.Msg {
@@ -477,6 +517,13 @@ func (v *addGrantView) save() tea.Cmd {
 		// auto-derived <INTEGRATION>_<TOKEN>.
 		if env != "" {
 			args = append(args, "--env-prefix", env)
+		}
+		// v1.13.0-rc5 — parity with CLI/edit: projects + tags as CSV.
+		if projects != "" {
+			args = append(args, "--projects", projects)
+		}
+		if tags != "" {
+			args = append(args, "--tags", tags)
 		}
 		cmd := exec.Command(self, args...)
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
@@ -525,14 +572,40 @@ func (v *addGrantView) View() string {
 		b.WriteString(mutedSt.Render("Grant id:      "+v.idBuf.String()) + "\n")
 		b.WriteString(mutedSt.Render("Integration:   "+v.integration) + "\n")
 		b.WriteString(mutedSt.Render("Token:         "+v.token) + "\n\n")
-		b.WriteString(cursorSt.Render("Env prefix") + ":\n")
+		b.WriteString(cursorSt.Render("Env prefix (optional — leave empty for auto)") + ":\n")
 		b.WriteString("  " + v.envBuf.String() + cursorSt.Render("▎") + "\n")
 	case 4:
+		// v1.13.0-rc5 — projects (CSV, optional)
+		b.WriteString(mutedSt.Render("Grant id:      "+v.idBuf.String()) + "\n")
+		b.WriteString(mutedSt.Render("Integration:   "+v.integration) + "\n")
+		b.WriteString(mutedSt.Render("Token:         "+v.token) + "\n")
+		b.WriteString(mutedSt.Render("Env prefix:    "+displayOr(v.envBuf.String(), "(auto)")) + "\n\n")
+		b.WriteString(cursorSt.Render("Projects (comma-separated, optional)") + ":\n")
+		b.WriteString("  " + v.projectsBuf.String() + cursorSt.Render("▎") + "\n")
+	case 5:
+		// v1.13.0-rc5 — tags (CSV, optional) + confirm
+		b.WriteString(mutedSt.Render("Grant id:      "+v.idBuf.String()) + "\n")
+		b.WriteString(mutedSt.Render("Integration:   "+v.integration) + "\n")
+		b.WriteString(mutedSt.Render("Token:         "+v.token) + "\n")
+		b.WriteString(mutedSt.Render("Env prefix:    "+displayOr(v.envBuf.String(), "(auto)")) + "\n")
+		b.WriteString(mutedSt.Render("Projects:      "+displayOr(v.projectsBuf.String(), "(none)")) + "\n\n")
+		b.WriteString(cursorSt.Render("Tags (comma-separated, optional) · enter saves") + ":\n")
+		b.WriteString("  " + v.tagsBuf.String() + cursorSt.Render("▎") + "\n")
+	case 6:
 		b.WriteString("saving…\n")
 	}
+	b.WriteString("\n" + helpSt.Render("↑↓ move · enter next · esc cancel"))
 	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err) + "\n")
+		b.WriteString("\n" + failSt.Render(v.err))
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move · enter select · esc cancel"))
 	return b.String()
+}
+
+// displayOr returns s unless it's empty, in which case fallback is used
+// (for compact labels in the review line of multi-step forms).
+func displayOr(s, fallback string) string {
+	if strings.TrimSpace(s) == "" {
+		return fallback
+	}
+	return s
 }
