@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -35,15 +36,20 @@ func runIntegration(args []string) int {
 
 func runIntegrationList(args []string) int {
 	paths, _ := config.Resolve()
-	client, err := requireAdminSession(paths)
+	// v1.13.0-rc7 — admin unlocks the full catalog. Bearers see only
+	// integrations referenced by grants on their own capability.
+	v, bearerLookup, isAdmin, err := loadVaultForListingWithBearer(paths)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop integration list: %v\n", err)
 		return 1
 	}
-	v, _, err := loadVaultViaDaemon(client, paths)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop integration list: %v\n", err)
-		return 1
+	var allowed map[string]bool
+	if !isAdmin {
+		allowed = bearerIntegrationSet(v, bearerLookup)
+		if len(allowed) == 0 {
+			fmt.Println("(bearer references no integrations — or `dop admin login` for the full catalog)")
+			return 0
+		}
 	}
 	if len(v.Integrations) == 0 {
 		fmt.Println("(no integrations)")
@@ -51,6 +57,9 @@ func runIntegrationList(args []string) int {
 	}
 	names := make([]string, 0, len(v.Integrations))
 	for n := range v.Integrations {
+		if allowed != nil && !allowed[n] {
+			continue
+		}
 		names = append(names, n)
 	}
 	sortStrings(names)
@@ -425,15 +434,20 @@ func runGrantList(args []string) int {
 	_ = fs.Parse(args)
 
 	paths, _ := config.Resolve()
-	client, err := requireAdminSession(paths)
+	// v1.13.0-rc7 — admin session unlocks the full list. Non-admin
+	// bearers see ONLY the grants their own capability references.
+	v, bearerLookup, isAdmin, err := loadVaultForListingWithBearer(paths)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop grant list: %v\n", err)
 		return 1
 	}
-	v, _, err := loadVaultViaDaemon(client, paths)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop grant list: %v\n", err)
-		return 1
+	var allowed map[string]bool
+	if !isAdmin {
+		allowed = bearerGrantSet(v, bearerLookup)
+		if len(allowed) == 0 {
+			fmt.Println("(bearer has no grants — or `dop admin login` for the full catalog)")
+			return 0
+		}
 	}
 	if len(v.Grants) == 0 {
 		fmt.Println("(no grants)")
@@ -446,6 +460,11 @@ func runGrantList(args []string) int {
 	tag := strings.TrimSpace(*tagFilter)
 	pf := strings.TrimSpace(*projectFilter)
 	for id, g := range v.Grants {
+		// v1.13.0-rc7 — bearer-filtered: skip grants not on the
+		// current bearer's capability.
+		if allowed != nil && !allowed[id] {
+			continue
+		}
 		if tag != "" && !containsFold(g.Tags, tag) {
 			continue
 		}
@@ -624,5 +643,77 @@ func runGrantAdd(args []string) int {
 		fmt.Fprintf(os.Stderr, "  tags: %s\n", strings.Join(tags, ", "))
 	}
 	return 0
+}
+
+// v1.13.0-rc7 — loadVaultForListingWithBearer unlocks the vault for a
+// read-only listing operation, trying admin session first then
+// falling back to the agent-side plaintext sidecar readable by any
+// bearer. Returns the vault, the current bearer's lookupID (empty
+// when admin), isAdmin flag, and any error. Non-admin callers use
+// bearerGrantSet / bearerIntegrationSet to filter down to what their
+// bearer's capability actually references.
+func loadVaultForListingWithBearer(paths *config.Paths) (*vault.Vault, string, bool, error) {
+	if client, err := requireAdminSession(paths); err == nil && client != nil {
+		v, _, verr := loadVaultViaDaemon(client, paths)
+		if verr != nil {
+			return nil, "", false, verr
+		}
+		return v, "", true, nil
+	}
+	// Fall back to agent-side load (plaintext vault.yaml). This only
+	// works on admin installs where the vault is already decrypted
+	// AND on agent installs that keep a plaintext local copy.
+	vp := paths.Vault + "/vault.yaml"
+	v, err := vault.LoadPlain(vp)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("not an admin session and vault not readable here (%w) — run `dop admin login` or set DOP_TOKEN", err)
+	}
+	// Compute bearer's lookupID.
+	bearer, _, _ := readBearerWithSource("")
+	if bearer == "" {
+		return nil, "", false, errors.New("not an admin session and no DOP_TOKEN set — nothing to filter against")
+	}
+	ctxPath := paths.Vault + "/vault-context.bin"
+	ctx, cerr := os.ReadFile(ctxPath)
+	if cerr != nil {
+		return nil, "", false, fmt.Errorf("no vault_context sidecar (%s): %w", ctxPath, cerr)
+	}
+	return v, capability.LookupID(ctx, bearer), false, nil
+}
+
+// bearerGrantSet returns the set of grant IDs the bearer's
+// capability (if any) references. Used by `grant list` + `grant show`
+// to filter non-admin output.
+func bearerGrantSet(v *vault.Vault, bearerLookup string) map[string]bool {
+	out := map[string]bool{}
+	if bearerLookup == "" {
+		return out
+	}
+	for _, c := range v.Capabilities {
+		if c.LookupID != bearerLookup || c.Status != capability.RecordStatusActive {
+			continue
+		}
+		for _, gid := range c.Grants {
+			out[gid] = true
+		}
+	}
+	return out
+}
+
+// bearerIntegrationSet returns the set of integration names the
+// bearer's capability references via its grants.
+func bearerIntegrationSet(v *vault.Vault, bearerLookup string) map[string]bool {
+	allowedGrants := bearerGrantSet(v, bearerLookup)
+	out := map[string]bool{}
+	for gid := range allowedGrants {
+		g, ok := v.Grants[gid]
+		if !ok {
+			continue
+		}
+		if key, found := v.FindIntegrationKey(g.Integration); found {
+			out[key] = true
+		}
+	}
+	return out
 }
 
