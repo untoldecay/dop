@@ -1007,13 +1007,16 @@ type listView struct {
 }
 
 // repinTTLPresets — common PIN validity windows offered on repin.
+// v1.13.0-rc11: reordered + default moved from 5m to 1h after
+// ClaudeMini field report (5m was expiring during chat back-and-forth).
 var repinTTLPresets = []struct {
 	label string
 	value string
 }{
-	{"5m (default)", "5m"},
+	{"1h (default — chat-friendly)", "1h"},
+	{"5m (CLI handoff)", "5m"},
 	{"30m", "30m"},
-	{"2h", "2h"},
+	{"4h", "4h"},
 	{"24h", "24h"},
 }
 

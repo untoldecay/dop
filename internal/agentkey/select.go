@@ -96,11 +96,14 @@ func Create(paths *config.Paths, lookupID, keyType string) (Store, error) {
 
 	// Explicit p256: try SE first; if unavailable OR unsigned, gate on opt-in.
 	if keyType == vault.KeyTypeP256 {
+		seEntitlementErr := error(nil)
 		if kc.Available() {
 			if s, err := kc.Generate(lookupID, keyType); err == nil {
 				return s, nil
 			} else if !isEntitlementError(err) {
 				return nil, err
+			} else {
+				seEntitlementErr = err
 			}
 			// Entitlement error — fall through to the file-backend
 			// gating below (which requires DOP_ALLOW_FILE_KEYS=1 on
@@ -113,6 +116,16 @@ func Create(paths *config.Paths, lookupID, keyType string) (Store, error) {
 					"  with the keychain-access entitlement — OSStatus -34018).\n" +
 					"  Fix by installing an officially-signed release, or accept extractable file storage\n" +
 					"  by setting DOP_ALLOW_FILE_KEYS=1 for the current command.")
+		}
+		// v1.13.0-rc11 — ClaudeMini field report: on macOS without a
+		// Developer ID cert, every explicit --key-type p256 claim quietly
+		// landed in an extractable file. Make this noisy so operators
+		// see the security downgrade at claim time, not later from
+		// `dop doctor`.
+		if seEntitlementErr != nil {
+			warnSEUnavailable(seEntitlementErr)
+		} else if runtime.GOOS == "darwin" {
+			warnSEFileFallback()
 		}
 		return NewFileBackend(paths.Root).Generate(lookupID, keyType)
 	}
@@ -152,6 +165,28 @@ func warnSEUnavailable(err error) {
 	fmt.Fprintln(os.Stderr, "   Falling back to file-backed ed25519 (extractable to any process on this uid).")
 	fmt.Fprintln(os.Stderr, "   To harden: install an officially-signed dop release.")
 	fmt.Fprintln(os.Stderr, "   Details:", err)
+	fmt.Fprintln(os.Stderr, "")
+}
+
+// v1.13.0-rc11 — warnSEFileFallback is the louder cousin fired when
+// the operator explicitly chose --key-type p256 but the SE is not
+// reachable (ClaudeMini field report). The private key WILL land in
+// an extractable file. Different wording than warnSEUnavailable so
+// scrapers/doctors can tell the paths apart.
+var seFileFallbackWarnedOnce bool
+
+func warnSEFileFallback() {
+	if seFileFallbackWarnedOnce {
+		return
+	}
+	seFileFallbackWarnedOnce = true
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "⚠  P-256 agent key will be EXTRACTABLE on this install.")
+	fmt.Fprintln(os.Stderr, "   The Secure Enclave isn't reachable (binary not Developer-ID-signed), so")
+	fmt.Fprintln(os.Stderr, "   the private key lands in a 0600 file on disk — readable by any process")
+	fmt.Fprintln(os.Stderr, "   running as this uid.")
+	fmt.Fprintln(os.Stderr, "   Live-grant features (reseal, add-grant, rotate) still work; the key is")
+	fmt.Fprintln(os.Stderr, "   just not hardware-locked. Install an officially-signed release to upgrade.")
 	fmt.Fprintln(os.Stderr, "")
 }
 

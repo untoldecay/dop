@@ -61,19 +61,38 @@ func runExec(args []string) int {
 		autoPullIfStale(paths)
 	}
 
-	bearer, source, err := readBearerWithSource(*tokenFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
-		return 1
-	}
-	env, res, err := resolveBearerAutoRotate(&bearer, source)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
-		return 1
-	}
-	if err := verifyBinding(bearer, res); err != nil {
-		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
-		return 1
+	// v1.13.0-rc11 — Way B / bearer-free exec. If no bearer is supplied
+	// (DOP_TOKEN / DOP_TOKEN_FILE / --token-file all empty), try to find
+	// a local P-256 agent key whose matching record has EnvWrapped and
+	// unlock env via ECDH. Scopes to a single bearer when the local
+	// state is unambiguous. Agents never need to re-paste the bearer
+	// after claim — the proof of possession IS the agent key file (or
+	// the Secure Enclave).
+	bearer, source, bearerErr := readBearerWithSource(*tokenFile)
+	var (
+		env map[string]string
+		res resolveResult
+		err error
+	)
+	if bearer != "" {
+		env, res, err = resolveBearerAutoRotate(&bearer, source)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
+			return 1
+		}
+		if err := verifyBinding(bearer, res); err != nil {
+			fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
+			return 1
+		}
+	} else {
+		env, res, err = resolveViaAgentKey(*agentName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
+			if bearerErr != nil {
+				fmt.Fprintf(os.Stderr, "  (also no bearer supplied: %v)\n", bearerErr)
+			}
+			return 1
+		}
 	}
 	paths, _ := config.Resolve()
 	audit.Append(paths, audit.Event{
@@ -220,31 +239,50 @@ func runEnv(args []string) int {
 	paths, _ := config.Resolve()
 	autoPullIfStale(paths)
 
-	bearer, source, err := readBearerWithSource("")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop env: %v\n", err)
-		return 1
-	}
-	env, res, err := resolveBearerAutoRotate(&bearer, source)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop env: %v\n", err)
-		return 1
+	// v1.13.0-rc11 — Way B / bearer-free. Same shape as runExec.
+	bearer, source, bearerErr := readBearerWithSource("")
+	var (
+		env map[string]string
+		res resolveResult
+		err error
+	)
+	if bearer != "" {
+		env, res, err = resolveBearerAutoRotate(&bearer, source)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop env: %v\n", err)
+			return 1
+		}
+	} else {
+		env, res, err = resolveViaAgentKey("")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop env: %v\n", err)
+			if bearerErr != nil {
+				fmt.Fprintf(os.Stderr, "  (also no bearer supplied: %v)\n", bearerErr)
+			}
+			return 1
+		}
 	}
 	// v1.9.7 SECURITY — `dop env` prints plaintext credential values, so
 	// it must enforce the same PIN-claim binding as `dop exec`. Prior to
 	// this fix, possession of $DOP_TOKEN alone was enough to extract
 	// secrets, defeating the "stolen bearer isn't enough" guarantee that
 	// binding is supposed to provide. Audit-log denied attempts.
-	if err := verifyBinding(bearer, res); err != nil {
-		paths, _ := config.Resolve()
-		audit.Append(paths, audit.Event{
-			Kind:     audit.EventEnvDenied,
-			Subject:  res.subject,
-			LookupID: res.lookupID,
-			Extra:    map[string]string{"reason": err.Error()},
-		})
-		fmt.Fprintf(os.Stderr, "dop env: %v\n", err)
-		return 1
+	//
+	// v1.13.0-rc11 — the Way B / agent-key resolution path (bearer == "")
+	// already proves possession of the agent key by DECRYPTING EnvWrapped
+	// via ECDH — the agent key uniquely matches the record's bound pubkey
+	// by construction. Skip the redundant challenge/response.
+	if bearer != "" {
+		if err := verifyBinding(bearer, res); err != nil {
+			audit.Append(paths, audit.Event{
+				Kind:     audit.EventEnvDenied,
+				Subject:  res.subject,
+				LookupID: res.lookupID,
+				Extra:    map[string]string{"reason": err.Error()},
+			})
+			fmt.Fprintf(os.Stderr, "dop env: %v\n", err)
+			return 1
+		}
 	}
 	audit.Append(paths, audit.Event{
 		Kind:     audit.EventEnv,
@@ -601,6 +639,104 @@ func verifyRotatedRecord(paths *config.Paths, lookupID string, rec *capability.R
 // stale sealed envelope onto a fresher record; the admin signature
 // covers env_wrapped's fields so any splicing also breaks the record
 // signature, but the AAD adds belt-and-suspenders.
+// v1.13.0-rc11 — resolveViaAgentKey is the "Way B" entry point used
+// by `dop exec` / `dop env` when no bearer is supplied. It scans the
+// local agent-keys directory for P-256 keys whose matching record
+// has EnvWrapped, and unlocks env via ECDH — no bearer required.
+//
+// Resolution:
+//   - zero candidate keys → "no bearer; no agent key with sealed env" error
+//   - one candidate → use it (open EnvWrapped via the SE/file P-256 key)
+//   - multiple candidates → require agentName to disambiguate by subject;
+//     if still ambiguous, surface the choice list
+//
+// This path proves possession of the agent key by DECRYPTING EnvWrapped
+// — the agent key uniquely matches the record's bound pubkey by
+// construction, so no separate challenge/response is needed.
+func resolveViaAgentKey(agentName string) (map[string]string, resolveResult, error) {
+	paths, err := config.Resolve()
+	if err != nil {
+		return nil, resolveResult{}, err
+	}
+	type candidate struct {
+		lookupID string
+		rec      *capability.Record
+	}
+	var candidates []candidate
+	// Enumerate local agent keys (P-256 only — ed25519 can't decrypt EnvWrapped).
+	dir := filepath.Join(paths.Root, "agent-keys")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, resolveResult{}, fmt.Errorf("no bearer and no agent keys on this machine (%w)", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".p256") {
+			continue
+		}
+		lookupID := strings.TrimSuffix(name, ".p256")
+		// Load + verify the record. Skip silently on any error — a
+		// stale/revoked record just means this key isn't viable right now.
+		recPath := filepath.Join(paths.Vault, "capabilities", lookupID+".record")
+		blob, rerr := os.ReadFile(recPath)
+		if rerr != nil {
+			continue
+		}
+		var rec capability.Record
+		if json.Unmarshal(blob, &rec) != nil {
+			continue
+		}
+		if rec.Status != capability.RecordStatusActive {
+			continue
+		}
+		if rec.EnvWrapped == nil {
+			continue
+		}
+		candidates = append(candidates, candidate{lookupID: lookupID, rec: &rec})
+	}
+	if len(candidates) == 0 {
+		return nil, resolveResult{}, errors.New(
+			"no bearer supplied and no local agent key has sealed env to open.\n" +
+				"  Supply $DOP_TOKEN / --token-file, OR run `dop token reseal <subject>` on the admin\n" +
+				"  to generate EnvWrapped for an existing P-256-bound bearer.")
+	}
+	// Filter by subject if --agent-name was passed.
+	if agentName != "" {
+		filtered := candidates[:0]
+		for _, c := range candidates {
+			if c.rec.Subject == agentName {
+				filtered = append(filtered, c)
+			}
+		}
+		candidates = append([]candidate(nil), filtered...)
+		if len(candidates) == 0 {
+			return nil, resolveResult{}, fmt.Errorf("no local agent key for subject %q with sealed env", agentName)
+		}
+	}
+	if len(candidates) > 1 {
+		var names []string
+		for _, c := range candidates {
+			names = append(names, c.rec.Subject)
+		}
+		return nil, resolveResult{}, fmt.Errorf(
+			"multiple local agent keys with sealed env — pass --agent-name <X> to pick one: %s",
+			strings.Join(names, ", "))
+	}
+	// Single candidate: open EnvWrapped.
+	c := candidates[0]
+	env, err := openEnvWrapped(paths, c.rec)
+	if err != nil {
+		return nil, resolveResult{}, fmt.Errorf("agent-key resolution: %w", err)
+	}
+	return env, resolveResult{
+		subject:    c.rec.Subject,
+		generation: c.rec.Generation,
+		expiresAt:  c.rec.ExpiresAt,
+		capID:      c.rec.CapabilityID,
+		lookupID:   c.lookupID,
+	}, nil
+}
+
 func openEnvWrapped(paths *config.Paths, rec *capability.Record) (map[string]string, error) {
 	if rec.EnvWrapped == nil {
 		return nil, errors.New("no env_wrapped on record")

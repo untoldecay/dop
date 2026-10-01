@@ -221,7 +221,12 @@ func runTokenIssue(args []string) int {
 	note := fs.String("note", "", "free-text note (not used in v1.0)")
 	bindPubkey := fs.String("bind-pubkey", "", "pre-bind the bearer to this ed25519 pubkey (hex)")
 	noBind := fs.Bool("no-bind", false, "issue an unbound bearer (bearer alone grants access)")
-	pinTTL := fs.String("pin-ttl", "5m", "PIN validity window when --bind is default")
+	// v1.13.0-rc11 — default bumped from 5m to 1h after ClaudeMini field
+	// report: 5m is CLI-friendly but kills chat UX (PIN expired three
+	// times during one back-and-forth with the admin). 1h matches a
+	// typical chat session; `dop token repin` is the escape hatch when
+	// it still runs out.
+	pinTTL := fs.String("pin-ttl", "1h", "PIN validity window when --bind is default (shorter = tighter; use `dop token repin` if it expires)")
 	_ = fs.Parse(args)
 	_ = note
 
@@ -649,7 +654,8 @@ func runTokenRepin(args []string) int {
 	fs := flag.NewFlagSet("token repin", flag.ExitOnError)
 	subject := fs.String("subject", "", "subject whose PIN should be reissued (required)")
 	tokenFile := fs.String("token-file", "", "read the current bearer from file")
-	pinTTL := fs.String("pin-ttl", "5m", "PIN validity window")
+	// v1.13.0-rc11 — matches the issue-time default (1h for chat UX).
+	pinTTL := fs.String("pin-ttl", "1h", "PIN validity window")
 	_ = fs.Parse(args)
 
 	if strings.TrimSpace(*subject) == "" {
