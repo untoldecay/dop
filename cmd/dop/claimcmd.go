@@ -92,17 +92,26 @@ func runClaim(args []string) int {
 
 	// --cancel and --status don't need a PIN; they operate on whatever
 	// pending claim exists for the current bearer.
+	//
+	// v1.13.0-rc11 — ClaudeMini field report: when something's wedged,
+	// "just tell me the state" should work without re-supplying the
+	// bearer. If no bearer is supplied, we scan the local pending-claims
+	// directory. Unambiguous (one entry) → act on it. Multiple → tell
+	// the operator which one needs disambiguation. Zero → "no pending
+	// claims on this machine".
 	if *cancel || *status {
 		if len(posArgs) != 0 {
 			fmt.Fprintln(os.Stderr, "usage: dop claim --cancel   OR   dop claim --status")
 			return 2
 		}
-		bearer, err := readBearer(*tokenFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "dop claim: %v\n", err)
-			return 1
-		}
 		paths, _ := config.Resolve()
+		bearer, _ := readBearer(*tokenFile)
+		if bearer == "" {
+			if *cancel {
+				return runClaimCancelNoBearer(paths, *asJSON)
+			}
+			return runClaimStatusNoBearer(paths, *asJSON)
+		}
 		if *cancel {
 			return runClaimCancel(paths, bearer, *asJSON)
 		}
@@ -1117,4 +1126,128 @@ func writeAgentKeyLegacyEd25519(paths *config.Paths, lookupID string, priv ed255
 		return "", err
 	}
 	return p, nil
+}
+
+// v1.13.0-rc11 — runClaimStatusNoBearer answers "what's pending on
+// this machine?" without requiring the operator to re-supply the
+// bearer. Scans the local pending-claims directory via
+// pendingclaim.List. Unambiguous → report state. Multiple → list
+// subjects + lookup prefixes + ask operator to narrow with
+// $DOP_TOKEN. Zero → nothing to report.
+func runClaimStatusNoBearer(paths *config.Paths, asJSON bool) int {
+	recs, err := pendingclaim.List(paths)
+	if err != nil {
+		if asJSON {
+			emitJSON(map[string]any{"event": "status", "state": "error", "error": err.Error()})
+		} else {
+			fmt.Fprintf(os.Stderr, "dop claim --status: %v\n", err)
+		}
+		return 1
+	}
+	if len(recs) == 0 {
+		if asJSON {
+			emitJSON(map[string]any{"event": "status", "state": "absent", "note": "no pending claims on this machine"})
+		} else {
+			fmt.Fprintln(os.Stderr, "dop claim --status: no pending claims on this machine")
+		}
+		return 0
+	}
+	if len(recs) == 1 {
+		return runClaimStatusEmit(recs[0], asJSON)
+	}
+	// Multiple — enumerate so the operator can disambiguate.
+	if asJSON {
+		items := make([]map[string]any, 0, len(recs))
+		for _, r := range recs {
+			items = append(items, map[string]any{
+				"state":      r.State,
+				"subject":    r.Subject,
+				"lookup_id":  r.LookupID,
+				"sas":        r.SAS,
+				"expires_at": r.ExpiresAt.Format(time.RFC3339),
+			})
+		}
+		emitJSON(map[string]any{"event": "status", "state": "multiple", "pending": items})
+	} else {
+		fmt.Fprintf(os.Stderr, "dop claim --status: %d pending claims on this machine — set $DOP_TOKEN to narrow:\n", len(recs))
+		for _, r := range recs {
+			fmt.Fprintf(os.Stderr, "  subject=%s  lookup=%s  sas=%s  state=%s  expires=%s\n",
+				r.Subject, r.LookupID[:12], r.SAS, r.State, r.ExpiresAt.Format(time.RFC3339))
+		}
+	}
+	return 0
+}
+
+// runClaimCancelNoBearer cancels the pending claim when exactly one
+// exists on this machine. Multiple → refuse (operator must narrow
+// with $DOP_TOKEN). Zero → say so.
+func runClaimCancelNoBearer(paths *config.Paths, asJSON bool) int {
+	recs, err := pendingclaim.List(paths)
+	if err != nil {
+		if asJSON {
+			emitJSON(map[string]any{"event": "cancel", "state": "error", "error": err.Error()})
+		} else {
+			fmt.Fprintf(os.Stderr, "dop claim --cancel: %v\n", err)
+		}
+		return 1
+	}
+	if len(recs) == 0 {
+		if asJSON {
+			emitJSON(map[string]any{"event": "cancel", "state": "absent", "note": "no pending claims on this machine"})
+		} else {
+			fmt.Fprintln(os.Stderr, "dop claim --cancel: no pending claims on this machine")
+		}
+		return 0
+	}
+	if len(recs) > 1 {
+		if asJSON {
+			emitJSON(map[string]any{"event": "cancel", "state": "ambiguous", "count": len(recs), "note": "set $DOP_TOKEN to narrow"})
+		} else {
+			fmt.Fprintf(os.Stderr, "dop claim --cancel: %d pending claims on this machine — set $DOP_TOKEN to pick one.\n", len(recs))
+		}
+		return 1
+	}
+	// Exactly one.
+	r := recs[0]
+	if err := pendingclaim.Delete(paths, r.LookupID); err != nil {
+		if asJSON {
+			emitJSON(map[string]any{"event": "cancel", "state": "error", "error": err.Error()})
+		} else {
+			fmt.Fprintf(os.Stderr, "dop claim --cancel: %v\n", err)
+		}
+		return 1
+	}
+	if asJSON {
+		emitJSON(map[string]any{"event": "cancel", "state": "cancelled", "lookup_id": r.LookupID, "subject": r.Subject})
+	} else {
+		fmt.Fprintf(os.Stderr, "dop claim --cancel: pending claim cleared (subject=%s lookup=%s)\n", r.Subject, r.LookupID[:12])
+	}
+	return 0
+}
+
+// runClaimStatusEmit renders one pending-claim record in the format
+// expected by `dop claim --status`. Shared between the bearer-known
+// and no-bearer code paths.
+func runClaimStatusEmit(r *pendingclaim.Record, asJSON bool) int {
+	ttl := time.Until(r.ExpiresAt).Truncate(time.Second).String()
+	if time.Until(r.ExpiresAt) < 0 {
+		ttl = "expired"
+	}
+	if asJSON {
+		emitJSON(map[string]any{
+			"event":         "status",
+			"state":         r.State,
+			"sas":           r.SAS,
+			"subject":       r.Subject,
+			"lookup_id":     r.LookupID,
+			"started_at":    r.StartedAt.Format(time.RFC3339),
+			"expires_at":    r.ExpiresAt.Format(time.RFC3339),
+			"ttl":           ttl,
+			"failure_count": r.FailureCount,
+		})
+	} else {
+		fmt.Fprintf(os.Stderr, "dop claim --status: subject=%s state=%s sas=%s ttl=%s\n",
+			r.Subject, r.State, r.SAS, ttl)
+	}
+	return 0
 }

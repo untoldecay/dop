@@ -166,7 +166,16 @@ func Write(paths *config.Paths, r Record) error {
 	}
 	p := filepath.Join(d, r.LookupID+".json")
 	if existing, rerr := readFile(p); rerr == nil {
-		if !ownerAlive(existing) {
+		stale := !ownerAlive(existing)
+		// v1.13.0-rc11 — ClaudeMini field report: a pending claim whose
+		// ExpiresAt is already past is dead regardless of the owning
+		// process. The window closed; the server (if it ever ran) was
+		// supposed to have exited. Reclaim rather than force a manual
+		// `dop claim --cancel`.
+		if !stale && !existing.ExpiresAt.IsZero() && time.Now().After(existing.ExpiresAt) {
+			stale = true
+		}
+		if stale {
 			_ = os.Remove(p)
 			_ = os.Remove(filepath.Join(d, r.LookupID+".lock"))
 		} else {
