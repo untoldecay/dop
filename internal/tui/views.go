@@ -895,6 +895,13 @@ type listView struct {
 	showAll       bool   // false → hide revoked
 	err           string
 	flash         string
+
+	// v1.13.0-rc3 — grant-picker state for in-TUI add-grant / remove-grant
+	// on an existing token's detail. grantPickList is the list of candidate
+	// grant IDs; pendingGrantOp is "add" or "remove".
+	grantPickList   []string
+	grantPickCursor int
+	pendingGrantOp  string
 }
 
 // v1.10.0 — the tokens list is now an interactive picker. Modes:
@@ -906,11 +913,12 @@ type listView struct {
 //	listModeRun     subprocess in flight
 //	listModeDetail  full row, esc back
 const (
-	listModeList    = 0
-	listModeAction  = 1
-	listModeConfirm = 2
-	listModeRun     = 3
-	listModeDetail  = 4
+	listModeList       = 0
+	listModeAction     = 1
+	listModeConfirm    = 2
+	listModeRun        = 3
+	listModeDetail     = 4
+	listModeGrantPick  = 5 // v1.13.0-rc3 — add-grant / remove-grant picker
 )
 
 func newListView(c *admin.Client, p *config.Paths) *listView {
@@ -1007,6 +1015,13 @@ func (v *listView) currentActions() []listAction {
 		// CLI gatekeeps and prints a clear error on ineligible
 		// bearers.
 		acts = append(acts, listAction{label: "Reseal env", key: "s"})
+		// v1.13.0-rc3 — add-grant / remove-grant via the token
+		// detail. Both route through the CLI (same code path as
+		// `dop token add-grant` / `remove-grant`), which gatekeeps on
+		// P-256 binding and surfaces an actionable error if the
+		// bearer isn't eligible.
+		acts = append(acts, listAction{label: "Add grant", key: "+"})
+		acts = append(acts, listAction{label: "Remove grant", key: "-"})
 		acts = append(acts, listAction{label: "Revoke", key: "r", destructive: true})
 	}
 	acts = append(acts, listAction{label: "Back to list", key: "b"})
@@ -1054,6 +1069,8 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateActionMode(mm)
 		case listModeConfirm:
 			return v.updateConfirmMode(mm)
+		case listModeGrantPick:
+			return v.updateGrantPickMode(mm)
 		case listModeDetail:
 			// any key → back to list
 			v.mode = listModeList
@@ -1143,10 +1160,84 @@ func (v *listView) runAction(a listAction) (tea.Model, tea.Cmd) {
 		// v1.13 — reseal doesn't need confirmation (non-destructive).
 		v.mode = listModeRun
 		return v, v.doReseal()
+	case "+":
+		// v1.13.0-rc3 — load vault grants minus the ones already on
+		// this token, open the picker.
+		if !v.prepareGrantPicker("add") {
+			v.err = "no grants in the vault to add — add one first via Vault → Add grant"
+			return v, nil
+		}
+		v.mode = listModeGrantPick
+	case "-":
+		if !v.prepareGrantPicker("remove") {
+			v.err = "this token has no grants to remove"
+			return v, nil
+		}
+		v.mode = listModeGrantPick
 	case "b":
 		v.mode = listModeList
 	}
 	return v, nil
+}
+
+// prepareGrantPicker loads the candidate grant IDs for the current
+// token given the op ("add" or "remove"). Returns false when there's
+// nothing meaningful to show (vault has no grants / token has none).
+func (v *listView) prepareGrantPicker(op string) bool {
+	idx := v.selectedIndex()
+	if idx < 0 {
+		return false
+	}
+	cap := v.capabilities[idx]
+	v.pendingGrantOp = op
+	v.grantPickCursor = 0
+	v.grantPickList = nil
+
+	if op == "remove" {
+		v.grantPickList = append(v.grantPickList, cap.Grants...)
+		sort.Strings(v.grantPickList)
+		return len(v.grantPickList) > 0
+	}
+	// op == "add": vault grants NOT already on this token.
+	vlt, _, err := loadVaultForListing(v.client, v.paths)
+	if err != nil || vlt == nil {
+		return false
+	}
+	have := map[string]bool{}
+	for _, g := range cap.Grants {
+		have[g] = true
+	}
+	for gid := range vlt.Grants {
+		if !have[gid] {
+			v.grantPickList = append(v.grantPickList, gid)
+		}
+	}
+	sort.Strings(v.grantPickList)
+	return len(v.grantPickList) > 0
+}
+
+// doGrantMutation shells out to `dop token add-grant` or `remove-grant`
+// against the currently-selected token + currently-picked grant.
+func (v *listView) doGrantMutation() tea.Cmd {
+	idx := v.selectedIndex()
+	if idx < 0 || v.grantPickCursor >= len(v.grantPickList) {
+		return func() tea.Msg { return listActionMsg{err: "no selection"} }
+	}
+	target := v.capIDs[idx][:12]
+	grantID := v.grantPickList[v.grantPickCursor]
+	op := v.pendingGrantOp
+	return func() tea.Msg {
+		self, _ := os.Executable()
+		cmd := exec.Command(self, "token", op+"-grant", target, grantID)
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return listActionMsg{err: strings.TrimSpace(stderr.String())}
+		}
+		return listActionMsg{flash: strings.TrimSpace(stderr.String() + stdout.String())}
+	}
 }
 
 // doReseal spawns `dop token reseal <capID-prefix>` for the selected
@@ -1170,6 +1261,33 @@ func (v *listView) doReseal() tea.Cmd {
 		}
 		return listActionMsg{flash: strings.TrimSpace(stderr.String() + stdout.String())}
 	}
+}
+
+// updateGrantPickMode drives the add-grant / remove-grant picker.
+// Simple single-select list: ↑↓ to move, enter to confirm, esc to
+// cancel back to the action menu.
+func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch mm.String() {
+	case "up", "k":
+		if v.grantPickCursor > 0 {
+			v.grantPickCursor--
+		}
+	case "down", "j":
+		if v.grantPickCursor < len(v.grantPickList)-1 {
+			v.grantPickCursor++
+		}
+	case "enter":
+		if len(v.grantPickList) == 0 {
+			return v, nil
+		}
+		v.mode = listModeRun
+		return v, v.doGrantMutation()
+	case "esc", "q":
+		v.mode = listModeAction
+		v.grantPickList = nil
+		v.pendingGrantOp = ""
+	}
+	return v, nil
 }
 
 func (v *listView) updateConfirmMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1228,6 +1346,8 @@ func (v *listView) View() string {
 		return v.viewConfirm()
 	case listModeRun:
 		return v.viewRun()
+	case listModeGrantPick:
+		return v.viewGrantPick()
 	}
 
 	vis := v.visible()
@@ -1359,7 +1479,45 @@ func (v *listView) viewConfirm() string {
 }
 
 func (v *listView) viewRun() string {
-	return titleSt.Render("Revoking…") + "\n\n" + mutedSt.Render("running dop token revoke…")
+	label := "running dop token revoke…"
+	switch v.pendingGrantOp {
+	case "add":
+		label = "running dop token add-grant…"
+	case "remove":
+		label = "running dop token remove-grant…"
+	}
+	return titleSt.Render("Working…") + "\n\n" + mutedSt.Render(label)
+}
+
+// viewGrantPick renders the single-select grant picker for the
+// add-grant / remove-grant actions on a token detail. The list is
+// pre-filtered by prepareGrantPicker (vault's grants minus the
+// token's current grants, or the token's current grants).
+func (v *listView) viewGrantPick() string {
+	var b strings.Builder
+	idx := v.selectedIndex()
+	title := "Pick a grant to add"
+	if v.pendingGrantOp == "remove" {
+		title = "Pick a grant to remove"
+	}
+	b.WriteString(titleSt.Render(title) + "\n\n")
+	if idx >= 0 {
+		b.WriteString(mutedSt.Render("Target token: "+v.capabilities[idx].Subject+"  ("+v.capIDs[idx][:12]+"…)") + "\n\n")
+	}
+	for i, gid := range v.grantPickList {
+		prefix := "    "
+		label := gid
+		if i == v.grantPickCursor {
+			prefix = "  " + cursorSt.Render("➤ ")
+			label = cursorSt.Render(gid)
+		}
+		b.WriteString(prefix + label + "\n")
+	}
+	if v.err != "" {
+		b.WriteString("\n" + failSt.Render(v.err) + "\n")
+	}
+	b.WriteString("\n" + helpSt.Render("↑↓ move · enter apply · esc back"))
+	return b.String()
 }
 
 // silence unused imports pinned to future views
