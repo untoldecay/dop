@@ -555,7 +555,7 @@ func runTokenList(args []string) int {
 
 func runTokenRevoke(args []string) int {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: dop token revoke <name>")
+		fmt.Fprintln(os.Stderr, "usage: dop token revoke <subject|cap-id-prefix|lookup-prefix>")
 		return 2
 	}
 	query := args[0]
@@ -572,21 +572,33 @@ func runTokenRevoke(args []string) int {
 		return 1
 	}
 
-	// Match by subject; fail if ambiguous.
-	matched := ""
+	// v1.13 — match by subject OR capID-prefix OR lookup-prefix.
+	// Without this, two active caps sharing a subject (which can
+	// happen if an operator issues the same --name twice OR a TUI
+	// state carry-over slips through) cannot be revoked by name at
+	// all. prefix match lets callers always disambiguate.
+	var candidates []string
 	for id, c := range v.Capabilities {
-		if c.Subject == query && c.Status == capability.RecordStatusActive {
-			if matched != "" {
-				fmt.Fprintf(os.Stderr, "dop token revoke: subject %q matches multiple active capabilities; be more specific\n", query)
-				return 1
-			}
-			matched = id
+		if c.Status != capability.RecordStatusActive {
+			continue
+		}
+		if c.Subject == query || strings.HasPrefix(id, query) || strings.HasPrefix(c.LookupID, query) {
+			candidates = append(candidates, id)
 		}
 	}
-	if matched == "" {
-		fmt.Fprintf(os.Stderr, "dop token revoke: no active capability with subject %q\n", query)
+	if len(candidates) == 0 {
+		fmt.Fprintf(os.Stderr, "dop token revoke: no active capability matches %q\n", query)
 		return 1
 	}
+	if len(candidates) > 1 {
+		fmt.Fprintf(os.Stderr, "dop token revoke: %d active capabilities match %q — pass the cap-id or lookup prefix:\n", len(candidates), query)
+		for _, id := range candidates {
+			c := v.Capabilities[id]
+			fmt.Fprintf(os.Stderr, "  cap=%s  lookup=%s  subject=%s\n", id[:12], c.LookupID[:12], c.Subject)
+		}
+		return 1
+	}
+	matched := candidates[0]
 	c := v.Capabilities[matched]
 	c.Status = capability.RecordStatusRevoked
 	// Bump generation on revoke so any cached bundle is superseded.

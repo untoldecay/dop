@@ -265,6 +265,14 @@ type issueView struct {
 	grantByID     map[string]tuiGrantInfo
 	grantSelected map[string]bool // key = grant id
 	grantCursor   int             // index into grantRows (skips headers)
+
+	// v1.13: capture allow-file-keys prefs at construction time so
+	// handoff text + background-reseal watcher know whether this
+	// token is destined for a P-256 agent that can do ECDH.
+	prefs       Prefs
+	subject     string // v1.13: remembered name to drive reseal / detail polls
+	resealFlash string // v1.13: filled by the background auto-reseal watcher
+	pollCount   int    // v1.13: bounded loop for the auto-reseal poller
 }
 
 type grantRow struct {
@@ -285,7 +293,7 @@ type tuiGrantInfo struct {
 }
 
 func newIssueView(c *admin.Client, p *config.Paths) *issueView {
-	v := &issueView{client: c, paths: p, grantSelected: map[string]bool{}}
+	v := &issueView{client: c, paths: p, grantSelected: map[string]bool{}, prefs: LoadPrefs(p)}
 	v.expiryBuf.WriteString("72h") // sensible default
 	// Try to load available grants from the vault for UX.
 	v.grantList, v.grantRows, v.grantByID = loadGrantsForList(c, p)
@@ -405,7 +413,23 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.bearer = mm.bearer
 			v.pin = mm.pin
 			v.step = 100 // success screen
+			// v1.13 — if allow-file-keys is on, kick off a background
+			// poller that watches the record for binding.pubkey to
+			// appear (= claim completed) and then runs reseal. Only
+			// starts when the PIN flow is in play (step 100 with pin
+			// set); unbound tokens skip reseal (no agent to seal to).
+			if v.prefs.AllowFileKeys && v.pin != "" {
+				return v, v.watchForClaimAndReseal()
+			}
 		}
+		return v, nil
+	case autoResealTickMsg:
+		if v.resealFlash != "" || v.done {
+			return v, nil
+		}
+		return v, v.watchForClaimAndReseal()
+	case autoResealDoneMsg:
+		v.resealFlash = mm.msg
 		return v, nil
 	case tea.KeyMsg:
 		switch mm.String() {
@@ -508,6 +532,70 @@ func (v *issueView) advance() (tea.Model, tea.Cmd) {
 	return v, nil
 }
 
+// autoResealTickMsg triggers a vault re-read to check for a completed
+// claim. Scheduled on a 2-second cadence after issue when the
+// allow-file-keys toggle is on. Stops firing once the first reseal
+// lands (resealFlash set) or the view is dismissed.
+type autoResealTickMsg struct{}
+
+// autoResealDoneMsg carries the final flash message once the auto-
+// reseal finished (either successfully, or with a terminal error).
+type autoResealDoneMsg struct{ msg string }
+
+// watchForClaimAndReseal is scheduled from Update when the issue
+// succeeds and allow-file-keys is on. It reads the vault once, and
+// either (a) sees the agent's pubkey filled in on the just-issued
+// binding — in which case it fires reseal and emits the success
+// flash, or (b) doesn't yet — reschedules itself in 2 seconds.
+//
+// After ~90 seconds total (45 ticks) we give up quietly so the
+// bubbletea runtime doesn't spin forever if the agent never claimed.
+func (v *issueView) watchForClaimAndReseal() tea.Cmd {
+	subject := v.subject
+	paths := v.paths
+	client := v.client
+	// Give up after ~90s to bound the lifetime of the goroutine.
+	if v.pollCount >= 45 {
+		return func() tea.Msg {
+			return autoResealDoneMsg{msg: "auto-reseal timed out — run `dop token reseal " + subject + "` manually after the agent claims"}
+		}
+	}
+	v.pollCount++
+	return tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+		vlt, _, err := loadVaultForListing(client, paths)
+		if err != nil {
+			// Transient — just reschedule. If the daemon is really down
+			// the subsequent polls will fail the same way; we don't
+			// escalate because the user is already looking at a success
+			// screen.
+			return autoResealTickMsg{}
+		}
+		// Find the capability we just issued (match by subject +
+		// active status + pubkey filled). If none yet claimed, keep
+		// polling.
+		for _, c := range vlt.Capabilities {
+			if c.Status != "active" || c.Subject != subject {
+				continue
+			}
+			if c.Binding == nil || c.Binding.Pubkey == "" {
+				continue
+			}
+			// Claim completed. Run reseal.
+			self, _ := os.Executable()
+			cmd := exec.Command(self, "token", "reseal", c.LookupID[:12])
+			cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				return autoResealDoneMsg{msg: "auto-reseal failed: " + strings.TrimSpace(stderr.String())}
+			}
+			return autoResealDoneMsg{msg: "✓ auto-resealed — add-grant / remove-grant / rotate ready for `" + subject + "`"}
+		}
+		return autoResealTickMsg{}
+	})
+}
+
 func (v *issueView) issue() tea.Cmd {
 	name := strings.TrimSpace(v.nameBuf.String())
 	grants := strings.TrimSpace(v.grantsBuf.String())
@@ -515,13 +603,22 @@ func (v *issueView) issue() tea.Cmd {
 	if expires == "" {
 		expires = "72h"
 	}
+	v.subject = name
+	prefs := v.prefs
 	return func() tea.Msg {
 		self, err := os.Executable()
 		if err != nil {
 			return issueResultMsg{err: err.Error()}
 		}
 		cmd := exec.Command(self, "token", "issue", "--grants", grants, "--name", name, "--expires", expires)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmdEnv := append(os.Environ(), "DOP_NO_TUI=1")
+		// v1.13 — when the prefs toggle is on, flow DOP_ALLOW_FILE_KEYS
+		// through so the agent's claim can land a P-256 file-backed
+		// key (prereq for `token reseal` + direct availability).
+		if prefs.AllowFileKeys {
+			cmdEnv = append(cmdEnv, "DOP_ALLOW_FILE_KEYS=1")
+		}
+		cmd.Env = cmdEnv
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
@@ -571,12 +668,28 @@ func (v *issueView) View() string {
 			b.WriteString("  " + lipgloss.NewStyle().Bold(true).Render(v.pin) + "\n\n")
 			// v1.9.3: agent-optimized clipboard — direct instructions
 			// the agent can act on without back-and-forth.
+			// v1.13: when allow-file-keys is on, instruct the agent to
+			// claim with --key-type p256 so the token is immediately
+			// eligible for direct-availability (reseal / add-grant / rotate).
+			claimCmd := "DOP_TOKEN=" + v.bearer + " dop claim --json " + v.pin
+			if v.prefs.AllowFileKeys {
+				claimCmd = "DOP_TOKEN=" + v.bearer + " DOP_ALLOW_FILE_KEYS=1 dop claim --json --key-type p256 " + v.pin
+			}
 			handoff := "You have been given scoped credential access via DOP.\n\n" +
 				"Run this in your shell:\n\n" +
-				"  DOP_TOKEN=" + v.bearer + " dop claim --json " + v.pin
+				"  " + claimCmd
 			b.WriteString(mutedSt.Render(handoff) + "\n\n")
 			if copyToClipboard(handoff) {
 				b.WriteString(okSt.Render("agent handoff copied to clipboard — paste into the agent chat") + "\n")
+			}
+			if v.prefs.AllowFileKeys {
+				b.WriteString(mutedSt.Render("\nAllow-file-keys ON → this handoff forces P-256. After the agent claims,\n") +
+					mutedSt.Render("the TUI auto-reseals so add-grant / remove-grant / rotate work immediately.\n"))
+				if v.resealFlash != "" {
+					b.WriteString(okSt.Render("\n"+v.resealFlash) + "\n")
+				} else {
+					b.WriteString(helpSt.Render("\n⋯ waiting for agent claim to auto-reseal …") + "\n")
+				}
 			}
 		} else {
 			b.WriteString("Bearer (shown ONCE — copy now):\n")
@@ -812,7 +925,10 @@ type listLoadedMsg struct {
 	capIDs       []string
 	err          string
 }
-type listActionMsg struct{ err string }
+type listActionMsg struct {
+	err   string
+	flash string // v1.13 — surfaced in the list view for non-destructive actions
+}
 
 func (v *listView) load() tea.Msg {
 	vp := v.paths.Vault + "/vault.yaml"
@@ -886,6 +1002,11 @@ func (v *listView) currentActions() []listAction {
 	c := v.capabilities[idx]
 	acts := []listAction{{label: "View details", key: "d"}}
 	if c.Status == capability.RecordStatusActive {
+		// v1.13 — reseal is admin-only and only meaningful for
+		// claimed P-256 bearers. We offer it unconditionally; the
+		// CLI gatekeeps and prints a clear error on ineligible
+		// bearers.
+		acts = append(acts, listAction{label: "Reseal env", key: "s"})
 		acts = append(acts, listAction{label: "Revoke", key: "r", destructive: true})
 	}
 	acts = append(acts, listAction{label: "Back to list", key: "b"})
@@ -911,7 +1032,11 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.mode = listModeAction
 			return v, nil
 		}
-		v.flash = "revoked · synced with team — reloading list"
+		if mm.flash != "" {
+			v.flash = mm.flash
+		} else {
+			v.flash = "revoked · synced with team — reloading list"
+		}
 		v.mode = listModeList
 		v.err = ""
 		return v, v.load
@@ -1014,10 +1139,37 @@ func (v *listView) runAction(a listAction) (tea.Model, tea.Cmd) {
 	case "r":
 		v.mode = listModeConfirm
 		v.pendingAction = "revoke"
+	case "s":
+		// v1.13 — reseal doesn't need confirmation (non-destructive).
+		v.mode = listModeRun
+		return v, v.doReseal()
 	case "b":
 		v.mode = listModeList
 	}
 	return v, nil
+}
+
+// doReseal spawns `dop token reseal <capID-prefix>` for the selected
+// row. Only meaningful on claimed P-256 bearers; the CLI rejects
+// others with a clear message that the TUI surfaces as a flash.
+func (v *listView) doReseal() tea.Cmd {
+	idx := v.selectedIndex()
+	if idx < 0 {
+		return func() tea.Msg { return listActionMsg{err: "no selection"} }
+	}
+	target := v.capIDs[idx][:12]
+	return func() tea.Msg {
+		self, _ := os.Executable()
+		cmd := exec.Command(self, "token", "reseal", target)
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return listActionMsg{err: strings.TrimSpace(stderr.String())}
+		}
+		return listActionMsg{flash: strings.TrimSpace(stderr.String() + stdout.String())}
+	}
 }
 
 func (v *listView) updateConfirmMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1039,10 +1191,13 @@ func (v *listView) doRevoke() tea.Cmd {
 	if idx < 0 {
 		return func() tea.Msg { return listActionMsg{err: "no selection"} }
 	}
-	subject := v.capabilities[idx].Subject
+	// v1.13 — pass the cap-id prefix (unambiguous) rather than the
+	// subject. Two tokens sharing a subject would otherwise fail with
+	// "matches multiple" and be unrevokeable from the TUI.
+	target := v.capIDs[idx][:12]
 	return func() tea.Msg {
 		self, _ := os.Executable()
-		cmd := exec.Command(self, "token", "revoke", subject)
+		cmd := exec.Command(self, "token", "revoke", target)
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -1095,8 +1250,17 @@ func (v *listView) View() string {
 			prefix = "  " + cursorSt.Render("➤ ")
 			subj = cursorSt.Render(subj)
 		}
-		b.WriteString(fmt.Sprintf("%s%-24s  %s  gen=%d  expires=%s\n",
+		// v1.13 — surface the cap-id prefix in every row so two
+		// tokens sharing a subject are visibly distinct. Without
+		// this they looked identical in the TUI and only the first
+		// could be acted on.
+		capShort := v.capIDs[capIdx]
+		if len(capShort) > 8 {
+			capShort = capShort[:8]
+		}
+		b.WriteString(fmt.Sprintf("%s%-24s  %s  %s  gen=%d  expires=%s\n",
 			prefix, subj,
+			mutedSt.Render(capShort),
 			statusStyle.Render(c.Status),
 			c.Generation,
 			expiresDisplay(c.ExpiresAt, "2006-01-02")))

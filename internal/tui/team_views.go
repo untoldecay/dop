@@ -129,10 +129,14 @@ func (v *revokeView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (v *revokeView) doRevoke() tea.Cmd {
-	subject := v.items[v.cursor].subject
+	// v1.13 — pass the cap-id prefix (unambiguous). The CLI's
+	// `token revoke` accepts subject OR cap/lookup prefix, so the
+	// TUI picks whichever form it has handy — in this view the
+	// capID is the stable identifier even when subjects collide.
+	target := v.items[v.cursor].capID[:12]
 	return func() tea.Msg {
 		self, _ := os.Executable()
-		cmd := exec.Command(self, "token", "revoke", subject)
+		cmd := exec.Command(self, "token", "revoke", target)
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
