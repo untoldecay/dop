@@ -985,6 +985,25 @@ type listView struct {
 	grantPickCursor   int
 	grantPickSelected map[string]bool
 	pendingGrantOp    string
+
+	// v1.13.0-rc9 — repin form state. Two fields: bearer paste +
+	// PIN TTL (preset picker). pinResult is set once the CLI returns.
+	repinBearerBuf  strings.Builder
+	repinTTLCursor  int
+	repinField      int // 0 = bearer, 1 = TTL picker
+	repinNewPin     string
+	repinNewExpires string
+}
+
+// repinTTLPresets — common PIN validity windows offered on repin.
+var repinTTLPresets = []struct {
+	label string
+	value string
+}{
+	{"5m (default)", "5m"},
+	{"30m", "30m"},
+	{"2h", "2h"},
+	{"24h", "24h"},
 }
 
 // v1.10.0 — the tokens list is now an interactive picker. Modes:
@@ -1002,6 +1021,8 @@ const (
 	listModeRun        = 3
 	listModeDetail     = 4
 	listModeGrantPick  = 5 // v1.13.0-rc3 — add-grant / remove-grant picker
+	listModeRepin      = 6 // v1.13.0-rc9 — bearer + PIN TTL form, then result
+	listModeRepinDone  = 7 // v1.13.0-rc9 — show new PIN + copy to clipboard
 )
 
 func newListView(c *admin.Client, p *config.Paths) *listView {
@@ -1105,6 +1126,13 @@ func (v *listView) currentActions() []listAction {
 		// bearer isn't eligible.
 		acts = append(acts, listAction{label: "Add grant", key: "+"})
 		acts = append(acts, listAction{label: "Remove grant", key: "-"})
+		// v1.13.0-rc9 — Repin surfaced for PIN-bound bearers whose
+		// pubkey hasn't been filled in yet (= still waiting for the
+		// agent to claim). After claim the bundle's PIN hash is
+		// irrelevant, so we hide the action.
+		if c.Binding != nil && c.Binding.Kind == "pin" && c.Binding.Pubkey == "" {
+			acts = append(acts, listAction{label: "Repin (new PIN for unclaimed bearer)", key: "p"})
+		}
 		acts = append(acts, listAction{label: "Revoke", key: "r", destructive: true})
 	}
 	acts = append(acts, listAction{label: "Back to list", key: "b"})
@@ -1138,6 +1166,12 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.mode = listModeList
 		v.err = ""
 		return v, v.load
+	case repinSuccessMsg:
+		v.repinNewPin = mm.pin
+		v.repinNewExpires = mm.expires
+		v.repinBearerBuf.Reset() // scrub bearer from memory
+		v.mode = listModeRepinDone
+		return v, nil
 	case tea.KeyMsg:
 		if !v.loaded {
 			if mm.String() == "esc" || mm.String() == "ctrl+c" {
@@ -1154,6 +1188,12 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateConfirmMode(mm)
 		case listModeGrantPick:
 			return v.updateGrantPickMode(mm)
+		case listModeRepin:
+			return v.updateRepinMode(mm)
+		case listModeRepinDone:
+			// Any key dismisses — return to the list for a fresh load.
+			v.mode = listModeList
+			return v, v.load
 		case listModeDetail:
 			// v1.13.0-rc4 — nested esc: detail's parent is the action
 			// menu, so esc goes there (not all the way back to list).
@@ -1246,6 +1286,13 @@ func (v *listView) runAction(a listAction) (tea.Model, tea.Cmd) {
 		// v1.13 — reseal doesn't need confirmation (non-destructive).
 		v.mode = listModeRun
 		return v, v.doReseal()
+	case "p":
+		// v1.13.0-rc9 — Repin: open the bearer+TTL form.
+		v.mode = listModeRepin
+		v.repinField = 0
+		v.repinBearerBuf.Reset()
+		v.repinTTLCursor = 0
+		v.err = ""
 	case "+":
 		// v1.13.0-rc3 — load vault grants minus the ones already on
 		// this token, open the picker.
@@ -1420,6 +1467,135 @@ func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return v, nil
 }
 
+// updateRepinMode drives the two-field repin form: bearer paste
+// (field 0) + PIN TTL preset picker (field 1). On enter at field 1
+// shells out to `dop token repin`.
+func (v *listView) updateRepinMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch mm.String() {
+	case "esc":
+		v.mode = listModeAction
+		v.err = ""
+		return v, nil
+	case "tab":
+		v.repinField = (v.repinField + 1) % 2
+		return v, nil
+	case "shift+tab":
+		v.repinField = (v.repinField + 1) % 2
+		return v, nil
+	}
+	if v.repinField == 0 {
+		switch mm.String() {
+		case "enter":
+			if strings.TrimSpace(v.repinBearerBuf.String()) == "" {
+				v.err = "bearer required (paste it here)"
+				return v, nil
+			}
+			v.err = ""
+			v.repinField = 1
+			return v, nil
+		case "backspace":
+			s := v.repinBearerBuf.String()
+			if len(s) > 0 {
+				v.repinBearerBuf.Reset()
+				v.repinBearerBuf.WriteString(s[:len(s)-1])
+			}
+		default:
+			if len(mm.Runes) > 0 {
+				v.repinBearerBuf.WriteString(string(mm.Runes))
+			}
+		}
+		return v, nil
+	}
+	// Field 1 — TTL picker.
+	switch mm.String() {
+	case "up", "k":
+		if v.repinTTLCursor > 0 {
+			v.repinTTLCursor--
+		}
+	case "down", "j":
+		if v.repinTTLCursor < len(repinTTLPresets)-1 {
+			v.repinTTLCursor++
+		}
+	case "enter":
+		v.mode = listModeRun
+		return v, v.doRepin()
+	}
+	return v, nil
+}
+
+// doRepin shells out to `dop token repin` with the pasted bearer in
+// a temp token-file so it never shows up in the process list.
+func (v *listView) doRepin() tea.Cmd {
+	idx := v.selectedIndex()
+	if idx < 0 {
+		return func() tea.Msg { return listActionMsg{err: "no selection"} }
+	}
+	subject := v.capabilities[idx].Subject
+	bearer := strings.TrimSpace(v.repinBearerBuf.String())
+	ttl := repinTTLPresets[v.repinTTLCursor].value
+	return func() tea.Msg {
+		// Write bearer to a short-lived file so it's not visible in
+		// `ps aux` as a CLI arg. Mode 0600; removed in defer.
+		tmp, err := os.CreateTemp("", "dop-repin-*.tok")
+		if err != nil {
+			return listActionMsg{err: fmt.Sprintf("temp file: %v", err)}
+		}
+		defer os.Remove(tmp.Name())
+		_, _ = tmp.WriteString(bearer)
+		tmp.Close()
+		_ = os.Chmod(tmp.Name(), 0o600)
+
+		self, _ := os.Executable()
+		cmd := exec.Command(self, "token", "repin",
+			"--subject", subject,
+			"--token-file", tmp.Name(),
+			"--pin-ttl", ttl)
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return listActionMsg{err: strings.TrimSpace(stderr.String())}
+		}
+		// Parse the new PIN out of stdout. The CLI prints a block
+		// like: "new PIN: XX-XX-XX (expires 2026-10-02T...)"
+		combined := stdout.String() + stderr.String()
+		pin, exp := extractRepinPin(combined)
+		return repinSuccessMsg{pin: pin, expires: exp}
+	}
+}
+
+// extractRepinPin pulls the new PIN + validity window out of the
+// `dop token repin` output. The CLI prints:
+//   dop token repin: reissued PIN for X (valid 5m0s)
+//     new PIN (shown ONCE):
+//   XX-XX-XX
+func extractRepinPin(s string) (pin, expires string) {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if looksLikePIN(line) {
+			pin = line
+			continue
+		}
+		// Match "(valid N)" where N is a duration string.
+		if i := strings.Index(line, "(valid "); i >= 0 {
+			rest := line[i+len("(valid "):]
+			if j := strings.Index(rest, ")"); j >= 0 {
+				expires = strings.TrimSpace(rest[:j])
+			}
+		}
+	}
+	return
+}
+
+// repinSuccessMsg is emitted by doRepin when the CLI succeeds, so
+// the Update loop can transition to listModeRepinDone with the PIN
+// surfaced for display + clipboard copy.
+type repinSuccessMsg struct {
+	pin     string
+	expires string
+}
+
 // selectedGrantCount is the current size of the multi-select set.
 func (v *listView) selectedGrantCount() int {
 	n := 0
@@ -1489,6 +1665,10 @@ func (v *listView) View() string {
 		return v.viewRun()
 	case listModeGrantPick:
 		return v.viewGrantPick()
+	case listModeRepin:
+		return v.viewRepin()
+	case listModeRepinDone:
+		return v.viewRepinDone()
 	}
 
 	vis := v.visible()
@@ -1635,7 +1815,78 @@ func (v *listView) viewRun() string {
 	case "remove":
 		label = "running dop token remove-grant…"
 	}
+	// v1.13.0-rc9 — detect repin by looking at the buffer state at
+	// entry time (we clear it on success, so a non-empty buffer here
+	// means the form was in progress before Run).
+	if v.repinBearerBuf.Len() > 0 || v.repinField == 1 {
+		label = "running dop token repin…"
+	}
 	return titleSt.Render("Working…") + "\n\n" + mutedSt.Render(label)
+}
+
+// viewRepin renders the two-field repin form: bearer paste + TTL
+// picker. v1.13.0-rc9.
+func (v *listView) viewRepin() string {
+	var b strings.Builder
+	idx := v.selectedIndex()
+	b.WriteString(titleSt.Render("Repin — new PIN for unclaimed bearer") + "\n\n")
+	if idx >= 0 {
+		b.WriteString(mutedSt.Render("Target: "+v.capabilities[idx].Subject+"  ("+v.capIDs[idx][:12]+"…)") + "\n\n")
+	}
+	// Bearer field.
+	bearerStyle := mutedSt
+	if v.repinField == 0 {
+		bearerStyle = cursorSt
+	}
+	b.WriteString(bearerStyle.Render("Paste current bearer (tok_…)") + ":\n")
+	bearer := v.repinBearerBuf.String()
+	display := strings.Repeat("•", len(bearer))
+	b.WriteString("  " + display)
+	if v.repinField == 0 {
+		b.WriteString(cursorSt.Render("▎"))
+	}
+	b.WriteString("\n\n")
+	// TTL picker.
+	ttlStyle := mutedSt
+	if v.repinField == 1 {
+		ttlStyle = cursorSt
+	}
+	b.WriteString(ttlStyle.Render("New PIN valid for") + ":\n")
+	for i, p := range repinTTLPresets {
+		prefix := "    "
+		label := p.label
+		if v.repinField == 1 && i == v.repinTTLCursor {
+			prefix = "  " + cursorSt.Render("➤ ")
+			label = cursorSt.Render(p.label)
+		}
+		b.WriteString(prefix + label + "\n")
+	}
+	// Help / error footer.
+	switch v.repinField {
+	case 0:
+		b.WriteString("\n" + helpSt.Render("type/paste bearer · enter next · tab switch field · esc back"))
+	case 1:
+		b.WriteString("\n" + helpSt.Render("↑↓ move · enter submit · tab switch field · esc back"))
+	}
+	if v.err != "" {
+		b.WriteString("\n" + failSt.Render(v.err))
+	}
+	return b.String()
+}
+
+// viewRepinDone shows the new PIN prominently + copies the agent
+// handoff command to the clipboard. v1.13.0-rc9.
+func (v *listView) viewRepinDone() string {
+	var b strings.Builder
+	b.WriteString(titleSt.Render("✓ repinned") + "\n\n")
+	b.WriteString("New PIN (valid " + v.repinNewExpires + "):\n")
+	b.WriteString("  " + lipgloss.NewStyle().Bold(true).Render(v.repinNewPin) + "\n\n")
+	b.WriteString(mutedSt.Render("Share this with the agent along with the original bearer.") + "\n")
+	if copyToClipboard(v.repinNewPin) {
+		b.WriteString(okSt.Render("new PIN copied to clipboard") + "\n")
+	}
+	b.WriteString("\n" + helpSt.Render("any key back to list"))
+	return b.String()
 }
 
 // viewGrantPick renders the multi-select grant picker for the
