@@ -227,6 +227,9 @@ func runTokenIssue(args []string) int {
 	// typical chat session; `dop token repin` is the escape hatch when
 	// it still runs out.
 	pinTTL := fs.String("pin-ttl", "1h", "PIN validity window when --bind is default (shorter = tighter; use `dop token repin` if it expires)")
+	// v1.13.0-rc12 — issuing a bearer that contains protected grants
+	// requires the admin passphrase (same gate as creating one).
+	passphraseStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin instead of the tty (used when any of --grants is protected; TUI passes this)")
 	_ = fs.Parse(args)
 	_ = note
 
@@ -339,6 +342,30 @@ func runTokenIssue(args []string) int {
 		}
 		fmt.Fprintln(os.Stderr, "  fix: set an explicit env_prefix on the colliding grant(s), or drop one from --grants.")
 		return 1
+	}
+
+	// v1.13.0-rc12 — if any grant in the bundle is protected, we must
+	// own ALL protected grants + prove possession of the approval
+	// passphrase before issuing. A bearer-level gate is enough — the
+	// payload is only decoded on resolve, and the audit event ties the
+	// subject to the protected grant set.
+	var protectedGrants []string
+	for _, gid := range grants {
+		g := v.Grants[gid]
+		if !g.Protected {
+			continue
+		}
+		if err := requireProtectionOwner(client, "grant "+gid, g.Protected, g.Owner); err != nil {
+			fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+			return 1
+		}
+		protectedGrants = append(protectedGrants, gid)
+	}
+	if len(protectedGrants) > 0 {
+		if err := promptProtectionPassphrase(paths, fmt.Sprintf("approval passphrase (issue bearer containing %d protected grant(s)): ", len(protectedGrants)), *passphraseStdin); err != nil {
+			fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+			return 1
+		}
 	}
 
 	// Ensure vault_context exists (both in the vault AND as a sidecar
@@ -500,6 +527,11 @@ func runTokenIssue(args []string) int {
 			"expires_at": tokenExpiryDisplay(expiresAt),
 		},
 	})
+	// v1.13.0-rc12 — second trail for forensic correlation when a
+	// protected credential appears in a bundle.
+	if len(protectedGrants) > 0 {
+		logProtectedTokenIssue(paths, subject, protectedGrants)
+	}
 	fmt.Fprintf(os.Stderr, "dop token issue: issued %s (grants: %v, expires: %s)\n", subject, grants, tokenExpiryDisplay(expiresAt))
 	if pin != "" {
 		fmt.Fprintln(os.Stderr, "  bearer + PIN (shown ONCE — copy now):")
@@ -861,6 +893,25 @@ func loadVaultViaDaemon(client *admin.Client, paths *config.Paths) (*vault.Vault
 // saveVaultViaDaemon marshals vault and asks the daemon to encrypt +
 // write. Uses the admin's own age recipient from the session status.
 func saveVaultViaDaemon(client *admin.Client, paths *config.Paths, vaultPath string, v *vault.Vault) error {
+	// v1.13.0-rc12 — protected credentials: diff against the vault on
+	// disk BEFORE we write. Any protected-resource mutations by a
+	// non-owner get reverted + logged. This catches `dop vault edit`
+	// freehand YAML changes AND any CLI gap that forgot to call
+	// requireProtectionOwner upstream.
+	//
+	// Non-fatal: a daemon that can't read the on-disk vault (first-
+	// save bootstrap) just skips the check. If any changes were
+	// reverted, we print a loud feedback line but still proceed with
+	// the save (the reverted state is now safe to persist).
+	if existing, _ := vault.LoadPlain(vaultPath); existing != nil {
+		if reverted, err := enforceProtectedOnSave(client, paths, existing, v); err == nil && len(reverted) > 0 {
+			fmt.Fprintf(os.Stderr,
+				"dop: reverted %d protected-resource change(s) (owned by another admin): %s\n"+
+					"  See `dop watch --filter protected_bypass_attempt` for the audit trail.\n",
+				len(reverted), strings.Join(reverted, ", "))
+		}
+	}
+
 	// Bootstrap admin list on first save. Match by pubkey, not by
 	// hostname — the old `_, ok := v.Admins["self"]` check never
 	// matched because we always wrote under `hostname`. Consequence:
@@ -1695,12 +1746,19 @@ func runTokenRemoveGrant(args []string) int {
 // runTokenGrantMutation is the shared body of add-grant / remove-grant.
 // mode is "add" or "remove".
 func runTokenGrantMutation(args []string, mode string) int {
-	if len(args) != 2 {
-		fmt.Fprintf(os.Stderr, "usage: dop token %s-grant <lookup|subject> <grant-id>\n", mode)
+	// v1.13.0-rc12 — split flags from positional. Allow
+	// --passphrase-stdin anywhere; the two positionals must remain
+	// <lookup|subject> <grant-id>.
+	fs := flag.NewFlagSet("token "+mode+"-grant", flag.ExitOnError)
+	passphraseStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin (used when the grant is protected)")
+	_ = fs.Parse(args)
+	rest := fs.Args()
+	if len(rest) != 2 {
+		fmt.Fprintf(os.Stderr, "usage: dop token %s-grant [--passphrase-stdin] <lookup|subject> <grant-id>\n", mode)
 		return 2
 	}
-	needle := args[0]
-	grantID := args[1]
+	needle := rest[0]
+	grantID := rest[1]
 
 	paths, _ := config.Resolve()
 	client, err := requireAdminSession(paths)
@@ -1760,11 +1818,14 @@ func runTokenGrantMutation(args []string, mode string) int {
 	}
 
 	// Validate the grant argument.
+	var targetGrant vault.Grant
 	if mode == "add" {
-		if _, ok := v.Grants[grantID]; !ok {
+		g, ok := v.Grants[grantID]
+		if !ok {
 			fmt.Fprintf(os.Stderr, "dop token add-grant: no grant %q in vault (see `dop grant list`)\n", grantID)
 			return 1
 		}
+		targetGrant = g
 		for _, g := range match.Grants {
 			if g == grantID {
 				fmt.Fprintf(os.Stderr, "dop token add-grant: bearer already has grant %q\n", grantID)
@@ -1781,6 +1842,21 @@ func runTokenGrantMutation(args []string, mode string) int {
 		}
 		if !found {
 			fmt.Fprintf(os.Stderr, "dop token remove-grant: bearer doesn't have grant %q\n", grantID)
+			return 1
+		}
+		targetGrant = v.Grants[grantID]
+	}
+
+	// v1.13.0-rc12 — protected grant → owner + passphrase gate.
+	// Applies to both add (giving the bearer access) and remove
+	// (changing who sees what, which should still be an audited move).
+	if targetGrant.Protected {
+		if err := requireProtectionOwner(client, "grant "+grantID, targetGrant.Protected, targetGrant.Owner); err != nil {
+			fmt.Fprintf(os.Stderr, "dop token %s-grant: %v\n", mode, err)
+			return 1
+		}
+		if err := promptProtectionPassphrase(paths, fmt.Sprintf("approval passphrase (%s protected grant %s): ", mode, grantID), *passphraseStdin); err != nil {
+			fmt.Fprintf(os.Stderr, "dop token %s-grant: %v\n", mode, err)
 			return 1
 		}
 	}

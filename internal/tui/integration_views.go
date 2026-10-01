@@ -42,10 +42,16 @@ const (
 	integAddStepCred   = 3
 	integAddStepValue  = 4
 	integAddStepScope  = 5
-	integAddStepSave   = 6
-	integAddStepRun    = 7
-	integAddStepDone   = 100
-	integAddFieldCount = 7 // rows shown (0..6)
+	// v1.13.0-rc12 — new protection step mirrors the scope-note preset
+	// picker shape (two-item preset list, enter to pick, backspace to
+	// return). If "protected" is picked, we insert a passphrase step
+	// before Save; otherwise we jump straight to Save.
+	integAddStepProtect    = 6
+	integAddStepPassphrase = 7
+	integAddStepSave       = 8
+	integAddStepRun        = 9
+	integAddStepDone       = 100
+	integAddFieldCount     = 9 // rows shown (0..8)
 )
 
 type addIntegrationView struct {
@@ -80,6 +86,14 @@ type addIntegrationView struct {
 	scopePickCursor int
 	scopeMode       bool // true until operator picks "other…"
 
+	// v1.13.0-rc12 — Protection preset picker (step 6).
+	// Same shape as scopePresets. protectedChoice is set from the
+	// picker; passphraseBuf is the masked text input used when
+	// protectedChoice is true.
+	protectPickCursor int
+	protectedChoice   bool
+	passphraseBuf     strings.Builder
+
 	err   string
 	flash string
 	done  bool
@@ -96,6 +110,18 @@ var scopePresets = []struct {
 	{"read-write", "read-write"},
 	{"admin", "admin"},
 	{"other…", ""},
+}
+
+// v1.13.0-rc12 — protectionPresets mirrors scopePresets shape for the
+// new "Protection" step. Picking "protected" marks the integration
+// as owner-locked and forces the passphrase step before Save.
+var protectionPresets = []struct {
+	label string
+	value bool
+	hint  string
+}{
+	{"default", false, "any admin can modify"},
+	{"protected", true, "only you can modify, requires your approval passphrase"},
 }
 
 func newAddIntegrationView(c *admin.Client, p *config.Paths) *addIntegrationView {
@@ -168,8 +194,62 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				v.scopeBuf.Reset()
 				v.scopeBuf.WriteString(sel.value)
+				v.step = integAddStepProtect
+				return v, nil
+			}
+			return v, nil
+		}
+		// v1.13.0-rc12 — step 6 (Protection) is a two-item preset picker.
+		if v.step == integAddStepProtect {
+			switch mm.String() {
+			case "up", "k":
+				if v.protectPickCursor > 0 {
+					v.protectPickCursor--
+				}
+			case "down", "j":
+				if v.protectPickCursor < len(protectionPresets)-1 {
+					v.protectPickCursor++
+				}
+			case "enter":
+				sel := protectionPresets[v.protectPickCursor]
+				v.protectedChoice = sel.value
+				if sel.value {
+					v.step = integAddStepPassphrase
+					v.passphraseBuf.Reset()
+				} else {
+					v.step = integAddStepSave
+				}
+				return v, nil
+			}
+			return v, nil
+		}
+		// v1.13.0-rc12 — step 7 (passphrase) is a masked text input,
+		// only visited when protection = protected. Enter advances to
+		// Save; empty passphrase is refused.
+		if v.step == integAddStepPassphrase {
+			switch mm.String() {
+			case "enter":
+				if v.passphraseBuf.Len() == 0 {
+					v.err = "passphrase required for protected integrations"
+					return v, nil
+				}
+				v.err = ""
 				v.step = integAddStepSave
 				return v, nil
+			case "backspace":
+				s := v.passphraseBuf.String()
+				if len(s) > 0 {
+					v.passphraseBuf.Reset()
+					v.passphraseBuf.WriteString(s[:len(s)-1])
+				} else {
+					// Empty + backspace → return to protection picker.
+					v.step = integAddStepProtect
+				}
+				return v, nil
+			default:
+				if len(mm.Runes) > 0 {
+					v.passphraseBuf.WriteString(string(mm.Runes))
+				}
 			}
 			return v, nil
 		}
@@ -304,6 +384,22 @@ func (v *addIntegrationView) advance() (tea.Model, tea.Cmd) {
 		v.step = integAddStepScope
 	case integAddStepScope:
 		v.err = ""
+		v.step = integAddStepProtect
+	case integAddStepProtect:
+		// Non-picker path (tab/enter in text mode) — fall through to Save
+		// using whatever was last picked (defaults to default/unrestricted).
+		v.err = ""
+		if v.protectedChoice {
+			v.step = integAddStepPassphrase
+		} else {
+			v.step = integAddStepSave
+		}
+	case integAddStepPassphrase:
+		if v.passphraseBuf.Len() == 0 {
+			v.err = "passphrase required for protected integrations"
+			return v, nil
+		}
+		v.err = ""
 		v.step = integAddStepSave
 	case integAddStepSave:
 		v.step = integAddStepRun
@@ -322,6 +418,11 @@ func (v *addIntegrationView) save() tea.Cmd {
 	if scope == "" {
 		scope = "-"
 	}
+	// v1.13.0-rc12 — capture protected state + passphrase for the
+	// subprocess invocation. Passphrase travels via stdin (never on
+	// the command line) and only when protection is actually on.
+	protected := v.protectedChoice
+	passphrase := v.passphraseBuf.String()
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		args := []string{"integration", "add", "--name", name}
@@ -332,8 +433,14 @@ func (v *addIntegrationView) save() tea.Cmd {
 			args = append(args, "--base-url", url)
 		}
 		args = append(args, "--token", fmt.Sprintf("%s=%s:%s", cred, value, scope))
+		if protected {
+			args = append(args, "--protected", "--passphrase-stdin")
+		}
 		cmd := exec.Command(self, args...)
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		if protected {
+			cmd.Stdin = strings.NewReader(passphrase + "\n")
+		}
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -400,6 +507,11 @@ func (v *addIntegrationView) View() string {
 			nameHint = fmt.Sprintf("will be saved as %q (auto-normalized)", norm)
 		}
 	}
+	// v1.13.0-rc12 — Protection row value: show the picked label.
+	protectionLabel := "default"
+	if v.protectedChoice {
+		protectionLabel = "protected (owner-locked)"
+	}
 	rows := []struct {
 		label string
 		value string
@@ -412,6 +524,8 @@ func (v *addIntegrationView) View() string {
 		{"Credential name", v.credBuf.String(), "prefilled from the service name — edit if you'll have multiple credentials", false},
 		{"Credential value", v.valueBuf.String(), "the actual API key / token / password", true},
 		{"What it can do", v.scopeBuf.String(), "optional — e.g. read-only on /docs", false},
+		{"Protection", protectionLabel, "default = any admin can modify; protected = only you (requires passphrase)", false},
+		{"Passphrase", strings.Repeat("•", v.passphraseBuf.Len()), "your admin approval passphrase", true},
 	}
 	for i, r := range rows {
 		// v1.13.0-rc7 — hide the scope row inline when the preset
@@ -419,6 +533,16 @@ func (v *addIntegrationView) View() string {
 		// an empty "What it can do:" row AND the picker, which is
 		// confusing).
 		if i == integAddStepScope && v.step == integAddStepScope && v.scopeMode {
+			continue
+		}
+		// v1.13.0-rc12 — hide the Protection row inline when the
+		// preset picker renders below. Also hide the Passphrase row
+		// entirely until protection = protected (otherwise it clutters
+		// the common path).
+		if i == integAddStepProtect && v.step == integAddStepProtect {
+			continue
+		}
+		if i == integAddStepPassphrase && !v.protectedChoice {
 			continue
 		}
 		style := mutedSt
@@ -439,6 +563,20 @@ func (v *addIntegrationView) View() string {
 		b.WriteString("\n")
 		if i == v.step && r.hint != "" {
 			b.WriteString("    " + mutedSt.Render(r.hint) + "\n")
+		}
+	}
+
+	// v1.13.0-rc12 — Protection preset picker on step 6.
+	if v.step == integAddStepProtect {
+		b.WriteString("\n" + cursorSt.Render("Protection") + "\n")
+		for i, p := range protectionPresets {
+			prefix := "    "
+			label := p.label
+			if i == v.protectPickCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(p.label)
+			}
+			b.WriteString(prefix + label + "    " + mutedSt.Render(p.hint) + "\n")
 		}
 	}
 

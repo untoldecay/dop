@@ -71,7 +71,17 @@ func runIntegrationList(args []string) int {
 		if desc == "" {
 			desc = "-"
 		}
-		fmt.Printf("- %s  (%s)\n", n, desc)
+		// v1.13.0-rc12 — lock glyph + owner on protected rows so the
+		// state is scannable from the CLI, parity with the TUI list.
+		lock := ""
+		if integ.Protected {
+			owner := integ.Owner
+			if len(owner) > 8 {
+				owner = owner[:8] + "…"
+			}
+			lock = fmt.Sprintf(" 🔒 owner=%s", owner)
+		}
+		fmt.Printf("- %s  (%s)%s\n", n, desc, lock)
 		for k, vv := range integ.Metadata {
 			fmt.Printf("    %s: %s\n", k, vv)
 		}
@@ -121,6 +131,14 @@ func runIntegrationRemove(args []string) int {
 		return 1
 	}
 	*name = key
+	// v1.13.0-rc12 — refuse removal of a protected integration you
+	// don't own. Catches the common case cleanly; the save-guard is
+	// the belt-and-braces fallback for `vault edit` paths.
+	existing := v.Integrations[key]
+	if err := requireProtectionOwner(client, "integration "+key, existing.Protected, existing.Owner); err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration remove: %v\n", err)
+		return 1
+	}
 	// Check for referring grants (match both legacy verbatim refs and
 	// post-rc4 normalized refs).
 	referrers := []string{}
@@ -195,6 +213,12 @@ func runIntegrationRemoveToken(args []string) int {
 		return 1
 	}
 	integ := v.Integrations[key]
+	// v1.13.0-rc12 — refuse mutation on a protected integration you
+	// don't own.
+	if err := requireProtectionOwner(client, "integration "+key, integ.Protected, integ.Owner); err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration remove-token: %v\n", err)
+		return 1
+	}
 	// Validate every requested token exists before mutating.
 	missing := []string{}
 	for _, tn := range tokens {
@@ -284,6 +308,10 @@ func runIntegrationAdd(args []string) int {
 	fs.Var(&tokens, "token", "upstream token in the form NAME=VALUE:SCOPE_NOTE (repeatable)")
 	var metadata stringSliceFlag
 	fs.Var(&metadata, "metadata", "extra metadata KEY=VALUE (repeatable)")
+	// v1.13.0-rc12 — protected credentials. Admin passphrase required
+	// at save when set. Owner locked to current admin pubkey.
+	protected := fs.Bool("protected", false, "mark this integration as owner-locked — only the current admin can modify it (requires approval passphrase)")
+	passphraseStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin instead of the tty (used by scripts and TUI)")
 	_ = fs.Parse(args)
 
 	if *name == "" {
@@ -354,6 +382,12 @@ func runIntegrationAdd(args []string) int {
 	if exists {
 		action = "updated"
 		existing = v.Integrations[key]
+		// v1.13.0-rc12 — if the existing integration is protected,
+		// only its owner can touch it. Refuse before any mutation.
+		if err := requireProtectionOwner(client, "integration "+key, existing.Protected, existing.Owner); err != nil {
+			fmt.Fprintf(os.Stderr, "dop integration add: %v\n", err)
+			return 1
+		}
 		// Merge metadata.
 		if existing.Metadata != nil {
 			for k, v := range existing.Metadata {
@@ -375,15 +409,47 @@ func runIntegrationAdd(args []string) int {
 			*desc = existing.Description
 		}
 	}
+
+	// v1.13.0-rc12 — protection claim path.
+	// `--protected` on an EXISTING, already-protected (and owned-by-us)
+	// integration is a no-op flag preservation; on a non-protected one
+	// it's a flip. In both cases we gate on the approval passphrase
+	// and stamp Owner = current admin pubkey.
+	protect := *protected || existing.Protected
+	owner := existing.Owner
+	if protect {
+		if err := promptProtectionPassphrase(paths, "approval passphrase (protect integration "+key+"): ", *passphraseStdin); err != nil {
+			fmt.Fprintf(os.Stderr, "dop integration add: %v\n", err)
+			return 1
+		}
+		st, err := client.Status()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop integration add: session: %v\n", err)
+			return 1
+		}
+		// A flip-to-protected (or brand-new protected) always claims
+		// the CURRENT admin as owner. Previously-set Owner on an
+		// already-protected resource stays — enforcePathOnSave would
+		// have refused us upstream if it belonged to someone else.
+		if owner == "" {
+			owner = st.AdminPubkey
+		}
+	}
 	v.Integrations[key] = vault.Integration{
 		Description: *desc,
 		Metadata:    meta,
 		Tokens:      parsedTokens,
+		Protected:   protect,
+		Owner:       owner,
 	}
 
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
 		fmt.Fprintf(os.Stderr, "dop integration add: %v\n", err)
 		return 1
+	}
+	// Audit the protection claim (only on flip or new-protected).
+	if protect && !existing.Protected {
+		logProtectedCreate(paths, "integration", key, owner)
 	}
 	// Surface the normalized key so operators learn the saved form.
 	if key != *name {
@@ -648,8 +714,14 @@ func runGrantRemove(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop grant remove: %v\n", err)
 		return 1
 	}
-	if _, ok := v.Grants[*id]; !ok {
+	existing, ok := v.Grants[*id]
+	if !ok {
 		fmt.Fprintf(os.Stderr, "dop grant remove: no grant named %q\n", *id)
+		return 1
+	}
+	// v1.13.0-rc12 — refuse removal of a protected grant you don't own.
+	if err := requireProtectionOwner(client, "grant "+*id, existing.Protected, existing.Owner); err != nil {
+		fmt.Fprintf(os.Stderr, "dop grant remove: %v\n", err)
 		return 1
 	}
 	// v1.13.0-rc8 — cascade: remove the grant from every active
@@ -723,13 +795,28 @@ func runGrantAdd(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop grant add: integration %q has no token %q (has: %v)\n", *integration, *token, names)
 		return 1
 	}
+	// v1.13.0-rc12 — if the parent integration is protected, only its
+	// owner can create grants against it. (Someone else creating a
+	// grant that references protected tokens is effectively exfiltrating
+	// those tokens into their own bundle on next `token issue`.)
+	if err := requireProtectionOwner(client, "integration "+integKey, integ.Protected, integ.Owner); err != nil {
+		fmt.Fprintf(os.Stderr, "dop grant add: %v\n", err)
+		return 1
+	}
 
 	if v.Grants == nil {
 		v.Grants = map[string]vault.Grant{}
 	}
 	action := "added"
-	if _, ok := v.Grants[*id]; ok {
+	var existingGrant vault.Grant
+	if g, ok := v.Grants[*id]; ok {
 		action = "updated"
+		existingGrant = g
+		// Can't update a protected grant you don't own.
+		if err := requireProtectionOwner(client, "grant "+*id, g.Protected, g.Owner); err != nil {
+			fmt.Fprintf(os.Stderr, "dop grant add: %v\n", err)
+			return 1
+		}
 	}
 	// v1.13.0-rc4 — sanitize --env-prefix at save time so the vault
 	// stores the exact string that will become the env var at runtime.
@@ -742,12 +829,24 @@ func runGrantAdd(args []string) int {
 	if normalizedPrefix != "" {
 		normalizedPrefix = vault.SanitizeEnvKey(normalizedPrefix)
 	}
+	// v1.13.0-rc12 — grants inherit protection from the parent
+	// integration. If the parent is protected, the grant is too, and
+	// its Owner matches. Preserves any existing grant-level protection
+	// on update (shouldn't happen in practice — the integration path
+	// is the only source — but keeps the invariant stable).
+	protected := integ.Protected || existingGrant.Protected
+	owner := integ.Owner
+	if owner == "" {
+		owner = existingGrant.Owner
+	}
 	v.Grants[*id] = vault.Grant{
 		Integration: *integration,
 		Token:       *token,
 		EnvPrefix:   normalizedPrefix,
 		Projects:    projects,
 		Tags:        tags,
+		Protected:   protected,
+		Owner:       owner,
 	}
 	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
 		fmt.Fprintf(os.Stderr, "dop grant add: %v\n", err)

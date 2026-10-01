@@ -290,16 +290,22 @@ func (v *integrationListView) View() string {
 			prefix = "  " + cursorSt.Render("➤ ")
 			disp = cursorSt.Render(n)
 		}
+		// v1.13.0-rc7 — lipgloss.Width-based padding so the cursor
+		// style doesn't shrink the visible column (ANSI escapes don't
+		// count toward Width()).
+		// v1.13.0-rc12 — prepend a muted lock glyph on protected rows.
+		// It sits inside the padded column so alignment stays stable.
+		lock := "  "
+		if it.Protected {
+			lock = mutedSt.Render("🔒 ")
+		}
 		desc := it.Description
 		if desc == "" {
 			desc = "-"
 		}
 		nrefs := len(v.referrers(n))
-		// v1.13.0-rc7 — lipgloss.Width-based padding so the cursor
-		// style doesn't shrink the visible column (ANSI escapes don't
-		// count toward Width()).
 		dispPad := lipgloss.NewStyle().Width(20).Render(disp)
-		b.WriteString(prefix + dispPad + "  " +
+		b.WriteString(prefix + lock + dispPad + "  " +
 			mutedSt.Render(desc) +
 			fmt.Sprintf("  (grants=%d, tokens=%d)\n", nrefs, len(it.Tokens)))
 	}
@@ -357,6 +363,15 @@ func (v *integrationListView) viewDetail() string {
 		desc = "(none)"
 	}
 	b.WriteString(fmt.Sprintf("  description: %s\n", desc))
+	// v1.13.0-rc12 — surface owner-lock state. Short owner hex so the
+	// line stays readable; `dop team list` is the long-form view.
+	if it.Protected {
+		owner := it.Owner
+		if len(owner) > 8 {
+			owner = owner[:8] + "…"
+		}
+		b.WriteString(fmt.Sprintf("  protection: 🔒 owner-locked (owner=%s)\n", owner))
+	}
 	if len(it.Metadata) > 0 {
 		b.WriteString("  metadata:\n")
 		keys := make([]string, 0, len(it.Metadata))

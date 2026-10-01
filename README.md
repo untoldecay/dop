@@ -162,6 +162,14 @@ The parts that are deliberately **not** protected:
 - **Long-lived bearer in a screenshot** — if it's PIN-bound and unclaimed,
   it's fine (PIN expires in 5 min). If it's `--no-bind`, treat it like a
   password.
+- **Protected credentials vs. direct SOPS edit.** `--protected` makes a
+  credential owner-locked across DOP's commands + daemon save-guard; it is
+  **not** a cryptographic boundary. Any admin on the team can decrypt the
+  SOPS vault with their key and commit a hand-edited yaml outside of
+  `dop`. The guard works for all DOP-mediated paths (CLI, TUI, `vault edit`
+  through the daemon) and logs `protected_bypass_attempt` on reverts, but
+  a determined admin bypassing the daemon entirely is not stopped — only
+  surfaced. Treat Protected as a loud convention, not a lock.
 
 See [`_rules/_requirements/contracts/`](./_rules/_requirements/contracts/)
 for the 12 feature contracts with acceptance criteria + regression checks
