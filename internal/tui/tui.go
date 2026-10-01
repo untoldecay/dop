@@ -77,7 +77,8 @@ const (
 	screenDoctor
 	screenIssue
 	screenList
-	screenPending // v1.7: inline pending-claim approve panel
+	screenPending  // v1.7: inline pending-claim approve panel
+	screenSettings // v1.13: TUI prefs (allow-file-keys toggle)
 )
 
 type rootModel struct {
@@ -197,6 +198,7 @@ func (m *rootModel) rebuildMenu() {
 			{section: "Sync", label: "Push vault", hint: "git add/commit/push", fn: (*rootModel).openPush},
 			// System
 			{section: "System", label: "Status", hint: "session state", key: "s", fn: (*rootModel).openStatus},
+			{section: "System", label: "Settings", hint: "TUI preferences (file keys, …)", key: "S", fn: (*rootModel).openSettings},
 			{section: "System", label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
 			{section: "System", label: "Logout", hint: "end admin session", key: "o", fn: (*rootModel).doLogout},
 			{section: "System", label: "Uninstall", hint: "wipe every DOP file on this machine (keeps the vault repo)", fn: (*rootModel).openReset},
@@ -421,6 +423,12 @@ func (m *rootModel) openLogin() (tea.Model, tea.Cmd) {
 func (m *rootModel) openIssue() (tea.Model, tea.Cmd) {
 	m.child = newIssueView(m.adminClient, m.paths)
 	m.screen = screenIssue
+	return m, m.child.Init()
+}
+
+func (m *rootModel) openSettings() (tea.Model, tea.Cmd) {
+	m.child = newSettingsView(m.paths)
+	m.screen = screenSettings
 	return m, m.child.Init()
 }
 
