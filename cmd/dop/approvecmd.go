@@ -27,8 +27,9 @@ import (
 func runApprove(args []string) int {
 	fs := flag.NewFlagSet("approve", flag.ExitOnError)
 	pfromStdin := fs.Bool("passphrase-stdin", false, "read approval passphrase from stdin")
-	_ = fs.Parse(args)
-	if fs.NArg() != 1 {
+	flagArgs, posArgs := splitFlagsAndPositionals(fs, args)
+	_ = fs.Parse(flagArgs)
+	if len(posArgs) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: dop approve <SAS>")
 		return 2
 	}
@@ -47,7 +48,7 @@ func runApprove(args []string) int {
 	// v1.6.3 — locate the pending claim BEFORE prompting so we can
 	// share the rate limiter with the web endpoint. A same-uid attacker
 	// spinning `dop approve --passphrase-stdin` in a loop trips this.
-	sasArg := fs.Arg(0)
+	sasArg := posArgs[0]
 	pending, err := pendingclaim.FindBySAS(paths, sasArg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop approve: %v\n", err)
@@ -89,8 +90,9 @@ func runApprove(args []string) int {
 
 func runReject(args []string) int {
 	fs := flag.NewFlagSet("reject", flag.ExitOnError)
-	_ = fs.Parse(args)
-	if fs.NArg() != 1 {
+	flagArgs, posArgs := splitFlagsAndPositionals(fs, args)
+	_ = fs.Parse(flagArgs)
+	if len(posArgs) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: dop reject <SAS>")
 		return 2
 	}
@@ -98,7 +100,7 @@ func runReject(args []string) int {
 	// worst case a malicious rejection annoys the user, and same-user
 	// rejection would just force a retry. Approve, by contrast, is the
 	// dangerous direction.
-	return decideClaim(fs.Arg(0), pendingclaim.StateRejected)
+	return decideClaim(posArgs[0], pendingclaim.StateRejected)
 }
 
 // decideClaim is the shared body of approve + reject.

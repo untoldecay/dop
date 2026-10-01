@@ -67,28 +67,32 @@ type Tunnel struct {
 func KillStrays() int {
 	// Only match cloudflared quick tunnels dop would have started —
 	// don't touch named tunnels, other users' cloudflared, etc.
-	out, err := exec.Command("pgrep", "-f", "cloudflared tunnel --url http://localhost:").Output()
+	const pattern = "cloudflared tunnel --url http://localhost:"
+	out, err := exec.Command("pgrep", "-f", pattern).Output()
 	if err != nil {
 		return 0
 	}
-	killed := 0
+	signalled := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		pid := strings.TrimSpace(line)
 		if pid == "" {
 			continue
 		}
-		// SIGTERM first, then SIGKILL after a brief wait.
-		p, err := exec.Command("kill", "-TERM", pid).Output()
-		_ = p
-		if err == nil {
-			killed++
+		if err := exec.Command("kill", "-TERM", pid).Run(); err == nil {
+			signalled++
 		}
 	}
-	if killed > 0 {
-		time.Sleep(100 * time.Millisecond)
-		_, _ = exec.Command("pkill", "-KILL", "-f", "cloudflared tunnel --url http://localhost:").Output()
+	if signalled == 0 {
+		return 0
 	}
-	return killed
+	// Only escalate to SIGKILL if some processes actually survived
+	// the SIGTERM grace period. pgrep exits non-zero when nothing
+	// matches — that's our "clean exit" signal.
+	time.Sleep(100 * time.Millisecond)
+	if exec.Command("pgrep", "-f", pattern).Run() == nil {
+		_ = exec.Command("pkill", "-KILL", "-f", pattern).Run()
+	}
+	return signalled
 }
 
 // Available reports whether the cloudflared binary is on $PATH.

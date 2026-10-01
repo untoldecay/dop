@@ -78,7 +78,7 @@ func runTokenShow(args []string) int {
 	// Go's stdlib flag parser stops at the first non-flag arg, so
 	// `dop token show subject --json` would leave --json unparsed.
 	// Pre-split so either order works.
-	flagArgs, posArgs := splitFlagsAndPositionals(args)
+	flagArgs, posArgs := splitFlagsAndPositionals(fs, args)
 	_ = fs.Parse(flagArgs)
 	if len(posArgs) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: dop token show <lookup-id-prefix|subject> [--json]")
@@ -2049,20 +2049,48 @@ func runTokenRotate(args []string) int {
 	return 0
 }
 
-// splitFlagsAndPositionals separates a raw argv slice into things that
-// look like flags (start with "-") and things that don't. Used by
-// subcommands whose ergonomic form allows flags anywhere on the line
-// (Go's stdlib flag parser stops at the first non-flag arg).
+// splitFlagsAndPositionals separates a raw argv slice so that flags can
+// appear anywhere on the command line, not only before positionals (Go's
+// stdlib flag parser stops at the first non-flag arg).
 //
-// Doesn't try to be smart about `--flag value` — that only matters for
-// non-bool flags in the middle of the positionals, which none of the
-// show commands use. Both `--json` and `--all` are booleans.
-func splitFlagsAndPositionals(args []string) (flagArgs, posArgs []string) {
-	for _, a := range args {
-		if strings.HasPrefix(a, "-") {
-			flagArgs = append(flagArgs, a)
-		} else {
+// Handles all forms the stdlib parser accepts:
+//   -flag, --flag                (bool or absent-value)
+//   -flag=v, --flag=v            (attached value)
+//   -flag v, --flag v            (space-separated, for non-bool flags)
+//
+// It needs the FlagSet to tell bool flags apart from value flags — bool
+// flags don't consume the next arg. Unknown flags are passed through
+// as-is; flag.Parse will surface the error.
+//
+// `--` ends flag parsing (matches stdlib behaviour): everything after it
+// is treated as positional. This lets callers like `dop exec` pass a
+// child command whose args happen to start with `-`.
+func splitFlagsAndPositionals(fs *flag.FlagSet, args []string) (flagArgs, posArgs []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			posArgs = append(posArgs, args[i+1:]...)
+			return
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
 			posArgs = append(posArgs, a)
+			continue
+		}
+		flagArgs = append(flagArgs, a)
+		if strings.Contains(a, "=") {
+			continue
+		}
+		name := strings.TrimLeft(a, "-")
+		f := fs.Lookup(name)
+		if f == nil {
+			continue
+		}
+		if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+			continue
+		}
+		if i+1 < len(args) {
+			flagArgs = append(flagArgs, args[i+1])
+			i++
 		}
 	}
 	return

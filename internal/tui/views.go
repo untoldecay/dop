@@ -65,6 +65,16 @@ func remaining(ttl int64, refUnix int64) string {
 	return r.Round(time.Second).String()
 }
 
+// expiresDisplay renders a token ExpiresAt for the TUI. The CLI uses the
+// year-9999 sentinel to mean --expires=never (see tokenNeverSentinel in
+// cmd/dop/tokencmd.go); render that as "never" instead of "9999-12-31".
+func expiresDisplay(t time.Time, layout string) string {
+	if t.Year() >= 9999 {
+		return "never"
+	}
+	return t.Format(layout)
+}
+
 // ---------- Doctor ----------
 
 type doctorView struct {
@@ -579,7 +589,7 @@ func (v *issueView) View() string {
 		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
 		return b.String()
 	}
-	labels := []string{"Subject (label)", "Grants", "Expires (e.g. 72h, 30d)"}
+	labels := []string{"Subject (label)", "Grants", "Expires (e.g. 72h, 30d, never)"}
 	values := []string{v.nameBuf.String(), v.grantsBuf.String(), v.expiryBuf.String()}
 
 	// Steps 0 and 2 always render as text-entry. Step 1 renders as a
@@ -1089,7 +1099,7 @@ func (v *listView) View() string {
 			prefix, subj,
 			statusStyle.Render(c.Status),
 			c.Generation,
-			c.ExpiresAt.Format("2006-01-02")))
+			expiresDisplay(c.ExpiresAt, "2006-01-02")))
 	}
 
 	hidden := len(v.capabilities) - len(vis)
@@ -1153,7 +1163,7 @@ func (v *listView) viewDetail() string {
 	b.WriteString(fmt.Sprintf("  generation:    %d\n", c.Generation))
 	b.WriteString(fmt.Sprintf("  grants:        %v\n", c.Grants))
 	b.WriteString(fmt.Sprintf("  created_at:    %s\n", c.CreatedAt.Format("2006-01-02 15:04 MST")))
-	b.WriteString(fmt.Sprintf("  expires_at:    %s\n", c.ExpiresAt.Format("2006-01-02 15:04 MST")))
+	b.WriteString(fmt.Sprintf("  expires_at:    %s\n", expiresDisplay(c.ExpiresAt, "2006-01-02 15:04 MST")))
 	b.WriteString(fmt.Sprintf("  issued_by:     %s\n", c.IssuedBy))
 	if c.Binding != nil {
 		b.WriteString(fmt.Sprintf("  binding:       %s\n", c.Binding.Kind))

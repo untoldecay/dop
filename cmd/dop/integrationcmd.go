@@ -283,7 +283,7 @@ func runGrantShow(args []string) int {
 	asJSON := fs.Bool("json", false, "emit JSON instead of human-readable")
 	includeRevoked := fs.Bool("all", false, "also list revoked tokens (default: active only)")
 	// Allow flag-after-positional (Go's stdlib parser doesn't by default).
-	flagArgs, posArgs := splitFlagsAndPositionals(args)
+	flagArgs, posArgs := splitFlagsAndPositionals(fs, args)
 	_ = fs.Parse(flagArgs)
 	if len(posArgs) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: dop grant show <grant-id> [--all] [--json]")

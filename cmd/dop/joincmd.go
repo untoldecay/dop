@@ -33,14 +33,15 @@ func runAdminJoin(args []string) int {
 	fs := flag.NewFlagSet("admin join", flag.ExitOnError)
 	pfromStdin := fs.Bool("passphrase-stdin", false, "read passphrase(s) from stdin (testing only)")
 	timeoutStr := fs.String("timeout", "30m", "how long to wait for M1 to approve")
-	_ = fs.Parse(args)
+	flagArgs, posArgs := splitFlagsAndPositionals(fs, args)
+	_ = fs.Parse(flagArgs)
 
-	if fs.NArg() != 2 {
+	if len(posArgs) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: dop admin join <VAULT-URL> <PIN>")
 		return 2
 	}
-	vaultURL := fs.Arg(0)
-	pin := fs.Arg(1)
+	vaultURL := posArgs[0]
+	pin := posArgs[1]
 	waitTimeout, err := time.ParseDuration(*timeoutStr)
 	if err != nil || waitTimeout <= 0 {
 		fmt.Fprintf(os.Stderr, "dop admin join: bad --timeout: %v\n", err)
