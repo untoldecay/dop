@@ -459,18 +459,26 @@ func (v *addGrantView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (v *addGrantView) save() tea.Cmd {
 	id := strings.TrimSpace(v.idBuf.String())
 	env := strings.TrimSpace(v.envBuf.String())
-	if env == "" {
-		env = strings.ToUpper(v.integration)
-	}
 	integ := v.integration
 	tok := v.token
 	return func() tea.Msg {
 		self, _ := os.Executable()
-		cmd := exec.Command(self, "grant", "add",
+		args := []string{"grant", "add",
 			"--id", id,
 			"--integration", integ,
-			"--token", tok,
-			"--env-prefix", env)
+			"--token", tok}
+		// v1.13.0-rc4 — only pass --env-prefix when the user supplied
+		// one explicitly. Pre-rc4 the TUI auto-filled with
+		// strings.ToUpper(integration) which left spaces intact
+		// ("Boiler Pensieve" → "BOILER PENSIEVE" → literal space in
+		// the resulting env var name — invalid shell identifier).
+		// With empty env_prefix the grant falls through to
+		// EffectivePrefix() which runs SanitizeEnvKey on the
+		// auto-derived <INTEGRATION>_<TOKEN>.
+		if env != "" {
+			args = append(args, "--env-prefix", env)
+		}
+		cmd := exec.Command(self, args...)
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr

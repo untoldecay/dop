@@ -299,15 +299,15 @@ func (v *integrationListView) View() string {
 			prefix, disp, mutedSt.Render(desc), nrefs, len(it.Tokens)))
 	}
 
-	if v.flash != "" {
-		b.WriteString("\n" + okSt.Render(v.flash) + "\n")
-		v.flash = ""
-	}
-
+	// v1.13.0-rc4 — unified footer: help first, then flash/error.
 	if v.mode == integModeAction {
 		b.WriteString("\n" + v.renderActionMenu())
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter actions · d details · r remove · esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move · enter actions · esc back"))
+	}
+	if v.flash != "" {
+		b.WriteString("\n" + okSt.Render(v.flash))
+		v.flash = ""
 	}
 	return b.String()
 }
@@ -1039,15 +1039,15 @@ func (v *grantListView) View() string {
 			prefix, disp, g.Integration, g.Token, mutedSt.Render(projTag)))
 	}
 
-	if v.flash != "" {
-		b.WriteString("\n" + okSt.Render(v.flash) + "\n")
-		v.flash = ""
-	}
-
+	// v1.13.0-rc4 — unified footer: help first, then flash/error.
 	if v.mode == grantModeAction {
 		b.WriteString("\n" + v.renderActionMenu())
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter actions · d details · e edit · r remove · esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move · enter actions · esc back"))
+	}
+	if v.flash != "" {
+		b.WriteString("\n" + okSt.Render(v.flash))
+		v.flash = ""
 	}
 	return b.String()
 }

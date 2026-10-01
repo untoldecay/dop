@@ -43,6 +43,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -93,6 +94,80 @@ type Integration struct {
 	Tokens      map[string]Token  `yaml:"tokens,omitempty"`
 }
 
+// NormalizeIntegrationName returns the canonical form of an
+// operator-typed integration/service name used as the vault map key.
+// Pre-v1.13.0-rc4 the raw string went straight into the map, so
+// "Notion" added twice overwrote itself (same key, data lost) AND
+// "Notion" vs "notion" were two distinct entries. From rc4 onwards:
+//   - whitespace trimmed
+//   - lowercased (so "Notion" == "notion" at the key level)
+//   - non-alphanumeric (except '-' and '.') rewritten to '-'
+//   - repeated '-' collapsed, leading/trailing '-' trimmed
+//
+// Example: "Boiler Pensieve" → "boiler-pensieve"
+// Example: "Notion / Fray" → "notion-fray"
+// Keeps '-' and '.' legible for display; everything else sanitized.
+func NormalizeIntegrationName(s string) string {
+	s = strings.TrimSpace(s)
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+			out = append(out, c+32)
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '.':
+			out = append(out, c)
+		default:
+			out = append(out, '-')
+		}
+	}
+	// Collapse repeated hyphens.
+	dedup := make([]byte, 0, len(out))
+	prev := byte(0)
+	for _, c := range out {
+		if c == '-' && prev == '-' {
+			continue
+		}
+		dedup = append(dedup, c)
+		prev = c
+	}
+	// Trim leading/trailing hyphens.
+	for len(dedup) > 0 && dedup[0] == '-' {
+		dedup = dedup[1:]
+	}
+	for len(dedup) > 0 && dedup[len(dedup)-1] == '-' {
+		dedup = dedup[:len(dedup)-1]
+	}
+	return string(dedup)
+}
+
+// FindIntegrationKey returns the actual map key under which an
+// integration lives (handling pre-rc4 legacy keys that weren't
+// normalized), plus whether it exists. When nothing matches, the
+// returned key is the normalized form — the caller then uses it as
+// the storage key for a new entry.
+//
+// Lookup order: literal match (handles legacy data) → normalized
+// match → case/separator-insensitive scan.
+func (v *Vault) FindIntegrationKey(name string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	if _, ok := v.Integrations[name]; ok {
+		return name, true
+	}
+	norm := NormalizeIntegrationName(name)
+	if _, ok := v.Integrations[norm]; ok {
+		return norm, true
+	}
+	for k := range v.Integrations {
+		if NormalizeIntegrationName(k) == norm {
+			return k, true
+		}
+	}
+	return norm, false
+}
+
 type Token struct {
 	Value     string `yaml:"value"`
 	ScopeNote string `yaml:"scope_note,omitempty"`
@@ -117,9 +192,14 @@ type Grant struct {
 //  2. `<INTEGRATION>_<TOKEN>` uppercased, dashes/dots → underscores.
 //     Baking the token name into the default eliminates the collision
 //     footgun that plagued the pre-v1.8 default of `<INTEGRATION>` alone.
+//
+// v1.13.0-rc4: explicit env_prefix overrides ALSO run through
+// SanitizeEnvKey — pre-rc4 they passed through unsanitized, so an
+// operator could set `--env-prefix "BOILER PENSIEVE"` and get an
+// invalid env var at runtime (literal space in the key).
 func (g Grant) EffectivePrefix() string {
 	if g.EnvPrefix != "" {
-		return g.EnvPrefix
+		return SanitizeEnvKey(g.EnvPrefix)
 	}
 	return SanitizeEnvKey(g.Integration + "_" + g.Token)
 }

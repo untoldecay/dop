@@ -1507,10 +1507,14 @@ func resolveGrantsToEnv(v *vault.Vault, grants []string) map[string]string {
 		if !ok {
 			continue
 		}
-		integ, ok := v.Integrations[g.Integration]
+		// v1.13.0-rc4 — normalize-aware integration lookup so legacy
+		// grants that reference "Boiler Pensieve" still resolve against
+		// the stored "boiler-pensieve" integration (and vice versa).
+		integKey, ok := v.FindIntegrationKey(g.Integration)
 		if !ok {
 			continue
 		}
+		integ := v.Integrations[integKey]
 		tok, ok := integ.Tokens[g.Token]
 		if !ok {
 			continue
