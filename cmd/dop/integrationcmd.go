@@ -102,14 +102,19 @@ func runIntegrationRemove(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop integration remove: %v\n", err)
 		return 1
 	}
-	if _, ok := v.Integrations[*name]; !ok {
+	// v1.13.0-rc4 — normalize-aware lookup so "Notion" removes the
+	// integration even when its stored key is "notion".
+	key, ok := v.FindIntegrationKey(*name)
+	if !ok {
 		fmt.Fprintf(os.Stderr, "dop integration remove: no integration named %q\n", *name)
 		return 1
 	}
-	// Check for referring grants.
+	*name = key
+	// Check for referring grants (match both legacy verbatim refs and
+	// post-rc4 normalized refs).
 	referrers := []string{}
 	for gid, g := range v.Grants {
-		if g.Integration == *name {
+		if g.Integration == *name || vault.NormalizeIntegrationName(g.Integration) == key {
 			referrers = append(referrers, gid)
 		}
 	}
@@ -209,11 +214,50 @@ func runIntegrationAdd(args []string) int {
 	if v.Integrations == nil {
 		v.Integrations = map[string]vault.Integration{}
 	}
+	// v1.13.0-rc4 — MERGE into an existing integration if one by the
+	// same name already exists. Pre-rc4, this path overwrote the whole
+	// Integration struct (losing any previously-stored tokens that
+	// weren't on the current command line). Field case: Cam added
+	// "Notion" twice and lost the first add's tokens silently.
+	//
+	// Also normalizes the integration name: "Boiler Pensieve" → "boiler-pensieve",
+	// "Notion" and "notion" collapse to the same key, no more invalid
+	// chars propagating into derived env var names.
+	//
+	// New semantics:
+	//   - metadata keys are UPDATED (new values win; untouched keys stay)
+	//   - description is updated when non-empty (empty keeps existing)
+	//   - tokens are merged by name (new values replace existing; untouched
+	//     tokens stay). Removing a token still requires a separate
+	//     `dop integration remove-token` (not yet added) or vault edit.
+	key, exists := v.FindIntegrationKey(*name)
 	action := "added"
-	if _, exists := v.Integrations[*name]; exists {
+	var existing vault.Integration
+	if exists {
 		action = "updated"
+		existing = v.Integrations[key]
+		// Merge metadata.
+		if existing.Metadata != nil {
+			for k, v := range existing.Metadata {
+				if _, newer := meta[k]; !newer {
+					meta[k] = v
+				}
+			}
+		}
+		// Merge tokens: new values win; untouched entries stay.
+		if existing.Tokens != nil {
+			for tn, tv := range existing.Tokens {
+				if _, newer := parsedTokens[tn]; !newer {
+					parsedTokens[tn] = tv
+				}
+			}
+		}
+		// Description: keep existing when new is empty.
+		if *desc == "" {
+			*desc = existing.Description
+		}
 	}
-	v.Integrations[*name] = vault.Integration{
+	v.Integrations[key] = vault.Integration{
 		Description: *desc,
 		Metadata:    meta,
 		Tokens:      parsedTokens,
@@ -223,7 +267,12 @@ func runIntegrationAdd(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop integration add: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "dop integration add: %s integration %q with %d token(s)\n", action, *name, len(parsedTokens))
+	// Surface the normalized key so operators learn the saved form.
+	if key != *name {
+		fmt.Fprintf(os.Stderr, "dop integration add: %s integration %q (saved as %q) with %d token(s)\n", action, *name, key, len(parsedTokens))
+	} else {
+		fmt.Fprintf(os.Stderr, "dop integration add: %s integration %q with %d token(s)\n", action, *name, len(parsedTokens))
+	}
 	return 0
 }
 
@@ -515,12 +564,17 @@ func runGrantAdd(args []string) int {
 		return 1
 	}
 
-	// Validate integration + token exist.
-	integ, ok := v.Integrations[*integration]
+	// v1.13.0-rc4 — resolve the integration key through FindIntegrationKey
+	// so "Boiler Pensieve", "boiler-pensieve", "BOILER_PENSIEVE" all map to
+	// the same stored integration. Also normalizes the stored
+	// Grant.Integration reference so grants stay in sync with the key.
+	integKey, ok := v.FindIntegrationKey(*integration)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "dop grant add: unknown integration %q\n", *integration)
 		return 1
 	}
+	integ := v.Integrations[integKey]
+	*integration = integKey
 	if _, ok := integ.Tokens[*token]; !ok {
 		names := make([]string, 0, len(integ.Tokens))
 		for k := range integ.Tokens {
@@ -537,10 +591,21 @@ func runGrantAdd(args []string) int {
 	if _, ok := v.Grants[*id]; ok {
 		action = "updated"
 	}
+	// v1.13.0-rc4 — sanitize --env-prefix at save time so the vault
+	// stores the exact string that will become the env var at runtime.
+	// Pre-rc4 the operator could set `--env-prefix "BOILER PENSIEVE"`
+	// and the space would propagate into the resulting env var name.
+	// EffectivePrefix() also sanitizes defensively but normalizing on
+	// save keeps `dop grant show` honest about what will actually be
+	// delivered.
+	normalizedPrefix := *envPrefix
+	if normalizedPrefix != "" {
+		normalizedPrefix = vault.SanitizeEnvKey(normalizedPrefix)
+	}
 	v.Grants[*id] = vault.Grant{
 		Integration: *integration,
 		Token:       *token,
-		EnvPrefix:   *envPrefix,
+		EnvPrefix:   normalizedPrefix,
 		Projects:    projects,
 		Tags:        tags,
 	}

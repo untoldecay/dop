@@ -1072,8 +1072,11 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case listModeGrantPick:
 			return v.updateGrantPickMode(mm)
 		case listModeDetail:
-			// any key → back to list
-			v.mode = listModeList
+			// v1.13.0-rc4 — nested esc: detail's parent is the action
+			// menu, so esc goes there (not all the way back to list).
+			// Any other key also returns to action menu — users
+			// typically expect "any key" from a view-only pane.
+			v.mode = listModeAction
 		}
 	}
 	return v, nil
@@ -1391,18 +1394,20 @@ func (v *listView) View() string {
 		b.WriteString(mutedSt.Render(fmt.Sprintf("\n  (%d revoked hidden — press `a` to show)\n", hidden)))
 	}
 
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err) + "\n")
-	}
-	if v.flash != "" {
-		b.WriteString("\n" + okSt.Render(v.flash) + "\n")
-		v.flash = ""
-	}
-
+	// v1.13.0-rc4 — unified list-view footer: help line first, then
+	// error (red) + flash (green) below so operators always see the
+	// controls and any status at the same place.
 	if v.mode == listModeAction {
 		b.WriteString("\n" + v.renderActionMenu())
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter actions · d details · r revoke · a all · esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move · enter actions · esc back"))
+	}
+	if v.err != "" {
+		b.WriteString("\n" + failSt.Render(v.err))
+	}
+	if v.flash != "" {
+		b.WriteString("\n" + okSt.Render(v.flash))
+		v.flash = ""
 	}
 	return b.String()
 }
