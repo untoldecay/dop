@@ -621,6 +621,16 @@ func runTokenRevoke(args []string) int {
 	if err := os.Remove(recordPath); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "dop token revoke: warning: %v\n", err)
 	}
+	// v1.13 — also remove the local agent key file(s) for this
+	// bearer. Only runs on the machine where the agent claimed; a
+	// remote admin running revoke never sees these files, so it's a
+	// no-op there. Covers both ed25519 and p256 file-backed keys.
+	for _, suffix := range []string{".key", ".p256"} {
+		p := filepath.Join(paths.Root, "agent-keys", c.LookupID+suffix)
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "dop token revoke: warning: local agent key %s: %v\n", p, err)
+		}
+	}
 
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
 		fmt.Fprintf(os.Stderr, "dop token revoke: %v\n", err)

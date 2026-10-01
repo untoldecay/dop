@@ -128,13 +128,21 @@ func runAgentList(args []string) int {
 	}
 	fmt.Printf("agent keys on this machine: %d total (%d Secure Enclave · %d file-backed)\n\n", len(entries), seCount, fileCount)
 	fmt.Printf("%-16s  %-9s  %-16s  %s\n", "LOOKUP", "KEY_TYPE", "BACKEND", "STATUS")
+	orphanCount := 0
 	for _, e := range entries {
 		status := "active"
-		if e.PendingDelete {
+		switch {
+		case e.PendingDelete:
 			status = fmt.Sprintf("grace-delete (%s left)", time.Until(e.DeleteAfter).Round(time.Minute))
+		case e.Orphan:
+			status = "orphan (no matching record — bearer revoked or vault lost)"
+			orphanCount++
 		}
 		fmt.Printf("%-16s  %-9s  %-16s  %s\n",
 			shortLookup(e.LookupID), e.KeyType, e.Backend, status)
+	}
+	if orphanCount > 0 {
+		fmt.Printf("\n%d orphan key(s) — clean with `dop agent sweep` or `dop agent delete <lookup>`.\n", orphanCount)
 	}
 	return 0
 }
@@ -302,12 +310,50 @@ func runAgentSweep(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop agent sweep: %v\n", err)
 		return 1
 	}
-	if n == 0 {
-		fmt.Fprintln(os.Stderr, "dop agent sweep: nothing to remove (no expired grace markers).")
-	} else {
+	// v1.13 — also remove orphan agent key files (post-revoke
+	// leftovers). Grace-pending keys are skipped here because
+	// sweepLegacyGrace already handles them.
+	o, err := sweepOrphanAgentKeys(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop agent sweep: orphan pass: %v\n", err)
+		return 1
+	}
+	switch {
+	case n == 0 && o == 0:
+		fmt.Fprintln(os.Stderr, "dop agent sweep: nothing to remove.")
+	case n > 0 && o == 0:
 		fmt.Fprintf(os.Stderr, "dop agent sweep: removed %d expired legacy key file(s).\n", n)
+	case n == 0 && o > 0:
+		fmt.Fprintf(os.Stderr, "dop agent sweep: removed %d orphan agent key file(s).\n", o)
+	default:
+		fmt.Fprintf(os.Stderr, "dop agent sweep: removed %d expired legacy + %d orphan agent key file(s).\n", n, o)
 	}
 	return 0
+}
+
+// sweepOrphanAgentKeys removes any agent key file whose matching
+// record sidecar is missing. Used by `dop agent sweep` (v1.13+) to
+// clean up after `dop token revoke` which deletes the record but
+// leaves the key behind.
+func sweepOrphanAgentKeys(paths *config.Paths) (int, error) {
+	entries, err := collectAgentKeys(paths)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, e := range entries {
+		if !e.Orphan || e.PendingDelete {
+			continue
+		}
+		if e.Path == "" {
+			continue
+		}
+		if err := os.Remove(e.Path); err != nil && !os.IsNotExist(err) {
+			return removed, fmt.Errorf("remove %s: %w", e.Path, err)
+		}
+		removed++
+	}
+	return removed, nil
 }
 
 // --- helpers ---
@@ -323,6 +369,13 @@ type AgentKeyEntry struct {
 	Path          string    `json:"path,omitempty"`
 	PendingDelete bool      `json:"pending_delete,omitempty"`
 	DeleteAfter   time.Time `json:"delete_after,omitempty"`
+
+	// v1.13 — Orphan is true when the agent key file lingers on disk
+	// but there's no matching active record sidecar in the vault
+	// (the bearer was revoked, the record file was deleted, etc.).
+	// Reported with status "orphan" in `dop agent list`, cleaned by
+	// `dop agent sweep` or when `dop token revoke` is run locally.
+	Orphan bool `json:"orphan,omitempty"`
 }
 
 // collectAgentKeys walks the agent-keys/ directory (file-backed keys)
@@ -374,10 +427,30 @@ func collectAgentKeys(paths *config.Paths) ([]AgentKeyEntry, error) {
 				ent.DeleteAfter = until
 			}
 		}
+		// v1.13 — orphan detection. A key is orphan when there's no
+		// matching active record sidecar in the vault. Catches
+		// post-revoke / post-vault-wipe leftovers that previously
+		// just lingered as "active" in `dop agent list`.
+		//
+		// Grace-pending keys are allowed to be "active without record"
+		// mid-migration — don't double-flag.
+		if !ent.PendingDelete && !hasActiveRecordSidecar(paths, lookupID) {
+			ent.Orphan = true
+		}
 		out = append(out, ent)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LookupID < out[j].LookupID })
 	return out, nil
+}
+
+// hasActiveRecordSidecar is true iff the vault's capabilities/
+// directory contains <lookupID>.record. The record is deleted by
+// `dop token revoke` (via syncSidecars dropping revoked records),
+// so missing-record === "this agent key no longer backs any bearer".
+func hasActiveRecordSidecar(paths *config.Paths, lookupID string) bool {
+	p := filepath.Join(paths.Vault, "capabilities", lookupID+".record")
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 func matchLookupPrefix(entries []AgentKeyEntry, prefix string) (*AgentKeyEntry, error) {
