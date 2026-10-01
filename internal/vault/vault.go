@@ -88,10 +88,19 @@ type Admin struct {
 }
 
 // Integration models one upstream service and its tokens.
+//
+// v1.13.0-rc12: Protected + Owner. When Protected is true, only the
+// admin whose ed25519 pubkey matches Owner can mutate the integration
+// (edit metadata, add/remove tokens, attach grants). The daemon
+// reverts non-owner mutations at save time and logs
+// EventProtectedBypassAttempt. Grants pointing at a protected
+// integration inherit the Protected + Owner fields automatically.
 type Integration struct {
 	Description string            `yaml:"description,omitempty"`
 	Metadata    map[string]string `yaml:"metadata,omitempty"`
 	Tokens      map[string]Token  `yaml:"tokens,omitempty"`
+	Protected   bool              `yaml:"protected,omitempty"`
+	Owner       string            `yaml:"owner,omitempty"` // ed25519 pubkey hex
 }
 
 // NormalizeIntegrationName returns the canonical form of an
@@ -184,6 +193,12 @@ type Grant struct {
 	EnvPrefix   string   `yaml:"env_prefix,omitempty"`
 	Projects    []string `yaml:"projects,omitempty"`
 	Tags        []string `yaml:"tags,omitempty"`
+	// v1.13.0-rc12 — inherited from the referenced Integration. The
+	// grant-add path copies Integration.Protected/Owner at save time
+	// so the daemon doesn't need to do a two-hop lookup on every
+	// mutation check.
+	Protected bool   `yaml:"protected,omitempty"`
+	Owner     string `yaml:"owner,omitempty"`
 }
 
 // EffectivePrefix returns the env-var prefix DOP should use when

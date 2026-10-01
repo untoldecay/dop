@@ -38,6 +38,12 @@ const (
 	EventInviteComplete = "invite_complete" // M1 accepts, admin added
 	// v1.11 — agent key operations.
 	EventAgentMigrated = "agent_migrated" // ed25519 → P-256 re-enrollment
+	// v1.13.0-rc12 — protected credentials (owner-locked integrations
+	// + their grants). Any admin can see these events; they're the
+	// trust-but-verify half of the Shape B design.
+	EventProtectedCreate        = "protected_create"         // integration or grant marked protected
+	EventProtectedTokenIssue    = "protected_token_issue"    // bearer issued containing a protected grant
+	EventProtectedBypassAttempt = "protected_bypass_attempt" // daemon reverted a non-owner's protected mutation
 )
 
 // Event is one line in the log.
