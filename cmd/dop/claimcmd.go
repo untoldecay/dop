@@ -76,7 +76,8 @@ func runClaim(args []string) int {
 	// DOP_ALLOW_FILE_KEYS=1, or macOS dev builds without codesign).
 	keyTypeFlag := fs.String("key-type", "", "\"p256\" | \"ed25519\" | \"\" (auto). p256 required for direct grant edits (v1.12)")
 	asJSON := fs.Bool("json", false, "emit JSONL events (pending, result) on stdout instead of human-readable output on stderr")
-	_ = fs.Parse(args)
+	flagArgs, posArgs := splitFlagsAndPositionals(fs, args)
+	_ = fs.Parse(flagArgs)
 
 	// Default bind depends on tunnel mode: 127.0.0.1 is fine when the
 	// tunnel is the reachability path; --no-tunnel needs 0.0.0.0 so a
@@ -92,7 +93,7 @@ func runClaim(args []string) int {
 	// --cancel and --status don't need a PIN; they operate on whatever
 	// pending claim exists for the current bearer.
 	if *cancel || *status {
-		if fs.NArg() != 0 {
+		if len(posArgs) != 0 {
 			fmt.Fprintln(os.Stderr, "usage: dop claim --cancel   OR   dop claim --status")
 			return 2
 		}
@@ -108,11 +109,11 @@ func runClaim(args []string) int {
 		return runClaimStatus(paths, bearer, *asJSON)
 	}
 
-	if fs.NArg() != 1 {
+	if len(posArgs) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: dop claim <PIN>")
 		return 2
 	}
-	pinArg := fs.Arg(0)
+	pinArg := posArgs[0]
 
 	bearer, err := readBearer(*tokenFile)
 	if err != nil {
@@ -124,7 +125,7 @@ func runClaim(args []string) int {
 
 	// --remote path: no daemon required, stage the claim in the vault.
 	if *remote {
-		return runClaimRemote(paths, *tokenFile, fs.Arg(0))
+		return runClaimRemote(paths, *tokenFile, pinArg)
 	}
 
 	client, err := requireAdminSession(paths)
