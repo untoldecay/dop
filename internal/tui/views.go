@@ -273,6 +273,14 @@ type issueView struct {
 	subject     string // v1.13: remembered name to drive reseal / detail polls
 	resealFlash string // v1.13: filled by the background auto-reseal watcher
 	pollCount   int    // v1.13: bounded loop for the auto-reseal poller
+
+	// v1.13.0-rc5 — expiry presets. Step 2 is a picker over
+	// expiryPresets. Last entry is "custom…" which drops into the
+	// text input (expiryBuf). expiryPickCursor tracks which preset
+	// is highlighted; expiryCustom is true once the user picks
+	// custom and starts typing.
+	expiryPickCursor int
+	expiryCustom     bool
 }
 
 type grantRow struct {
@@ -304,7 +312,24 @@ func newIssueView(c *admin.Client, p *config.Paths) *issueView {
 			break
 		}
 	}
+	// v1.13.0-rc5: start expiry picker on 72h (the current default).
+	v.expiryPickCursor = 0
 	return v
+}
+
+// expiryPresets lists the preset expiry choices offered on the issue
+// step 2. The last entry drops into the free-text input via
+// expiryCustom.
+var expiryPresets = []struct {
+	label string
+	value string
+}{
+	{"72h  (3 days — default)", "72h"},
+	{"7d   (one week)", "7d"},
+	{"30d  (one month)", "30d"},
+	{"1y   (one year — 365d)", "365d"},
+	{"never (no expiry — revoke manually)", "never"},
+	{"custom…", ""},
 }
 
 // grantsListMode returns true when we should show the picker instead
@@ -489,6 +514,32 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return v, nil
 		}
+		// v1.13.0-rc5 — expiry step: preset picker, unless the user
+		// has dropped into the custom text input.
+		if v.step == 2 && !v.expiryCustom {
+			switch mm.String() {
+			case "up", "k":
+				if v.expiryPickCursor > 0 {
+					v.expiryPickCursor--
+				}
+			case "down", "j":
+				if v.expiryPickCursor < len(expiryPresets)-1 {
+					v.expiryPickCursor++
+				}
+			case "enter", " ":
+				sel := expiryPresets[v.expiryPickCursor]
+				if sel.value == "" {
+					// custom — switch to text input, prefill empty.
+					v.expiryCustom = true
+					v.expiryBuf.Reset()
+					return v, nil
+				}
+				v.expiryBuf.Reset()
+				v.expiryBuf.WriteString(sel.value)
+				return v.advance()
+			}
+			return v, nil
+		}
 		switch mm.String() {
 		case "enter":
 			return v.advance()
@@ -498,6 +549,9 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(s) > 0 {
 				buf.Reset()
 				buf.WriteString(s[:len(s)-1])
+			} else if v.step == 2 && v.expiryCustom {
+				// empty custom buffer + backspace → return to preset picker.
+				v.expiryCustom = false
 			}
 		default:
 			if len(mm.Runes) > 0 {
@@ -702,16 +756,23 @@ func (v *issueView) View() string {
 		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
 		return b.String()
 	}
-	labels := []string{"Subject (label)", "Grants", "Expires (e.g. 72h, 30d, never)"}
+	labels := []string{"Subject (label)", "Grants", "Expires"}
 	values := []string{v.nameBuf.String(), v.grantsBuf.String(), v.expiryBuf.String()}
 
-	// Steps 0 and 2 always render as text-entry. Step 1 renders as a
+	// Steps 0 and 2 render specially. Step 1 renders as a
 	// picker when the vault has grants, otherwise text-entry.
+	// v1.13.0-rc5: step 2 defaults to a preset picker; drops into
+	// text input only when the user picks "custom…".
 	pickerAtStep1 := v.step == 1 && v.grantsListMode()
+	pickerAtStep2 := v.step == 2 && !v.expiryCustom
 
 	for i, l := range labels {
 		if i == 1 && pickerAtStep1 {
 			// Skip the text-entry row for grants; the picker renders below.
+			continue
+		}
+		if i == 2 && pickerAtStep2 {
+			// Skip; the preset picker renders below.
 			continue
 		}
 		style := mutedSt
@@ -789,13 +850,31 @@ func (v *issueView) View() string {
 		b.WriteString("\n" + mutedSt.Render("no grants defined in vault — type them manually") + "\n")
 	}
 
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err) + "\n")
+	// v1.13.0-rc5: expiry preset picker on step 2 (unless custom).
+	if pickerAtStep2 {
+		b.WriteString("\n" + cursorSt.Render("Expires") + "\n")
+		for i, p := range expiryPresets {
+			prefix := "    "
+			label := p.label
+			if i == v.expiryPickCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(p.label)
+			}
+			b.WriteString(prefix + label + "\n")
+		}
 	}
+
 	if pickerAtStep1 {
 		b.WriteString("\n" + helpSt.Render("↑↓ move · space toggle · a section · A all · n none · enter next · esc cancel"))
+	} else if pickerAtStep2 {
+		b.WriteString("\n" + helpSt.Render("↑↓ move · enter select · esc cancel"))
+	} else if v.step == 2 && v.expiryCustom {
+		b.WriteString("\n" + helpSt.Render("type duration (e.g. 72h, 30d) · backspace at empty returns to presets · enter submit · esc cancel"))
 	} else {
 		b.WriteString("\n" + helpSt.Render("enter next · esc cancel"))
+	}
+	if v.err != "" {
+		b.WriteString("\n" + failSt.Render(v.err))
 	}
 	return b.String()
 }
@@ -899,9 +978,13 @@ type listView struct {
 	// v1.13.0-rc3 — grant-picker state for in-TUI add-grant / remove-grant
 	// on an existing token's detail. grantPickList is the list of candidate
 	// grant IDs; pendingGrantOp is "add" or "remove".
-	grantPickList   []string
-	grantPickCursor int
-	pendingGrantOp  string
+	// v1.13.0-rc5: grantPickSelected tracks the multi-select set
+	// (space toggles, enter applies all). Previous releases were
+	// single-select — picking one grant per round.
+	grantPickList     []string
+	grantPickCursor   int
+	grantPickSelected map[string]bool
+	pendingGrantOp    string
 }
 
 // v1.10.0 — the tokens list is now an interactive picker. Modes:
@@ -1186,6 +1269,9 @@ func (v *listView) runAction(a listAction) (tea.Model, tea.Cmd) {
 // prepareGrantPicker loads the candidate grant IDs for the current
 // token given the op ("add" or "remove"). Returns false when there's
 // nothing meaningful to show (vault has no grants / token has none).
+//
+// v1.13.0-rc5: multi-select — grantPickSelected starts empty, user
+// toggles with space, applies the whole set with enter.
 func (v *listView) prepareGrantPicker(op string) bool {
 	idx := v.selectedIndex()
 	if idx < 0 {
@@ -1195,6 +1281,7 @@ func (v *listView) prepareGrantPicker(op string) bool {
 	v.pendingGrantOp = op
 	v.grantPickCursor = 0
 	v.grantPickList = nil
+	v.grantPickSelected = map[string]bool{}
 
 	if op == "remove" {
 		v.grantPickList = append(v.grantPickList, cap.Grants...)
@@ -1220,26 +1307,44 @@ func (v *listView) prepareGrantPicker(op string) bool {
 }
 
 // doGrantMutation shells out to `dop token add-grant` or `remove-grant`
-// against the currently-selected token + currently-picked grant.
+// once per selected grant. v1.13.0-rc5 — multi-select: all picked
+// grants are applied as one batch; first error short-circuits with the
+// partial-progress message surfaced to the user.
 func (v *listView) doGrantMutation() tea.Cmd {
 	idx := v.selectedIndex()
-	if idx < 0 || v.grantPickCursor >= len(v.grantPickList) {
+	if idx < 0 {
 		return func() tea.Msg { return listActionMsg{err: "no selection"} }
 	}
 	target := v.capIDs[idx][:12]
-	grantID := v.grantPickList[v.grantPickCursor]
 	op := v.pendingGrantOp
+	picked := []string{}
+	for _, gid := range v.grantPickList {
+		if v.grantPickSelected[gid] {
+			picked = append(picked, gid)
+		}
+	}
 	return func() tea.Msg {
 		self, _ := os.Executable()
-		cmd := exec.Command(self, "token", op+"-grant", target, grantID)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return listActionMsg{err: strings.TrimSpace(stderr.String())}
+		applied := []string{}
+		for _, gid := range picked {
+			cmd := exec.Command(self, "token", op+"-grant", target, gid)
+			cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				msg := strings.TrimSpace(stderr.String())
+				if len(applied) > 0 {
+					msg = fmt.Sprintf("%s · partial: %s applied: %v", msg, op+"-grant", applied)
+				}
+				return listActionMsg{err: msg}
+			}
+			applied = append(applied, gid)
 		}
-		return listActionMsg{flash: strings.TrimSpace(stderr.String() + stdout.String())}
+		verb := "added"
+		if op == "remove" {
+			verb = "removed"
+		}
+		return listActionMsg{flash: fmt.Sprintf("%s %d grant(s): %s · env resealed", verb, len(applied), strings.Join(applied, ", "))}
 	}
 }
 
@@ -1267,8 +1372,8 @@ func (v *listView) doReseal() tea.Cmd {
 }
 
 // updateGrantPickMode drives the add-grant / remove-grant picker.
-// Simple single-select list: ↑↓ to move, enter to confirm, esc to
-// cancel back to the action menu.
+// v1.13.0-rc5: multi-select — ↑↓ to move, space to toggle, enter to
+// apply the whole selection, esc to cancel.
 func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch mm.String() {
 	case "up", "k":
@@ -1279,18 +1384,51 @@ func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if v.grantPickCursor < len(v.grantPickList)-1 {
 			v.grantPickCursor++
 		}
+	case " ":
+		if v.grantPickCursor >= 0 && v.grantPickCursor < len(v.grantPickList) {
+			gid := v.grantPickList[v.grantPickCursor]
+			v.grantPickSelected[gid] = !v.grantPickSelected[gid]
+		}
+	case "a":
+		// bulk select-all
+		for _, gid := range v.grantPickList {
+			v.grantPickSelected[gid] = true
+		}
+	case "n":
+		// bulk clear
+		for gid := range v.grantPickSelected {
+			delete(v.grantPickSelected, gid)
+		}
 	case "enter":
 		if len(v.grantPickList) == 0 {
 			return v, nil
 		}
+		if v.selectedGrantCount() == 0 {
+			v.err = "select at least one grant (space to toggle)"
+			return v, nil
+		}
+		v.err = ""
 		v.mode = listModeRun
 		return v, v.doGrantMutation()
 	case "esc", "q":
 		v.mode = listModeAction
 		v.grantPickList = nil
+		v.grantPickSelected = nil
 		v.pendingGrantOp = ""
+		v.err = ""
 	}
 	return v, nil
+}
+
+// selectedGrantCount is the current size of the multi-select set.
+func (v *listView) selectedGrantCount() int {
+	n := 0
+	for _, picked := range v.grantPickSelected {
+		if picked {
+			n++
+		}
+	}
+	return n
 }
 
 func (v *listView) updateConfirmMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1494,16 +1632,19 @@ func (v *listView) viewRun() string {
 	return titleSt.Render("Working…") + "\n\n" + mutedSt.Render(label)
 }
 
-// viewGrantPick renders the single-select grant picker for the
+// viewGrantPick renders the multi-select grant picker for the
 // add-grant / remove-grant actions on a token detail. The list is
 // pre-filtered by prepareGrantPicker (vault's grants minus the
 // token's current grants, or the token's current grants).
+//
+// v1.13.0-rc5: multi-select — space toggles ● / ○, a/n bulk ops,
+// enter applies the whole selection in one batch.
 func (v *listView) viewGrantPick() string {
 	var b strings.Builder
 	idx := v.selectedIndex()
-	title := "Pick a grant to add"
+	title := "Pick grants to add"
 	if v.pendingGrantOp == "remove" {
-		title = "Pick a grant to remove"
+		title = "Pick grants to remove"
 	}
 	b.WriteString(titleSt.Render(title) + "\n\n")
 	if idx >= 0 {
@@ -1511,17 +1652,23 @@ func (v *listView) viewGrantPick() string {
 	}
 	for i, gid := range v.grantPickList {
 		prefix := "    "
+		marker := "○"
+		if v.grantPickSelected[gid] {
+			marker = okSt.Render("●")
+		} else {
+			marker = mutedSt.Render("○")
+		}
 		label := gid
 		if i == v.grantPickCursor {
 			prefix = "  " + cursorSt.Render("➤ ")
 			label = cursorSt.Render(gid)
 		}
-		b.WriteString(prefix + label + "\n")
+		b.WriteString(prefix + marker + "  " + label + "\n")
 	}
+	b.WriteString("\n" + helpSt.Render("↑↓ move · space toggle · a all · n none · enter apply · esc back"))
 	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err) + "\n")
+		b.WriteString("\n" + failSt.Render(v.err))
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move · enter apply · esc back"))
 	return b.String()
 }
 
