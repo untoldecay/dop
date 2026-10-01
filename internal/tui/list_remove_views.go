@@ -56,7 +56,11 @@ func (v *integrationListView) Flash() string { return v.flash }
 type integListLoadedMsg struct {
 	items  map[string]vault.Integration
 	grants map[string]vault.Grant
-	err    string
+	// v1.13.0-rc8 — the remove-view needs capabilities too so it can
+	// compute the cascade preview (which bearers get resealed, which
+	// go stale, which drop to zero grants).
+	caps map[string]vault.Capability
+	err  string
 }
 
 type integActionMsg struct{ err string }
@@ -468,18 +472,35 @@ type integrationRemoveView struct {
 	client *admin.Client
 	paths  *config.Paths
 
-	step   int // 0 = pick, 1 = confirm, 2 = running
+	// v1.13.0-rc8 — flow now goes:
+	//   0 pick service
+	//   1 multi-select tokens within the service
+	//   2 confirm (shows cascade preview: grants dropped + bearers affected)
+	//   3 running
+	step   int
 	loaded bool
 	err    string
 	names  []string
+	items  map[string]vault.Integration
+	grants map[string]vault.Grant
+	caps   map[string]vault.Capability
 	cursor int
-	referrers []string // grants that would need cascading remove
+	referrers []string // grants referencing the picked service (legacy; still used by preview)
+	// Multi-select token state (step 1).
+	tokenNames    []string
+	tokenCursor   int
+	tokenSelected map[string]bool
+	// Cascade preview (step 2 label).
+	previewGrants []string
+	previewReseal []string // subjects
+	previewStale  []string // subjects
+	previewEmpty  []string // subjects
 	flash  string
 	done   bool
 }
 
 func newIntegrationRemoveView(c *admin.Client, p *config.Paths) *integrationRemoveView {
-	return &integrationRemoveView{client: c, paths: p}
+	return &integrationRemoveView{client: c, paths: p, tokenSelected: map[string]bool{}}
 }
 func (v *integrationRemoveView) Init() tea.Cmd { return v.load }
 func (v *integrationRemoveView) Done() bool    { return v.done }
@@ -498,28 +519,94 @@ func (v *integrationRemoveView) load() tea.Msg {
 		}
 		return integListLoadedMsg{err: err.Error()}
 	}
-	// reuse integListLoadedMsg for the initial load — we only need names.
-	return integListLoadedMsg{items: vlt.Integrations}
+	// v1.13.0-rc8 — we need grants + capabilities for the cascade preview.
+	return integListLoadedMsg{items: vlt.Integrations, grants: vlt.Grants, caps: vlt.Capabilities}
 }
 
-func (v *integrationRemoveView) recomputeReferrers() {
+// prepareTokenPicker populates tokenNames + resets selection for the
+// multi-select step when the user picks a service.
+func (v *integrationRemoveView) prepareTokenPicker() {
 	if len(v.names) == 0 {
-		v.referrers = nil
 		return
 	}
 	target := v.names[v.cursor]
-	vlt, _, err := loadVaultForListing(v.client, v.paths)
-	if err != nil {
-		v.referrers = nil
-		return
+	integ := v.items[target]
+	v.tokenNames = v.tokenNames[:0]
+	for tn := range integ.Tokens {
+		v.tokenNames = append(v.tokenNames, tn)
 	}
-	v.referrers = v.referrers[:0]
-	for gid, g := range vlt.Grants {
-		if g.Integration == target {
-			v.referrers = append(v.referrers, gid)
+	sort.Strings(v.tokenNames)
+	v.tokenCursor = 0
+	v.tokenSelected = map[string]bool{}
+}
+
+// computePreview builds the cascade preview strings based on the
+// currently selected tokens and the loaded vault state.
+func (v *integrationRemoveView) computePreview() {
+	v.previewGrants = v.previewGrants[:0]
+	v.previewReseal = v.previewReseal[:0]
+	v.previewStale = v.previewStale[:0]
+	v.previewEmpty = v.previewEmpty[:0]
+	target := v.names[v.cursor]
+	// Grants that will be dropped.
+	grantSet := map[string]bool{}
+	for gid, g := range v.grants {
+		if g.Integration != target {
+			// Allow the normalized form too.
+			if vault.NormalizeIntegrationName(g.Integration) != vault.NormalizeIntegrationName(target) {
+				continue
+			}
+		}
+		if v.tokenSelected[g.Token] {
+			v.previewGrants = append(v.previewGrants, gid)
+			grantSet[gid] = true
 		}
 	}
-	sort.Strings(v.referrers)
+	sort.Strings(v.previewGrants)
+	// Bearers affected.
+	for _, c := range v.caps {
+		if c.Status != "active" {
+			continue
+		}
+		remaining := 0
+		touched := false
+		for _, gid := range c.Grants {
+			if grantSet[gid] {
+				touched = true
+			} else {
+				remaining++
+			}
+		}
+		if !touched {
+			continue
+		}
+		if remaining == 0 {
+			v.previewEmpty = append(v.previewEmpty, c.Subject)
+			continue
+		}
+		keyType := "ed25519"
+		if c.Binding != nil && c.Binding.KeyType != "" {
+			keyType = c.Binding.KeyType
+		}
+		if keyType == "p256" {
+			v.previewReseal = append(v.previewReseal, c.Subject)
+		} else {
+			v.previewStale = append(v.previewStale, c.Subject)
+		}
+	}
+	sort.Strings(v.previewReseal)
+	sort.Strings(v.previewStale)
+	sort.Strings(v.previewEmpty)
+}
+
+func (v *integrationRemoveView) selectedTokenCount() int {
+	n := 0
+	for _, picked := range v.tokenSelected {
+		if picked {
+			n++
+		}
+	}
+	return n
 }
 
 func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -527,6 +614,9 @@ func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case integListLoadedMsg:
 		v.loaded = true
 		v.err = mm.err
+		v.items = mm.items
+		v.grants = mm.grants
+		v.caps = mm.caps
 		for n := range mm.items {
 			v.names = append(v.names, n)
 		}
@@ -534,15 +624,21 @@ func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case integrationRemoveResultMsg:
 		if mm.err != "" {
 			v.err = mm.err
-			v.step = 1
+			v.step = 2
 			return v, nil
 		}
-		v.flash = "integration removed · synced with team"
+		v.flash = "credentials removed · synced with team"
 		v.done = true
 	case tea.KeyMsg:
 		switch mm.String() {
 		case "esc", "ctrl+c":
-			v.done = true
+			if v.step == 0 {
+				v.done = true
+				return v, nil
+			}
+			// v1.13.0-rc8 — nested esc: step back one level.
+			v.step--
+			v.err = ""
 			return v, nil
 		}
 		if !v.loaded {
@@ -563,18 +659,50 @@ func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(v.names) == 0 {
 					return v, nil
 				}
-				v.recomputeReferrers()
+				v.prepareTokenPicker()
 				v.step = 1
 			}
 		case 1:
-			// v1.13.0-rc6 — unified confirm keybindings:
-			// y/Y/enter confirm · n/N/esc cancel.
+			// Multi-select tokens: space toggles, a/n bulk, enter advances.
+			switch mm.String() {
+			case "up", "k":
+				if v.tokenCursor > 0 {
+					v.tokenCursor--
+				}
+			case "down", "j":
+				if v.tokenCursor < len(v.tokenNames)-1 {
+					v.tokenCursor++
+				}
+			case " ":
+				if v.tokenCursor >= 0 && v.tokenCursor < len(v.tokenNames) {
+					tn := v.tokenNames[v.tokenCursor]
+					v.tokenSelected[tn] = !v.tokenSelected[tn]
+				}
+			case "a":
+				for _, tn := range v.tokenNames {
+					v.tokenSelected[tn] = true
+				}
+			case "n":
+				for tn := range v.tokenSelected {
+					delete(v.tokenSelected, tn)
+				}
+			case "enter":
+				if v.selectedTokenCount() == 0 {
+					v.err = "select at least one credential (space to toggle)"
+					return v, nil
+				}
+				v.err = ""
+				v.computePreview()
+				v.step = 2
+			}
+		case 2:
+			// Confirm cascade preview.
 			switch mm.String() {
 			case "y", "Y", "enter":
-				v.step = 2
+				v.step = 3
 				return v, v.doRemove()
-			case "n", "N", "esc":
-				v.step = 0
+			case "n", "N":
+				v.step = 1
 			}
 		}
 	}
@@ -583,12 +711,17 @@ func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (v *integrationRemoveView) doRemove() tea.Cmd {
 	name := v.names[v.cursor]
-	force := len(v.referrers) > 0
+	picked := []string{}
+	for _, tn := range v.tokenNames {
+		if v.tokenSelected[tn] {
+			picked = append(picked, tn)
+		}
+	}
 	return func() tea.Msg {
 		self, _ := os.Executable()
-		args := []string{"integration", "remove", "--name", name}
-		if force {
-			args = append(args, "--force")
+		args := []string{"integration", "remove-token", "--name", name}
+		for _, tn := range picked {
+			args = append(args, "--token", tn)
 		}
 		cmd := exec.Command(self, args...)
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
@@ -603,7 +736,7 @@ func (v *integrationRemoveView) doRemove() tea.Cmd {
 
 func (v *integrationRemoveView) View() string {
 	var b strings.Builder
-	b.WriteString(titleSt.Render("Remove integration") + "\n\n")
+	b.WriteString(titleSt.Render("Remove credentials") + "\n\n")
 	if !v.loaded {
 		return b.String() + "loading…"
 	}
@@ -613,7 +746,7 @@ func (v *integrationRemoveView) View() string {
 	}
 	switch v.step {
 	case 0:
-		b.WriteString("Pick integration to remove:\n\n")
+		b.WriteString("Pick a service:\n\n")
 		for i, n := range v.names {
 			prefix := "  "
 			if i == v.cursor {
@@ -621,22 +754,72 @@ func (v *integrationRemoveView) View() string {
 			}
 			b.WriteString(prefix + n + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter next · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move · enter next · esc back"))
 	case 1:
 		target := v.names[v.cursor]
-		b.WriteString(fmt.Sprintf("Remove integration %q?\n\n", target))
-		if len(v.referrers) > 0 {
-			b.WriteString(failSt.Render("⚠  These grants reference it and will ALSO be removed:") + "\n")
-			for _, g := range v.referrers {
-				b.WriteString("  - " + g + "\n")
+		b.WriteString(fmt.Sprintf("Pick credentials under %q to remove:\n\n", target))
+		for i, tn := range v.tokenNames {
+			prefix := "    "
+			marker := mutedSt.Render("○")
+			if v.tokenSelected[tn] {
+				marker = okSt.Render("●")
 			}
-			b.WriteString("\n")
+			label := tn
+			if i == v.tokenCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(tn)
+			}
+			b.WriteString(prefix + marker + "  " + label + "\n")
+		}
+		b.WriteString("\n" + helpSt.Render("↑↓ move · space toggle · a all · n none · enter next · esc back"))
+		if v.err != "" {
+			b.WriteString("\n" + failSt.Render(v.err))
+		}
+	case 2:
+		target := v.names[v.cursor]
+		picked := []string{}
+		for _, tn := range v.tokenNames {
+			if v.tokenSelected[tn] {
+				picked = append(picked, tn)
+			}
+		}
+		b.WriteString(fmt.Sprintf("Remove %d credential(s) from %q: %s\n\n",
+			len(picked), target, strings.Join(picked, ", ")))
+		// Cascade preview.
+		if len(v.previewGrants) > 0 {
+			b.WriteString(failSt.Render(fmt.Sprintf("⚠ %d grant(s) will be removed:", len(v.previewGrants))) + "\n")
+			for _, g := range v.previewGrants {
+				b.WriteString("    - " + g + "\n")
+			}
+		}
+		if len(v.previewReseal) > 0 {
+			b.WriteString("\n" + okSt.Render(fmt.Sprintf("✓ %d bearer(s) will be resealed (P-256 — env updated live):", len(v.previewReseal))) + "\n")
+			for _, s := range v.previewReseal {
+				b.WriteString("    - " + s + "\n")
+			}
+		}
+		if len(v.previewStale) > 0 {
+			b.WriteString("\n" + failSt.Render(fmt.Sprintf("⚠ %d ed25519 bearer(s) will have STALE env (bundle can't be rewritten):", len(v.previewStale))) + "\n")
+			for _, s := range v.previewStale {
+				b.WriteString("    - " + s + "\n")
+			}
+		}
+		if len(v.previewEmpty) > 0 {
+			b.WriteString("\n" + failSt.Render(fmt.Sprintf("⚠ %d bearer(s) will have NO grants left and be revoked:", len(v.previewEmpty))) + "\n")
+			for _, s := range v.previewEmpty {
+				b.WriteString("    - " + s + "\n")
+			}
+		}
+		// Integration-wide notice.
+		integ := v.items[target]
+		if len(picked) == len(integ.Tokens) {
+			b.WriteString("\n" + failSt.Render("All credentials of this service are selected — the service entry will be removed too.") + "\n")
 		}
 		if v.err != "" {
-			b.WriteString(failSt.Render(v.err) + "\n\n")
+			b.WriteString("\n" + failSt.Render(v.err) + "\n")
 		}
-		b.WriteString(helpSt.Render("y/enter confirm · n/esc cancel"))
-	case 2:
+		b.WriteString("\n" + helpSt.Render("y/enter confirm · n/esc cancel"))
+	case 3:
 		b.WriteString("removing…\n")
 	}
 	return b.String()

@@ -18,7 +18,7 @@ import (
 // runIntegration is the subcommand dispatcher.
 func runIntegration(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop integration <add|list|remove>")
+		fmt.Fprintln(os.Stderr, "usage: dop integration <add|list|remove|remove-token>")
 		return 2
 	}
 	switch args[0] {
@@ -28,6 +28,8 @@ func runIntegration(args []string) int {
 		return runIntegrationList(args[1:])
 	case "remove":
 		return runIntegrationRemove(args[1:])
+	case "remove-token":
+		return runIntegrationRemoveToken(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop integration: unknown subcommand %q\n", args[0])
 		return 2
@@ -147,6 +149,113 @@ func runIntegrationRemove(args []string) int {
 		msg = fmt.Sprintf("removed (plus %d grants: %v)", len(referrers), referrers)
 	}
 	fmt.Fprintf(os.Stderr, "dop integration remove: %s %s\n", *name, msg)
+	return 0
+}
+
+// runIntegrationRemoveToken removes one or more tokens from a single
+// integration and cascades through every grant that referenced those
+// tokens (and every active capability whose Grants list touched those
+// grants). Shape:
+//
+//   dop integration remove-token --name boiler --token pensieve --token writes
+//     [--force-revoke-ed25519]
+//
+// If removing the selected tokens empties the integration, the
+// integration is deleted too — a service entry with no credentials
+// is useless.
+func runIntegrationRemoveToken(args []string) int {
+	fs := flag.NewFlagSet("integration remove-token", flag.ExitOnError)
+	name := fs.String("name", "", "integration name (required)")
+	var tokens stringSliceFlag
+	fs.Var(&tokens, "token", "upstream token name to remove (repeatable, required)")
+	forceRevokeEd25519 := fs.Bool("force-revoke-ed25519", false, "revoke ed25519 bearers whose bundle env can't be resealed")
+	_ = fs.Parse(args)
+	if *name == "" {
+		fmt.Fprintln(os.Stderr, "dop integration remove-token: --name required")
+		return 2
+	}
+	if len(tokens) == 0 {
+		fmt.Fprintln(os.Stderr, "dop integration remove-token: at least one --token required")
+		return 2
+	}
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration remove-token: %v\n", err)
+		return 1
+	}
+	v, vaultPath, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration remove-token: %v\n", err)
+		return 1
+	}
+	key, ok := v.FindIntegrationKey(*name)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "dop integration remove-token: no integration named %q\n", *name)
+		return 1
+	}
+	integ := v.Integrations[key]
+	// Validate every requested token exists before mutating.
+	missing := []string{}
+	for _, tn := range tokens {
+		if _, ok := integ.Tokens[tn]; !ok {
+			missing = append(missing, tn)
+		}
+	}
+	if len(missing) > 0 {
+		fmt.Fprintf(os.Stderr, "dop integration remove-token: integration %q has no token(s): %v\n", key, missing)
+		return 1
+	}
+	// Find grants that reference any (key, token) pair.
+	tokenSet := map[string]bool{}
+	for _, tn := range tokens {
+		tokenSet[tn] = true
+	}
+	affectedGrants := []string{}
+	for gid, g := range v.Grants {
+		if g.Integration != key {
+			if normalized, found := v.FindIntegrationKey(g.Integration); !found || normalized != key {
+				continue
+			}
+		}
+		if tokenSet[g.Token] {
+			affectedGrants = append(affectedGrants, gid)
+		}
+	}
+	// Cascade through capabilities.
+	cascade, err := cascadeGrantRemoval(client, paths, v, affectedGrants, *forceRevokeEd25519)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration remove-token: cascade: %v\n", err)
+		return 1
+	}
+	// Delete affected grants.
+	for _, gid := range affectedGrants {
+		delete(v.Grants, gid)
+	}
+	// Delete the tokens.
+	for _, tn := range tokens {
+		delete(integ.Tokens, tn)
+	}
+	// If no tokens remain, drop the integration entirely.
+	integrationRemoved := false
+	if len(integ.Tokens) == 0 {
+		delete(v.Integrations, key)
+		integrationRemoved = true
+	} else {
+		v.Integrations[key] = integ
+	}
+	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration remove-token: %v\n", err)
+		return 1
+	}
+	suffix := cascade.summary()
+	if integrationRemoved {
+		fmt.Fprintf(os.Stderr, "dop integration remove-token: removed %d token(s) from %q (integration had no remaining tokens — removed) · %d grant(s) dropped%s\n",
+			len(tokens), key, len(affectedGrants), suffix)
+	} else {
+		fmt.Fprintf(os.Stderr, "dop integration remove-token: removed %d token(s) from %q · %d grant(s) dropped%s\n",
+			len(tokens), key, len(affectedGrants), suffix)
+	}
 	return 0
 }
 
@@ -522,6 +631,7 @@ func containsFold(hay []string, needle string) bool {
 func runGrantRemove(args []string) int {
 	fs := flag.NewFlagSet("grant remove", flag.ExitOnError)
 	id := fs.String("id", "", "grant id to remove (required)")
+	forceRevokeEd25519 := fs.Bool("force-revoke-ed25519", false, "revoke ed25519 bearers whose bundle env can't be resealed (vs. the default: warn and leave stale)")
 	_ = fs.Parse(args)
 	if *id == "" {
 		fmt.Fprintln(os.Stderr, "dop grant remove: --id required")
@@ -542,12 +652,23 @@ func runGrantRemove(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop grant remove: no grant named %q\n", *id)
 		return 1
 	}
+	// v1.13.0-rc8 — cascade: remove the grant from every active
+	// capability that references it before deleting the grant itself.
+	// P-256 bearers get EnvWrapped resealed with the narrower env;
+	// ed25519 bearers get a warning (or revoke with --force-revoke-ed25519)
+	// because their bundle env is bearer-encrypted and can't be rewritten
+	// without the bearer.
+	cascade, err := cascadeGrantRemoval(client, paths, v, []string{*id}, *forceRevokeEd25519)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop grant remove: cascade: %v\n", err)
+		return 1
+	}
 	delete(v.Grants, *id)
 	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
 		fmt.Fprintf(os.Stderr, "dop grant remove: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "dop grant remove: removed %s\n", *id)
+	fmt.Fprintf(os.Stderr, "dop grant remove: removed %s%s\n", *id, cascade.summary())
 	return 0
 }
 

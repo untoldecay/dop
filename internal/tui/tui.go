@@ -180,7 +180,7 @@ func (m *rootModel) rebuildMenu() {
 			{section: "Vault", label: "Add integration", hint: "add a service + upstream tokens", fn: (*rootModel).openAddIntegration},
 			{section: "Vault", label: "Add grant", hint: "map a grant to an integration/token", fn: (*rootModel).openAddGrant},
 			{section: "Vault", label: "List integrations", hint: "show all integrations", fn: (*rootModel).openIntegrationList},
-			{section: "Vault", label: "Remove integration", hint: "delete (+ dependent grants)", fn: (*rootModel).openIntegrationRemove},
+			{section: "Vault", label: "Remove credentials…", hint: "drill into a service and pick credentials to remove (+ cascade)", fn: (*rootModel).openIntegrationRemove},
 			{section: "Vault", label: "List grants", hint: "show all grants", fn: (*rootModel).openGrantList},
 			{section: "Vault", label: "Remove grant", hint: "delete a grant", fn: (*rootModel).openGrantRemove},
 			// Tokens
