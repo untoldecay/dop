@@ -182,7 +182,7 @@ func (v *revokeView) View() string {
 		if v.err != "" {
 			b.WriteString(failSt.Render(v.err) + "\n\n")
 		}
-		b.WriteString(helpSt.Render("y confirm · n go back"))
+		b.WriteString(helpSt.Render("y/enter confirm · n/esc cancel"))
 	case 2:
 		b.WriteString("revoking…\n")
 	}
@@ -526,11 +526,12 @@ func (v *teamRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				v.step = 1
 			}
 		case 1:
+			// v1.13.0-rc6 — unified confirm keybindings.
 			switch mm.String() {
-			case "y", "Y":
+			case "y", "Y", "enter":
 				v.step = 2
 				return v, v.doRemove()
-			case "n", "N":
+			case "n", "N", "esc":
 				v.step = 0
 			}
 		}
@@ -596,7 +597,7 @@ func (v *teamRemoveView) View() string {
 		if v.err != "" {
 			b.WriteString("\n" + failSt.Render(v.err) + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("y confirm removal · n go back · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("y/enter confirm removal · n/esc cancel"))
 	case 2:
 		b.WriteString("removing…\n")
 	}

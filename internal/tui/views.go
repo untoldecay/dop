@@ -1617,7 +1617,7 @@ func (v *listView) viewConfirm() string {
 	b.WriteString(titleSt.Render("Revoke token?") + "\n\n")
 	b.WriteString(fmt.Sprintf("  subject: %s\n  grants:  %v\n\n", c.Subject, c.Grants))
 	b.WriteString(failSt.Render("This is immediate — the bearer will fail on next exec.") + "\n")
-	b.WriteString("\n" + helpSt.Render("y confirm · n cancel"))
+	b.WriteString("\n" + helpSt.Render("y/enter confirm · n/esc cancel"))
 	return b.String()
 }
 
