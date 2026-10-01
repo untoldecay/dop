@@ -14,11 +14,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/fray/dop/internal/audit"
+	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
 )
 
@@ -53,6 +55,19 @@ func runWatch(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop watch: %v\n", err)
 		return 1
 	}
+
+	// v1.13.0-rc7 — audit log leak plug. Pre-rc7 anyone with
+	// filesystem access could tail the audit log and see every
+	// agent's lookup_ids, SAS codes, issue/claim trail. Now:
+	//   - admin session unlocks the full feed
+	//   - a bearer in $DOP_TOKEN or --token-file unlocks ONLY events
+	//     scoped to that bearer's lookup_id
+	//   - no admin + no bearer → access denied
+	bearerLookup, isAdmin := watchAccessContext(paths)
+	if !isAdmin && bearerLookup == "" {
+		fmt.Fprintln(os.Stderr, "dop watch: refusing without admin session or bearer context (set $DOP_TOKEN to see your own events, or `dop admin login` for the full feed)")
+		return 1
+	}
 	path := audit.Path(paths)
 
 	f, err := os.Open(path)
@@ -81,6 +96,12 @@ func runWatch(args []string) int {
 			if !passFilter(ev.Kind, filterSet) {
 				continue
 			}
+			// v1.13.0-rc7 — bearer-scoped feed drops events whose
+			// LookupID doesn't match the current bearer. Admin feed
+			// shows everything.
+			if !isAdmin && ev.LookupID != bearerLookup {
+				continue
+			}
 			fmt.Println(renderEvent(ev, !*noColor))
 		}
 	}
@@ -90,10 +111,10 @@ func runWatch(args []string) int {
 	}
 
 	// Follow mode: reopen and seek to end, then poll for growth.
-	return followLog(path, parseFilterSet(*filter), !*noColor)
+	return followLog(path, parseFilterSet(*filter), !*noColor, bearerLookup, isAdmin)
 }
 
-func followLog(path string, filterSet map[string]bool, colored bool) int {
+func followLog(path string, filterSet map[string]bool, colored bool, bearerLookup string, isAdmin bool) int {
 	// Handle Ctrl-C gracefully.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -159,6 +180,11 @@ func followLog(path string, filterSet map[string]bool, colored bool) int {
 			if len(line) > 0 {
 				var ev audit.Event
 				if json.Unmarshal(line, &ev) == nil && passFilter(ev.Kind, filterSet) {
+					// v1.13.0-rc7 — bearer-scoped follow mode.
+					if !isAdmin && ev.LookupID != bearerLookup {
+						lastPos += int64(len(line))
+						continue
+					}
 					fmt.Println(renderEvent(ev, colored))
 				}
 				lastPos += int64(len(line))
@@ -259,4 +285,51 @@ func isatty(f *os.File) bool {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// v1.13.0-rc7 — watchAccessContext decides who can see what in the
+// audit feed.
+//
+// Priority:
+//   1. Admin session present → return ("", true). Admin sees the full
+//      log.
+//   2. $DOP_TOKEN (or $DOP_TOKEN_FILE) present → compute lookupID,
+//      return (lookupID, false). Non-admin sees only events for
+//      their own bearer.
+//   3. Neither → return ("", false). Caller refuses access.
+//
+// We deliberately do NOT ask the admin daemon for session status via
+// a bringing-up call that would prompt for a passphrase: if the
+// daemon is unreachable or locked, treat it as "no admin session".
+func watchAccessContext(paths *config.Paths) (string, bool) {
+	// Quick admin check — talk to the daemon if it's already up and
+	// unlocked. Any failure means "not an admin session" (silent).
+	if client, err := requireAdminSession(paths); err == nil && client != nil {
+		return "", true
+	}
+	// Fall back to bearer-scoped mode.
+	bearer, _, _ := readBearerWithSource("")
+	if bearer == "" {
+		return "", false
+	}
+	vaultCtx, err := loadVaultContextForWatch(paths)
+	if err != nil {
+		return "", false
+	}
+	return capability.LookupID(vaultCtx, bearer), false
+}
+
+// loadVaultContextForWatch returns the vault_context bytes needed to
+// compute a bearer's lookupID. Agent installs keep this as a sidecar
+// (vault-context.bin) so they don't need to decrypt vault.yaml.
+func loadVaultContextForWatch(paths *config.Paths) ([]byte, error) {
+	ctxPath := filepath.Join(paths.Vault, "vault-context.bin")
+	ctx, err := os.ReadFile(ctxPath)
+	if err == nil {
+		return ctx, nil
+	}
+	// Last resort: admin install may have it inside vault.yaml. If
+	// we're here, admin session already failed, so we can't decrypt
+	// vault.yaml — just surface the missing-sidecar error.
+	return nil, fmt.Errorf("no vault_context sidecar (%s): %w", ctxPath, err)
 }

@@ -1519,12 +1519,18 @@ func (v *listView) View() string {
 		if len(capShort) > 8 {
 			capShort = capShort[:8]
 		}
-		b.WriteString(fmt.Sprintf("%s%-24s  %s  %s  gen=%d  expires=%s\n",
-			prefix, subj,
-			mutedSt.Render(capShort),
-			statusStyle.Render(c.Status),
-			c.Generation,
-			expiresDisplay(c.ExpiresAt, "2006-01-02")))
+		// v1.13.0-rc7 — pad `subj` via lipgloss.NewStyle().Width(24)
+		// instead of `%-24s`. The latter counted ANSI escape bytes
+		// toward the field width, so the cursor-styled row ended up
+		// visually narrower and following columns shifted leftward
+		// (Fizz's "metadata jumps when the cursor moves" bug).
+		subjPad := lipgloss.NewStyle().Width(24).Render(subj)
+		b.WriteString(prefix + subjPad + "  " +
+			mutedSt.Render(capShort) + "  " +
+			statusStyle.Render(c.Status) +
+			fmt.Sprintf("  gen=%d  expires=%s\n",
+				c.Generation,
+				expiresDisplay(c.ExpiresAt, "2006-01-02")))
 	}
 
 	hidden := len(v.capabilities) - len(vis)

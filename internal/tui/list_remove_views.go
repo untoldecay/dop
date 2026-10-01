@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
@@ -290,8 +291,13 @@ func (v *integrationListView) View() string {
 			desc = "-"
 		}
 		nrefs := len(v.referrers(n))
-		b.WriteString(fmt.Sprintf("%s%-20s  %s  (grants=%d, tokens=%d)\n",
-			prefix, disp, mutedSt.Render(desc), nrefs, len(it.Tokens)))
+		// v1.13.0-rc7 — lipgloss.Width-based padding so the cursor
+		// style doesn't shrink the visible column (ANSI escapes don't
+		// count toward Width()).
+		dispPad := lipgloss.NewStyle().Width(20).Render(disp)
+		b.WriteString(prefix + dispPad + "  " +
+			mutedSt.Render(desc) +
+			fmt.Sprintf("  (grants=%d, tokens=%d)\n", nrefs, len(it.Tokens)))
 	}
 
 	// v1.13.0-rc4 — unified footer: help first, then flash/error.
@@ -1034,8 +1040,12 @@ func (v *grantListView) View() string {
 		if len(g.Projects) > 0 {
 			projTag = strings.Join(g.Projects, ",")
 		}
-		b.WriteString(fmt.Sprintf("%s%-22s  → %s.%s  projects=%s\n",
-			prefix, disp, g.Integration, g.Token, mutedSt.Render(projTag)))
+		// v1.13.0-rc7 — see views.go/list_remove_views.go: lipgloss.Width
+		// padding so cursor styling doesn't shift the metadata columns.
+		dispPad := lipgloss.NewStyle().Width(22).Render(disp)
+		b.WriteString(prefix + dispPad +
+			fmt.Sprintf("  → %s.%s  projects=%s\n",
+				g.Integration, g.Token, mutedSt.Render(projTag)))
 	}
 
 	// v1.13.0-rc4 — unified footer: help first, then flash/error.

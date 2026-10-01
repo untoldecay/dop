@@ -72,13 +72,34 @@ type addIntegrationView struct {
 	servicePickCursor int
 	serviceMode       bool // true until operator switches to text input
 
+	// v1.13.0-rc7 — scope-note preset picker on step 5. Mirrors the
+	// expiry preset picker in issueView: a short menu of common
+	// values (read-only, read-write, admin) plus "other…" that drops
+	// into the free-text input. scopeMode true = picker; false =
+	// text input.
+	scopePickCursor int
+	scopeMode       bool // true until operator picks "other…"
+
 	err   string
 	flash string
 	done  bool
 }
 
+// scopePresets is the common-case menu offered on the scope-note
+// step of addIntegrationView. The last entry drops the operator
+// into the free-text input via scopeMode.
+var scopePresets = []struct {
+	label string
+	value string
+}{
+	{"read-only", "read-only"},
+	{"read-write", "read-write"},
+	{"admin", "admin"},
+	{"other…", ""},
+}
+
 func newAddIntegrationView(c *admin.Client, p *config.Paths) *addIntegrationView {
-	v := &addIntegrationView{client: c, paths: p, serviceMode: true}
+	v := &addIntegrationView{client: c, paths: p, serviceMode: true, scopeMode: true}
 	v.loadExistingServices()
 	return v
 }
@@ -123,6 +144,33 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if v.step == integAddStepDone {
 			v.done = true
 			v.flash = "integration saved · synced with team"
+			return v, nil
+		}
+		// v1.13.0-rc7 — step 5 (scope note) is a preset picker unless
+		// the operator picked "other…". Mirrors rc5's expiry picker.
+		if v.step == integAddStepScope && v.scopeMode {
+			switch mm.String() {
+			case "up", "k":
+				if v.scopePickCursor > 0 {
+					v.scopePickCursor--
+				}
+			case "down", "j":
+				if v.scopePickCursor < len(scopePresets)-1 {
+					v.scopePickCursor++
+				}
+			case "enter":
+				sel := scopePresets[v.scopePickCursor]
+				if sel.value == "" {
+					// "other…" — drop into free-text input.
+					v.scopeMode = false
+					v.scopeBuf.Reset()
+					return v, nil
+				}
+				v.scopeBuf.Reset()
+				v.scopeBuf.WriteString(sel.value)
+				v.step = integAddStepSave
+				return v, nil
+			}
 			return v, nil
 		}
 		// v1.13.0-rc6 — step 0 is a service picker (unless the user
@@ -176,6 +224,9 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if v.step == integAddStepName && !v.serviceMode {
 				// Empty name + backspace returns to the service picker.
 				v.serviceMode = true
+			} else if v.step == integAddStepScope && !v.scopeMode {
+				// v1.13.0-rc7 — empty scope + backspace returns to picker.
+				v.scopeMode = true
 			}
 			if v.step == integAddStepCred {
 				v.credEdited = true
@@ -363,6 +414,13 @@ func (v *addIntegrationView) View() string {
 		{"What it can do", v.scopeBuf.String(), "optional — e.g. read-only on /docs", false},
 	}
 	for i, r := range rows {
+		// v1.13.0-rc7 — hide the scope row inline when the preset
+		// picker will render below (otherwise the operator sees both
+		// an empty "What it can do:" row AND the picker, which is
+		// confusing).
+		if i == integAddStepScope && v.step == integAddStepScope && v.scopeMode {
+			continue
+		}
 		style := mutedSt
 		if i == v.step {
 			style = cursorSt
@@ -381,6 +439,20 @@ func (v *addIntegrationView) View() string {
 		b.WriteString("\n")
 		if i == v.step && r.hint != "" {
 			b.WriteString("    " + mutedSt.Render(r.hint) + "\n")
+		}
+	}
+
+	// v1.13.0-rc7 — scope-note preset picker on step 5.
+	if v.step == integAddStepScope && v.scopeMode {
+		b.WriteString("\n" + cursorSt.Render("What it can do") + "\n")
+		for i, p := range scopePresets {
+			prefix := "    "
+			label := p.label
+			if i == v.scopePickCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(p.label)
+			}
+			b.WriteString(prefix + label + "\n")
 		}
 	}
 

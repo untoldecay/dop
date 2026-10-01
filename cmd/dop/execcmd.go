@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -40,15 +41,24 @@ func runExec(args []string) int {
 	// wrappers don't break.
 	inheritEnv := fs.Bool("inherit-env", false, "let the child see the parent process's env (LEGACY behaviour — leaks unrelated secrets)")
 	_ = fs.Bool("clean-env", true, "deprecated: clean is now the default; use --inherit-env to opt back into parent-env passthrough")
-	noPull := fs.Bool("no-pull", false, "skip auto-pull freshness check")
+	noPull := fs.Bool("no-pull", false, "skip the silent auto-pull freshness check")
 	_ = fs.Parse(args)
-	_ = noPull // freshness check is a Phase 5 polish
 	cleanEnv := !*inheritEnv
 
 	child := fs.Args()
 	if len(child) == 0 {
 		fmt.Fprintln(os.Stderr, "dop exec: missing command after --")
 		return 2
+	}
+
+	// v1.13.0-rc7 — silent auto-pull before resolving the bearer so
+	// an admin-side `dop grant add-grant` / `token reseal` / integration
+	// edit propagates to the agent on the very next exec, no manual
+	// `dop pull`. Rate-limited via a sidecar so hot exec loops stay
+	// cheap. Opt out with --no-pull or DOP_NO_AUTO_PULL=1.
+	if !*noPull {
+		paths, _ := config.Resolve()
+		autoPullIfStale(paths)
 	}
 
 	bearer, source, err := readBearerWithSource(*tokenFile)
@@ -179,7 +189,10 @@ func runWhoami(args []string) int {
 	fmt.Printf("bearer: %s\n", bearerFingerprint(bearer))
 	fmt.Printf("subject:    %s\n", res.subject)
 	fmt.Printf("generation: %d\n", res.generation)
-	fmt.Printf("expires_at: %s\n", res.expiresAt.Format(time.RFC3339))
+	// v1.13.0-rc7 — Fizz: pre-rc7, --expires=never surfaced here as
+	// "9999-12-31T23:59:59Z" (the sentinel). Route through the same
+	// display helper the token list/show commands use.
+	fmt.Printf("expires_at: %s\n", tokenExpiryDisplay(res.expiresAt))
 	if res.binding != nil {
 		fmt.Printf("binding:    %s", res.binding.Kind)
 		switch res.binding.Kind {
@@ -199,6 +212,14 @@ func runWhoami(args []string) int {
 }
 
 func runEnv(args []string) int {
+	// v1.13.0-rc7 — same silent auto-pull as exec. `dop env` is often
+	// the first thing an agent script runs (`$(dop env)` style), so
+	// seeing fresh grants here matters just as much. --no-pull would
+	// require a flag parser; env usually runs with no flags so we
+	// gate purely on DOP_NO_AUTO_PULL=1.
+	paths, _ := config.Resolve()
+	autoPullIfStale(paths)
+
 	bearer, source, err := readBearerWithSource("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop env: %v\n", err)
@@ -225,7 +246,6 @@ func runEnv(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop env: %v\n", err)
 		return 1
 	}
-	paths, _ := config.Resolve()
 	audit.Append(paths, audit.Event{
 		Kind:     audit.EventEnv,
 		Subject:  res.subject,
@@ -876,3 +896,45 @@ func short(s string) string {
 // stubs to keep imports honest — some ed25519 use is deferred to Phase 5.
 var _ = ed25519.Sign
 var _ io.Writer = os.Stderr
+
+// v1.13.0-rc7 — autoPullIfStale runs the same silent fetch+merge as
+// admin login (autoPullVault), but rate-limited via a sidecar
+// timestamp file so hot-loop exec/env calls don't thrash the git
+// remote. Default freshness window is 15s; override via
+// DOP_AUTOPULL_MAX_AGE_SEC. Opt out entirely via DOP_NO_AUTO_PULL=1.
+//
+// This is what makes "admin edits a grant → agent sees it on next
+// exec" truly transparent on both sides. Pre-rc7 the agent needed to
+// manually `dop pull` to see admin's push.
+func autoPullIfStale(paths *config.Paths) {
+	if os.Getenv("DOP_NO_AUTO_PULL") == "1" {
+		return
+	}
+	if paths == nil {
+		return
+	}
+	if _, err := os.Stat(filepath.Join(paths.Vault, ".git")); err != nil {
+		return
+	}
+	maxAge := 15 * time.Second
+	if raw := os.Getenv("DOP_AUTOPULL_MAX_AGE_SEC"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			maxAge = time.Duration(n) * time.Second
+		}
+	}
+	marker := filepath.Join(paths.Root, "last-pull.ts")
+	if fi, err := os.Stat(marker); err == nil {
+		if time.Since(fi.ModTime()) < maxAge {
+			return
+		}
+	}
+	autoPullVault(paths)
+	// Touch the sidecar whether or not the pull succeeded — a failed
+	// pull shouldn't trigger another one 10ms later. The ModTime is
+	// what gates us, not the file contents.
+	_ = os.MkdirAll(paths.Root, 0o700)
+	f, err := os.Create(marker)
+	if err == nil {
+		f.Close()
+	}
+}
