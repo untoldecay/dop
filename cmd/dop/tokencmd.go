@@ -1557,6 +1557,13 @@ func detectPrefixCollisions(v *vault.Vault, grants []string) map[string][]string
 
 // resolveGrantsToEnv walks the vault and materializes the env bundle
 // that a bearer with these grants would receive at exec time.
+//
+// v1.13.0-rc13 — the bundle is now kind-aware:
+//   - ${PREFIX}_KIND is always emitted so the agent can self-describe
+//   - well-known metadata keys get promoted to canonical env names
+//     (base_url → _BASE_URL, cli_cmd → _CMD, mcp_url → _MCP_URL, etc.)
+//   - leftover metadata keys still emit under their raw-sanitized name
+//     so the escape hatch (free-form metadata) keeps working
 func resolveGrantsToEnv(v *vault.Vault, grants []string) map[string]string {
 	out := map[string]string{}
 	for _, gid := range grants {
@@ -1580,11 +1587,46 @@ func resolveGrantsToEnv(v *vault.Vault, grants []string) map[string]string {
 		// within the same integration don't collide on `<INTEGRATION>_TOKEN`.
 		prefix := g.EffectivePrefix()
 		out[prefix+"_TOKEN"] = tok.Value
+		out[prefix+"_KIND"] = vault.IntegrationKindOf(integ)
+
+		// Promoted metadata keys: canonical uppercase env names per kind.
+		// Keys the operator ALSO put in metadata under these well-known
+		// names get consumed here and not re-emitted below.
+		promoted := promotedMetadataKeys()
+		for rawKey, envSuffix := range promoted {
+			if mv, ok := integ.Metadata[rawKey]; ok && mv != "" {
+				out[prefix+"_"+envSuffix] = mv
+			}
+		}
+		// Everything else in metadata falls through as-is (sanitized),
+		// so free-form keys continue to work.
 		for mk, mv := range integ.Metadata {
+			if _, isPromoted := promoted[mk]; isPromoted {
+				continue
+			}
 			out[prefix+"_"+vault.SanitizeEnvKey(mk)] = mv
 		}
 	}
 	return out
+}
+
+// promotedMetadataKeys maps raw metadata keys (as stored on
+// Integration.Metadata) to the canonical env suffix they're promoted
+// to at resolve time. Centralized here so TUI/CLI prompts and the env
+// renderer stay in sync.
+func promotedMetadataKeys() map[string]string {
+	return map[string]string{
+		// api
+		"base_url":      "BASE_URL",
+		"endpoints_url": "ENDPOINTS_URL",
+		"auth_header":   "AUTH_HEADER",
+		// cli
+		"cli_cmd":       "CMD",
+		"cli_args_hint": "ARGS_HINT",
+		// mcp
+		"mcp_url": "MCP_URL",
+		"mcp_cmd": "MCP_CMD",
+	}
 }
 
 // v1.12 — sealEnvWrapped resolves env from record.Grants using the

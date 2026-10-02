@@ -314,6 +314,11 @@ func integrationEqual(a, b vault.Integration) bool {
 	if !strings.EqualFold(a.Owner, b.Owner) {
 		return false
 	}
+	// v1.13.0-rc13 — a non-owner MUST NOT flip Kind on a protected
+	// integration; the daemon's save-guard reverts via this diff.
+	if a.Kind != b.Kind {
+		return false
+	}
 	return true
 }
 

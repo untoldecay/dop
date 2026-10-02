@@ -363,6 +363,9 @@ func (v *integrationListView) viewDetail() string {
 		desc = "(none)"
 	}
 	b.WriteString(fmt.Sprintf("  description: %s\n", desc))
+	// v1.13.0-rc13 — surface kind right under description so operators
+	// scan what kind of thing they're looking at.
+	b.WriteString(fmt.Sprintf("  kind: %s\n", vault.IntegrationKindOf(it)))
 	// v1.13.0-rc12 — surface owner-lock state. Short owner hex so the
 	// line stays readable; `dop team list` is the long-form view.
 	if it.Protected {
