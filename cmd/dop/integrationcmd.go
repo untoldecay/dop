@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -22,7 +23,7 @@ import (
 // runIntegration is the subcommand dispatcher.
 func runIntegration(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop integration <add|list|remove|remove-token>")
+		fmt.Fprintln(os.Stderr, "usage: dop integration <add|list|remove|remove-token|set-token>")
 		return 2
 	}
 	switch args[0] {
@@ -34,6 +35,8 @@ func runIntegration(args []string) int {
 		return runIntegrationRemove(args[1:])
 	case "remove-token":
 		return runIntegrationRemoveToken(args[1:])
+	case "set-token":
+		return runIntegrationSetToken(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop integration: unknown subcommand %q\n", args[0])
 		return 2
@@ -287,6 +290,161 @@ func runIntegrationRemoveToken(args []string) int {
 			len(tokens), key, len(affectedGrants), suffix)
 	}
 	return 0
+}
+
+// runIntegrationSetToken rotates a token's value and/or edits its
+// scope note on an existing integration. Explicit "mutate a thing"
+// counterpart to `integration add` which is really "create or merge."
+// v1.13.0-rc16.
+//
+//	dop integration set-token --name <integ> --token-name <tok>
+//	    [--value <new-value>] [--scope-note <new-scope>]
+//
+// At least one of --value / --scope-note is required. Omitting either
+// leaves that field untouched. Owner-gated for protected integrations
+// (same gate as other mutations). Emits EventIntegrationTokenSet with
+// flags indicating what changed; NEVER logs the new value.
+func runIntegrationSetToken(args []string) int {
+	fs := flag.NewFlagSet("integration set-token", flag.ExitOnError)
+	name := fs.String("name", "", "integration name (required)")
+	tokenName := fs.String("token-name", "", "upstream token to mutate (required)")
+	newValue := fs.String("value", "", "new value for the token (rotate). omit to leave unchanged.")
+	newScope := fs.String("scope-note", "", "new scope note for the token. omit to leave unchanged.")
+	valueStdin := fs.Bool("value-stdin", false, "read the new value from stdin instead of --value (used by TUI + scripts to keep secrets off the command line)")
+	_ = fs.Parse(args)
+
+	if *name == "" || *tokenName == "" {
+		fmt.Fprintln(os.Stderr, "dop integration set-token: --name and --token-name are required")
+		return 2
+	}
+	rotating := *newValue != "" || *valueStdin
+	editingScope := fs.Lookup("scope-note").Value.String() != "" || hasFlagExplicit(fs, "scope-note")
+	if !rotating && !editingScope {
+		fmt.Fprintln(os.Stderr, "dop integration set-token: supply at least one of --value / --value-stdin / --scope-note")
+		return 2
+	}
+
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration set-token: %v\n", err)
+		return 1
+	}
+	v, vaultPath, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration set-token: %v\n", err)
+		return 1
+	}
+
+	key, ok := v.FindIntegrationKey(*name)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "dop integration set-token: no integration named %q\n", *name)
+		return 1
+	}
+	integ := v.Integrations[key]
+	// v1.13.0-rc12 — owner gate on protected integrations.
+	if err := requireProtectionOwner(client, "integration "+key, integ.Protected, integ.Owner); err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration set-token: %v\n", err)
+		return 1
+	}
+	tok, ok := integ.Tokens[*tokenName]
+	if !ok {
+		names := make([]string, 0, len(integ.Tokens))
+		for k := range integ.Tokens {
+			names = append(names, k)
+		}
+		fmt.Fprintf(os.Stderr, "dop integration set-token: integration %q has no token %q (has: %v)\n", key, *tokenName, names)
+		return 1
+	}
+
+	// Resolve the new value — either flag or stdin.
+	resolvedValue := *newValue
+	if *valueStdin {
+		stdinBytes, err := readValueStdin()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop integration set-token: read value from stdin: %v\n", err)
+			return 1
+		}
+		resolvedValue = stdinBytes
+		rotating = resolvedValue != ""
+	}
+
+	// Apply the mutation.
+	rotated := rotating && resolvedValue != tok.Value
+	scopeChanged := false
+	if rotating {
+		tok.Value = resolvedValue
+	}
+	if editingScope {
+		if *newScope != tok.ScopeNote {
+			scopeChanged = true
+		}
+		tok.ScopeNote = *newScope
+	}
+	if !rotated && !scopeChanged {
+		fmt.Fprintln(os.Stderr, "dop integration set-token: nothing to change (value + scope unchanged)")
+		return 0
+	}
+	integ.Tokens[*tokenName] = tok
+	v.Integrations[key] = integ
+
+	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration set-token: %v\n", err)
+		return 1
+	}
+
+	// Audit — never carries the value, only flags about what changed.
+	audit.Append(paths, audit.Event{
+		Kind:    audit.EventIntegrationTokenSet,
+		Subject: key,
+		Extra: map[string]string{
+			"token":         *tokenName,
+			"rotated":       boolStr(rotated),
+			"scope_changed": boolStr(scopeChanged),
+		},
+	})
+
+	parts := []string{}
+	if rotated {
+		parts = append(parts, "value rotated")
+	}
+	if scopeChanged {
+		parts = append(parts, fmt.Sprintf("scope %q", tok.ScopeNote))
+	}
+	fmt.Fprintf(os.Stderr, "dop integration set-token: %s/%s → %s\n", key, *tokenName, strings.Join(parts, ", "))
+	fmt.Fprintln(os.Stderr, "  bearers currently holding this token see the new value on their NEXT exec (direct availability) — or after `dop token reseal <subject>` for ed25519-bound bearers.")
+	return 0
+}
+
+// readValueStdin reads a single line (sans trailing newline) from
+// stdin. Used by set-token --value-stdin so the TUI can rotate a
+// value without ever placing it on a command line.
+func readValueStdin() (string, error) {
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(data), "\r\n"), nil
+}
+
+// hasFlagExplicit reports whether a boolean/string flag was passed
+// explicitly (vs just carrying its zero value). flag.FlagSet doesn't
+// expose "was this set", so we walk the parsed set.
+func hasFlagExplicit(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }
 
 // sortStrings is a lightweight helper — kept local so we don't grow the
