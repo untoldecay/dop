@@ -174,19 +174,21 @@ var probePresets = []struct {
 	{"yes", true, "scan common OpenAPI paths (or MCP tools/list) and stamp the result"},
 }
 
-// probeApplicable reports whether the probe step should be visited
-// for the current kind + KindSlot buffer. Returns false for cli/other
-// and for api/mcp when the KindSlot is empty.
+// probeApplicable reports whether the probe step should be VISIBLE
+// for the current kind. v1.13.0-rc16 — widened: always true for
+// api/mcp regardless of URL contents. The silent "URL has no scheme"
+// skip from rc15 was confusing — operators who typed
+// `boiler-alpha.decaylab.com` without https:// never saw the step
+// and couldn't tell whether the probe would have run.
+//
+// Now the step is always offered for api/mcp; if the operator picks
+// "yes" but the URL is missing or has no scheme, the CLI prints a
+// clear "probe-endpoints skipped (no --base-url set)" and the save
+// still succeeds. Loud > silent.
 func probeApplicable(kind, urlBuf string) bool {
-	url := strings.TrimSpace(urlBuf)
-	if url == "" {
-		return false
-	}
 	switch kind {
-	case vault.IntegrationKindAPI:
-		return strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
-	case vault.IntegrationKindMCP:
-		return strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
+	case vault.IntegrationKindAPI, vault.IntegrationKindMCP:
+		return true
 	}
 	return false
 }
