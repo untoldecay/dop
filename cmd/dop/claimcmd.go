@@ -793,6 +793,17 @@ func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex stri
 		fmt.Fprintln(os.Stderr, "  → the admin will scan the QR or open the URL on their phone,")
 		fmt.Fprintln(os.Stderr, "    enter the DOP approval passphrase, and this claim will unblock.")
 		fmt.Fprintln(os.Stderr)
+		// v1.13.0-rc14 — polling / state / abort guidance lives HERE,
+		// in the runtime output of `dop claim`, not in the pasted
+		// handoff text. See contract 13_handoff_text_shape.md: the
+		// paste must contain only the command; everything else about
+		// how to monitor/abort is streamed by the binary itself when
+		// the receiving agent runs it.
+		fmt.Fprintln(os.Stderr, "  this command blocks until approval. while it runs you can:")
+		fmt.Fprintln(os.Stderr, "    • poll from another shell:  dop claim --status --json")
+		fmt.Fprintln(os.Stderr, "        → returns {state: pending | approved | expired | absent}")
+		fmt.Fprintln(os.Stderr, "    • cancel the pending claim:  dop claim --cancel")
+		fmt.Fprintln(os.Stderr)
 		// Unicode terminal QR — harmless for humans, ignored by agents.
 		qrterminal.GenerateHalfBlock(publicURL, qrterminal.L, os.Stderr)
 	}
