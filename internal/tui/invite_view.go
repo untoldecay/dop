@@ -352,11 +352,11 @@ func (v *inviteView) View() string {
 
 	switch v.step {
 	case inviteStepIdentity:
-		b.WriteString("\n" + helpSt.Render("← → toggle · enter confirm · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("← → toggle | enter confirm | esc cancel"))
 	case inviteStepName, inviteStepPassphrase:
-		b.WriteString("\n" + helpSt.Render("enter next · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("enter next | esc cancel"))
 	case inviteStepRunning:
-		b.WriteString("\n" + helpSt.Render("esc kill invite · (auto-approves when passphrase matches)"))
+		b.WriteString("\n" + helpSt.Render("esc kill invite | (auto-approves when passphrase matches)"))
 	case inviteStepDone:
 		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
 	}

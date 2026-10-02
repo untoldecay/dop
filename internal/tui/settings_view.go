@@ -80,6 +80,6 @@ func (v *settingsView) View() string {
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("f toggle · esc back"))
+	b.WriteString("\n" + helpSt.Render("f toggle | esc back"))
 	return b.String()
 }
