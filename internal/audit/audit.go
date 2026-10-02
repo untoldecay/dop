@@ -44,6 +44,11 @@ const (
 	EventProtectedCreate        = "protected_create"         // integration or grant marked protected
 	EventProtectedTokenIssue    = "protected_token_issue"    // bearer issued containing a protected grant
 	EventProtectedBypassAttempt = "protected_bypass_attempt" // daemon reverted a non-owner's protected mutation
+	// v1.13.0-rc15 — endpoints doc probe at `integration add` time.
+	// Opt-in via --probe-endpoints. One event per run (success OR
+	// failure). Lets operators audit "did DOP make an outbound HTTP
+	// call on my behalf, and what did it find?"
+	EventIntegrationProbed = "integration_probed"
 )
 
 // Event is one line in the log.

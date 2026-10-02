@@ -20,6 +20,7 @@ Short, scannable list of every feature contract. Each contract pins the invarian
 | 14 | [TUI Patterns](14_tui_patterns.md) | lipgloss conventions, preset pickers, multi-select, confirmation, help legends. |
 | 15 | [Protected Credentials](15_protected_credentials.md) | Owner-locked integrations + grants (Shape B + daemon revert). |
 | 16 | [Integration Kinds](16_integration_kinds.md) | `api`/`cli`/`mcp`/`other` + canonical env-key promotion. |
+| 17 | [Endpoints Discovery Probe](17_endpoints_probe.md) | Opt-in probe at `integration add` time. OpenAPI path order + MCP tools/list. |
 
 ## Status
 
