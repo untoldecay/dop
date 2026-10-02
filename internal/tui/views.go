@@ -1777,17 +1777,21 @@ func (v *listView) viewDetail() string {
 	id := v.capIDs[idx]
 	var b strings.Builder
 	b.WriteString(titleSt.Render("Token: "+c.Subject) + "\n\n")
-	b.WriteString(fmt.Sprintf("  capability_id: %s\n", id))
-	b.WriteString(fmt.Sprintf("  status:        %s\n", c.Status))
-	b.WriteString(fmt.Sprintf("  generation:    %d\n", c.Generation))
-	b.WriteString(fmt.Sprintf("  grants:        %v\n", c.Grants))
-	b.WriteString(fmt.Sprintf("  created_at:    %s\n", c.CreatedAt.Format("2006-01-02 15:04 MST")))
-	b.WriteString(fmt.Sprintf("  expires_at:    %s\n", expiresDisplay(c.ExpiresAt, "2006-01-02 15:04 MST")))
-	b.WriteString(fmt.Sprintf("  issued_by:     %s\n", c.IssuedBy))
+	// v1.13.0-rc18 — kvLine for alignment parity with integration +
+	// grant detail. Widest label is `capability_id` (13 chars);
+	// `bound pubkey` matches it; use 13 as the column width.
+	const w = 13
+	b.WriteString(kvLine("capability_id", id, w))
+	b.WriteString(kvLine("status", c.Status, w))
+	b.WriteString(kvLine("generation", fmt.Sprintf("%d", c.Generation), w))
+	b.WriteString(kvLine("grants", fmt.Sprintf("%v", c.Grants), w))
+	b.WriteString(kvLine("created_at", c.CreatedAt.Format("2006-01-02 15:04 MST"), w))
+	b.WriteString(kvLine("expires_at", expiresDisplay(c.ExpiresAt, "2006-01-02 15:04 MST"), w))
+	b.WriteString(kvLine("issued_by", c.IssuedBy, w))
 	if c.Binding != nil {
-		b.WriteString(fmt.Sprintf("  binding:       %s\n", c.Binding.Kind))
+		b.WriteString(kvLine("binding", c.Binding.Kind, w))
 		if c.Binding.Pubkey != "" {
-			b.WriteString(fmt.Sprintf("  bound pubkey:  %s…\n", c.Binding.Pubkey[:24]))
+			b.WriteString(kvLine("bound pubkey", c.Binding.Pubkey[:24]+"…", w))
 		} else if c.Binding.Kind == "pin" {
 			b.WriteString(mutedSt.Render("  (unclaimed — the agent hasn't run `dop claim` yet)\n"))
 		}

@@ -1383,43 +1383,41 @@ func (v *integrationListView) viewTokenList() string {
 // visual parity.
 func integrationMetaBlock(it vault.Integration, tokenCount int) string {
 	var b strings.Builder
-	line := func(label, value string) {
-		if strings.TrimSpace(value) == "" {
-			return
-		}
-		b.WriteString("  " + mutedSt.Render(label) + ": " + value + "\n")
-	}
-	// Header: kind + token count on one line.
+	// v1.13.0-rc18 — label-aligned via shared kvLine. The widest
+	// label in the api/cli/mcp set is `endpoints_probed_at` at 19
+	// chars; use that as the column width so every row aligns.
+	const w = 19
+	// Header: kind + token count on one line (no label, no padding).
 	b.WriteString("  " + mutedSt.Render(fmt.Sprintf("kind=%s · %d token(s)", vault.IntegrationKindOf(it), tokenCount)) + "\n")
-	line("description", it.Description)
+	b.WriteString(kvLine("description", it.Description, w))
 	if it.Protected {
 		owner := it.Owner
 		if len(owner) > 8 {
 			owner = owner[:8] + "…"
 		}
-		line("protection", "🔒 owner-locked (owner="+owner+")")
+		b.WriteString(kvLine("protection", "🔒 owner-locked (owner="+owner+")", w))
 	}
 	// Kind-specific primary fields.
 	kind := vault.IntegrationKindOf(it)
 	switch kind {
 	case vault.IntegrationKindAPI:
-		line("base_url", it.Metadata["base_url"])
-		line("endpoints_url", it.Metadata["endpoints_url"])
-		line("auth_header", it.Metadata["auth_header"])
-		line("auth_style", it.Metadata["auth_style"])
+		b.WriteString(kvLine("base_url", it.Metadata["base_url"], w))
+		b.WriteString(kvLine("endpoints_url", it.Metadata["endpoints_url"], w))
+		b.WriteString(kvLine("auth_header", it.Metadata["auth_header"], w))
+		b.WriteString(kvLine("auth_style", it.Metadata["auth_style"], w))
 	case vault.IntegrationKindCLI:
-		line("cmd", it.Metadata["cli_cmd"])
-		line("args_hint", it.Metadata["cli_args_hint"])
-		line("cli_auth_env", it.Metadata["cli_auth_env"])
-		line("cli_install", it.Metadata["cli_install"])
-		line("cli_help", it.Metadata["cli_help"])
+		b.WriteString(kvLine("cmd", it.Metadata["cli_cmd"], w))
+		b.WriteString(kvLine("args_hint", it.Metadata["cli_args_hint"], w))
+		b.WriteString(kvLine("cli_auth_env", it.Metadata["cli_auth_env"], w))
+		b.WriteString(kvLine("cli_install", it.Metadata["cli_install"], w))
+		b.WriteString(kvLine("cli_help", it.Metadata["cli_help"], w))
 	case vault.IntegrationKindMCP:
-		line("mcp_url", it.Metadata["mcp_url"])
-		line("mcp_cmd", it.Metadata["mcp_cmd"])
+		b.WriteString(kvLine("mcp_url", it.Metadata["mcp_url"], w))
+		b.WriteString(kvLine("mcp_cmd", it.Metadata["mcp_cmd"], w))
 	}
 	// Any-kind advanced fields.
-	line("server_root", it.Metadata["server_root"])
-	line("allowed", it.Metadata["allowed"])
+	b.WriteString(kvLine("server_root", it.Metadata["server_root"], w))
+	b.WriteString(kvLine("allowed", it.Metadata["allowed"], w))
 	// Free-form metadata that isn't promoted: dump under one line
 	// so operators see what else was stored.
 	promoted := map[string]bool{
@@ -1439,14 +1437,12 @@ func integrationMetaBlock(it vault.Integration, tokenCount int) string {
 	}
 	if len(extras) > 0 {
 		sort.Strings(extras)
-		line("metadata", strings.Join(extras, ", "))
+		b.WriteString(kvLine("metadata", strings.Join(extras, ", "), w))
 	}
 	// Probe stamps (if present) — small nod to the probe feature.
-	if it.Metadata["endpoints_probed_at"] != "" {
-		line("endpoints_probed_at", it.Metadata["endpoints_probed_at"])
-	}
+	b.WriteString(kvLine("endpoints_probed_at", it.Metadata["endpoints_probed_at"], w))
 	if it.Metadata["mcp_probed_at"] != "" {
-		line("mcp_probed_at", it.Metadata["mcp_probed_at"]+" ("+it.Metadata["mcp_probe_result"]+")")
+		b.WriteString(kvLine("mcp_probed_at", it.Metadata["mcp_probed_at"]+" ("+it.Metadata["mcp_probe_result"]+")", w))
 	}
 	return b.String()
 }
@@ -2061,23 +2057,28 @@ func (v *grantListView) viewDetail() string {
 	g := v.items[id]
 	var b strings.Builder
 	b.WriteString(titleSt.Render("Grant: "+id) + "\n\n")
-	b.WriteString(fmt.Sprintf("  integration: %s\n", g.Integration))
-	b.WriteString(fmt.Sprintf("  token:       %s\n", g.Token))
+	// v1.13.0-rc18 — kvLine for alignment parity with integration
+	// detail. Widest label here is `integration` (11 chars); keep the
+	// column width consistent with the shared pattern.
+	const w = 11
+	b.WriteString(kvLine("integration", g.Integration, w))
+	b.WriteString(kvLine("token", g.Token, w))
 	prefix := g.EnvPrefix
 	if prefix == "" {
 		prefix = mutedSt.Render(fmt.Sprintf("(default: %s)", g.EffectivePrefix()))
 	}
-	b.WriteString(fmt.Sprintf("  env_prefix:  %s\n", prefix))
-	if len(g.Projects) > 0 {
-		b.WriteString(fmt.Sprintf("  projects:    %s\n", strings.Join(g.Projects, ", ")))
-	} else {
-		b.WriteString("  projects:    " + mutedSt.Render("(none — press `e` to add)") + "\n")
+	b.WriteString(kvLine("env_prefix", prefix, w))
+	// v1.13.0-rc12 — surface owner-lock state when protected.
+	if g.Protected {
+		owner := g.Owner
+		if len(owner) > 8 {
+			owner = owner[:8] + "…"
+		}
+		b.WriteString(kvLine("protection", "🔒 owner-locked (owner="+owner+")", w))
 	}
-	if len(g.Tags) > 0 {
-		b.WriteString(fmt.Sprintf("  tags:        %s\n", strings.Join(g.Tags, ", ")))
-	} else {
-		b.WriteString("  tags:        " + mutedSt.Render("(none)") + "\n")
-	}
+	// Projects + tags: always render; absence is informative.
+	b.WriteString(kvLineAlways("projects", strings.Join(g.Projects, ", "), "(none — press `e` to add)", w))
+	b.WriteString(kvLineAlways("tags", strings.Join(g.Tags, ", "), "(none)", w))
 	b.WriteString(mutedSt.Render("\n  Projects and tags are metadata for grouping.\n"))
 	b.WriteString(mutedSt.Render("  They do NOT act as permission boundaries — the grant is the unit of permission.\n"))
 	b.WriteString("\n" + helpSt.Render("any key back"))
