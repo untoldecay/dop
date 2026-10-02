@@ -2,9 +2,11 @@
 
 ## Scope
 - The binary bundle file (`capabilities/<lookup_id>.bundle`) that carries a bearer's env vars, encrypted so only the bearer holder can open it.
+- v1.12 adds TWO ECDH-based envelopes on the capability record (`EnvWrapped`, `BearerWrapped`) that enable direct-availability flows: admin-side env reseal + bearer rotation without a re-claim.
 
 ## Purpose
 - Deliver credentials to agents without letting anyone else with vault-repo access read them.
+- v1.12: enable grant edits / env reseal / bearer rotation visible to the agent on next exec without a human-driven re-claim round-trip.
 
 ## Invariants
 - MUST use the fixed-header binary layout: `magic(4)|version(4)|cap_id(32)|generation(8)|expires_at(8)|nonce(24)|wrapped_key(48)|ciphertext`.
@@ -21,6 +23,15 @@
 - MUST refuse to open a bundle whose generation is lower than the caller's `MinGeneration` — rollback-replay defense.
 - MUST verify the inner (plaintext-side) `generation` + `expires_at_unix` fields match the outer header — defense in depth.
 - MUST include the encrypted env, subject, and (when set) binding info inside the AEAD-sealed payload.
+
+### v1.12 direct-availability (EnvWrapped / BearerWrapped)
+- `EnvWrapped` MUST be sealed via ECDH against the bearer's P-256 pubkey (from `binding.pubkey` with `binding.key_type == "p256"`). Ed25519 bearers CANNOT receive an EnvWrapped — admin must `dop agent migrate` first.
+- Admin-side `sealEnvWrapped` MUST re-resolve env from the live vault at seal time (so grant edits take effect on the next exec without re-claim).
+- Agent-side `dop exec` + `dop env` MUST prefer the live record's EnvWrapped over opening the on-disk bundle when both are present (keeps the agent on the current grant set).
+- `BearerWrapped` MUST carry the NEW bearer + new lookup id, sealed to the agent's P-256 pubkey. Used by `dop token rotate`.
+- `dop token rotate` MUST set the OLD record's status to `rotated` and attach `BearerWrapped`; the agent's next exec decrypts, re-tags the SE key, and switches bearers transparently.
+- Admin's ECDH operation MUST use the admin daemon RPC `SharedSecret` (so the admin's private key never leaves the daemon).
+- v1.13.0-rc11 Way B: when no bearer is supplied to `dop exec` / `dop env`, the agent MUST scan `<paths.Root>/agent-keys/*.p256` for keys that can decrypt an active record's EnvWrapped. 0 candidates → clear error; 1 → use it; >1 → require `--agent-name` to disambiguate.
 
 ## Forbidden Behaviors
 - MUST NOT store the bearer inside the bundle.
@@ -47,6 +58,9 @@
 - `v1_exec_flow.sh` tamper test (flip last byte → read fails).
 - Wrong-bearer test (unknown bearer → read fails).
 - Expiry test (fresh bearer with 1s TTL → read fails after sleep).
+- `v1_1320_way_b_bearer_free.sh` — bearer-free exec via local P-256 key (rc11).
+- EnvWrapped reseal after `grant add` surfaces new env on next exec without re-claim (v1.12 M3-M5).
+- `token rotate` writes BearerWrapped on the OLD record + marks it `rotated`; agent's next exec switches to the new bearer.
 
 ## Open Questions
 - Should we add a max-bundle-size guard to `capability.Read` so a malicious file can't cause a huge allocation?

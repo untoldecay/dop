@@ -14,7 +14,12 @@
 - MUST include these fields per event: `ts (RFC3339 UTC), event, subject?, lookup_id?, host, actor?, extra?`.
 
 ## Mandatory Behaviors
-- MUST emit one event per: `issue`, `claim_pending`, `claim`, `claim_approved`, `claim_denied` (with reason), `repin`, `revoke`, `exec`, `admin_login`, `admin_logout`.
+- MUST emit one event per the recognized event kinds:
+  - Core (pre-rc12): `issue`, `claim_pending`, `claim`, `claim_approved`, `claim_denied` (with reason), `repin`, `revoke`, `exec`, `admin_login`, `admin_logout`.
+  - v1.9: `env`, `env_denied` (exec/env refusal on bad binding).
+  - v1.9: `invite`, `invite_response`, `invite_complete` (two-admin bootstrap handshake).
+  - v1.11: `agent_migrated` (ed25519 → P-256 re-enrollment).
+  - v1.13.0-rc12: `protected_create`, `protected_token_issue`, `protected_bypass_attempt` (see contract 15).
 - MUST include reason strings on denial: `pin_mismatch`, `pin_expired`, `rejected`, `approval_timeout`, `admin_removed`.
 - MUST fire `audit.Notify` on Darwin for `claim_pending`, `claim`, `claim_denied`, `revoke`.
 - MUST honor `DOP_NO_NOTIFY=1` (used by tests + headless CI).

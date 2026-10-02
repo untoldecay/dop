@@ -14,11 +14,19 @@
 
 ## Mandatory Behaviors
 - MUST store each admin as `{age_recipient, ed25519_pubkey, added_at, note}`.
-- MUST store each integration as `{description?, metadata?, tokens: {name: {value, scope_note?}}}`.
-- MUST store each grant as `{integration, token, env_prefix}` where `env_prefix` defaults to uppercase integration name when empty.
-- MUST store each capability as `{subject, grants[], created_at, expires_at, generation, lookup_id, bundle_hash, issued_by, status, binding?, signature}` keyed by hex `capability_id`.
+- MUST store each integration as `{description?, metadata?, tokens: {name: {value, scope_note?}}, protected?, owner?, kind?}`.
+  - `protected` (rc12): bool, owner-lock flag; see contract 15.
+  - `owner` (rc12): ed25519 pubkey hex of the owning admin; required when `protected: true`, empty otherwise.
+  - `kind` (rc13): one of `api`/`cli`/`mcp`/`other`, or empty (empty reads as `api`); see contract 16.
+- MUST store each grant as `{integration, token, env_prefix, projects?, tags?, protected?, owner?}` where `env_prefix` defaults to uppercase integration name when empty.
+  - `projects` + `tags` (rc8): string arrays for grouping.
+  - `protected` + `owner` (rc12): inherited from parent integration on grant creation; see contract 15.
+- MUST store each capability as `{subject, grants[], created_at, expires_at, generation, lookup_id, bundle_hash, issued_by, status, binding?, signature, env_wrapped?, bearer_wrapped?}` keyed by hex `capability_id`.
+  - `env_wrapped` + `bearer_wrapped` (v1.12): ECDH direct-availability envelopes; see contract 04.
 - MUST refuse to migrate a v0.3 numeric schema automatically — the operator MUST start fresh.
 - MUST re-encrypt with the age recipients of every current admin on every save.
+- MUST honor the admin-loss safety guard (rc10.4): if the loaded vault reports fewer admins than the on-disk vault's `admins.trust` file, saves MUST be refused rather than committed. Prevents silent multi-day divergence where an incomplete `v.Admins` is re-encrypted for only one recipient and orphans every other admin.
+- MUST invoke `enforceProtectedOnSave` on every write to revert non-owner mutations on protected resources (see contract 15).
 
 ## Forbidden Behaviors
 - MUST NOT store an unencrypted `vault.yaml` in the vault repo working tree at rest — SOPS `sops:` block MUST be present.
@@ -47,6 +55,9 @@
 - Verify `v1_issue_and_persist.sh` step 6 (vault SOPS-wrapped).
 - Verify `token revoke` bumps generation and marks status revoked (see `v1_lifecycle_ops.sh`).
 - Verify `vault_context` sidecar stays intact across issue/revoke cycles.
+- Verify `v1_1330_protected_credentials.sh` exercises the protected/owner fields end-to-end.
+- Verify `v1_1340_integration_kind.sh` exercises the kind field + legacy default.
+- Verify `saveVaultViaDaemon` refuses writes that would drop admins (rc10.4 safety guard).
 
 ## Open Questions
 - Do we ever need a v2 schema? If yes, we need a version-negotiation path — currently a v2 vault would be rejected outright.
