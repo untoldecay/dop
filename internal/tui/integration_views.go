@@ -36,22 +36,26 @@ import (
 //   100 Done
 
 const (
-	integAddStepName   = 0
-	integAddStepDesc   = 1
-	integAddStepURL    = 2
-	integAddStepCred   = 3
-	integAddStepValue  = 4
-	integAddStepScope  = 5
+	integAddStepName = 0
+	// v1.13.0-rc13 — new Kind preset step. Everything after shifts by 1.
+	// The old "Base URL" row becomes a KIND-ADAPTIVE slot: label +
+	// placeholder change based on kind picked at step 1.
+	integAddStepKind     = 1
+	integAddStepDesc     = 2
+	integAddStepKindSlot = 3 // was integAddStepKindSlot
+	integAddStepCred     = 4
+	integAddStepValue    = 5
+	integAddStepScope    = 6
 	// v1.13.0-rc12 — new protection step mirrors the scope-note preset
 	// picker shape (two-item preset list, enter to pick, backspace to
 	// return). If "protected" is picked, we insert a passphrase step
 	// before Save; otherwise we jump straight to Save.
-	integAddStepProtect    = 6
-	integAddStepPassphrase = 7
-	integAddStepSave       = 8
-	integAddStepRun        = 9
+	integAddStepProtect    = 7
+	integAddStepPassphrase = 8
+	integAddStepSave       = 9
+	integAddStepRun        = 10
 	integAddStepDone       = 100
-	integAddFieldCount     = 9 // rows shown (0..8)
+	integAddFieldCount     = 10 // rows shown (0..9)
 )
 
 type addIntegrationView struct {
@@ -86,13 +90,23 @@ type addIntegrationView struct {
 	scopePickCursor int
 	scopeMode       bool // true until operator picks "other…"
 
-	// v1.13.0-rc12 — Protection preset picker (step 6).
+	// v1.13.0-rc12 — Protection preset picker (step 7 post-rc13).
 	// Same shape as scopePresets. protectedChoice is set from the
 	// picker; passphraseBuf is the masked text input used when
 	// protectedChoice is true.
 	protectPickCursor int
 	protectedChoice   bool
 	passphraseBuf     strings.Builder
+
+	// v1.13.0-rc13 — Kind preset picker (step 1). The kind drives the
+	// label + behavior of the KindSlot step (step 3). urlBuf is reused
+	// across all kinds — its SEMANTIC meaning changes:
+	//   api  → _BASE_URL
+	//   cli  → _CMD (binary name)
+	//   mcp  → _MCP_URL or _MCP_CMD
+	//   other → ignored (step is skipped)
+	kindPickCursor int
+	kindChoice     string // IntegrationKind* value picked by the user
 
 	err   string
 	flash string
@@ -124,8 +138,45 @@ var protectionPresets = []struct {
 	{"protected", true, "only you can modify, requires your approval passphrase"},
 }
 
+// v1.13.0-rc13 — kindPresets drives the new Kind step. Order matters:
+// api is first (the default + most common). Changing a kind post-save
+// is handled by `dop integration add --kind <new>` (mutable).
+var kindPresets = []struct {
+	label string
+	value string // vault.IntegrationKind* constant
+	hint  string
+}{
+	{"api", vault.IntegrationKindAPI, "HTTP service — token sent to a base URL (default)"},
+	{"cli", vault.IntegrationKindCLI, "command-line tool — token exported to a binary's env"},
+	{"mcp", vault.IntegrationKindMCP, "Model Context Protocol server — URL or stdio launcher"},
+	{"other", vault.IntegrationKindOther, "unspecified — only the token is exported"},
+}
+
+// kindSlotLabel returns the row label + hint for the kind-adaptive
+// step 3 based on which kind the operator picked at step 1.
+func kindSlotLabel(kind string) (label, hint string) {
+	switch kind {
+	case vault.IntegrationKindCLI:
+		return "Command (binary name)", "e.g. dop, boiler — must be on the agent's PATH"
+	case vault.IntegrationKindMCP:
+		return "MCP URL (or stdio cmd)", "either an HTTP URL or a launcher cmd like `npx my-mcp`"
+	case vault.IntegrationKindOther:
+		return "(no extra config)", "other kind — this row is skipped"
+	default: // api, empty
+		return "Base URL", "optional — sets an env var like NOTION_BASE_URL"
+	}
+}
+
 func newAddIntegrationView(c *admin.Client, p *config.Paths) *addIntegrationView {
-	v := &addIntegrationView{client: c, paths: p, serviceMode: true, scopeMode: true}
+	v := &addIntegrationView{
+		client:      c,
+		paths:       p,
+		serviceMode: true,
+		scopeMode:   true,
+		// v1.13.0-rc13 — default kind is api (matches 99% of existing use
+		// and keeps the "just enter through the form" flow unchanged).
+		kindChoice: vault.IntegrationKindAPI,
+	}
 	v.loadExistingServices()
 	return v
 }
@@ -170,6 +221,27 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if v.step == integAddStepDone {
 			v.done = true
 			v.flash = "integration saved · synced with team"
+			return v, nil
+		}
+		// v1.13.0-rc13 — step 1 (Kind) is a preset picker. Enter commits
+		// the choice and advances to Description. Up/down moves within
+		// the preset list.
+		if v.step == integAddStepKind {
+			switch mm.String() {
+			case "up", "k":
+				if v.kindPickCursor > 0 {
+					v.kindPickCursor--
+				}
+			case "down", "j":
+				if v.kindPickCursor < len(kindPresets)-1 {
+					v.kindPickCursor++
+				}
+			case "enter":
+				v.kindChoice = kindPresets[v.kindPickCursor].value
+				v.err = ""
+				v.step = integAddStepDesc
+				return v, nil
+			}
 			return v, nil
 		}
 		// v1.13.0-rc7 — step 5 (scope note) is a preset picker unless
@@ -274,9 +346,17 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return v, nil
 				}
 				// Pick an existing service — advance to credential name.
+				// v1.13.0-rc13 — inherit the existing integration's kind
+				// so the Kind step isn't re-prompted when just adding a
+				// new credential to a service we already know about.
 				svc := v.existingServices[v.servicePickCursor-1]
 				v.nameBuf.Reset()
 				v.nameBuf.WriteString(svc)
+				if vlt, _, err := loadVaultForListing(v.client, v.paths); err == nil && vlt != nil {
+					if integ, ok := vlt.Integrations[svc]; ok {
+						v.kindChoice = vault.IntegrationKindOf(integ)
+					}
+				}
 				v.step = integAddStepCred
 				v.prefillIfNeeded()
 				return v, nil
@@ -329,7 +409,7 @@ func (v *addIntegrationView) curBuf() *strings.Builder {
 		return &v.nameBuf
 	case integAddStepDesc:
 		return &v.descBuf
-	case integAddStepURL:
+	case integAddStepKindSlot:
 		return &v.urlBuf
 	case integAddStepCred:
 		return &v.credBuf
@@ -360,11 +440,27 @@ func (v *addIntegrationView) advance() (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		v.err = ""
+		v.step = integAddStepKind
+	case integAddStepKind:
+		// Enter outside the picker loop (e.g. after a tab-forward)
+		// commits whatever the cursor is on. The picker loop handles the
+		// normal case.
+		if v.kindChoice == "" {
+			v.kindChoice = kindPresets[v.kindPickCursor].value
+		}
+		v.err = ""
 		v.step = integAddStepDesc
 	case integAddStepDesc:
 		v.err = ""
-		v.step = integAddStepURL
-	case integAddStepURL:
+		// v1.13.0-rc13 — "other" kind has no kind-specific slot;
+		// skip straight to the credential name.
+		if v.kindChoice == vault.IntegrationKindOther {
+			v.step = integAddStepCred
+			v.prefillIfNeeded()
+		} else {
+			v.step = integAddStepKindSlot
+		}
+	case integAddStepKindSlot:
 		v.err = ""
 		v.step = integAddStepCred
 		v.prefillIfNeeded()
@@ -423,14 +519,35 @@ func (v *addIntegrationView) save() tea.Cmd {
 	// the command line) and only when protection is actually on.
 	protected := v.protectedChoice
 	passphrase := v.passphraseBuf.String()
+	// v1.13.0-rc13 — capture kind + route the KindSlot buffer (urlBuf)
+	// into the right CLI flag per kind.
+	kind := v.kindChoice
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		args := []string{"integration", "add", "--name", name}
 		if desc != "" {
 			args = append(args, "--description", desc)
 		}
+		if kind != "" {
+			args = append(args, "--kind", kind)
+		}
+		// Kind-specific slot — urlBuf semantics depend on kind.
 		if url != "" {
-			args = append(args, "--base-url", url)
+			switch kind {
+			case vault.IntegrationKindCLI:
+				args = append(args, "--cmd", url)
+			case vault.IntegrationKindMCP:
+				// If it starts with http it's a URL; otherwise treat as
+				// stdio launcher command. Simple heuristic; operator can
+				// override via `integration add` on the CLI.
+				if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+					args = append(args, "--mcp-url", url)
+				} else {
+					args = append(args, "--mcp-cmd", url)
+				}
+			default: // api, other
+				args = append(args, "--base-url", url)
+			}
 		}
 		args = append(args, "--token", fmt.Sprintf("%s=%s:%s", cred, value, scope))
 		if protected {
@@ -512,6 +629,8 @@ func (v *addIntegrationView) View() string {
 	if v.protectedChoice {
 		protectionLabel = "protected (owner-locked)"
 	}
+	// v1.13.0-rc13 — kind-adaptive KindSlot row label/hint.
+	kindSlotLbl, kindSlotHint := kindSlotLabel(v.kindChoice)
 	rows := []struct {
 		label string
 		value string
@@ -519,8 +638,9 @@ func (v *addIntegrationView) View() string {
 		mask  bool
 	}{
 		{"Service name", v.nameBuf.String(), nameHint, false},
+		{"Kind", v.kindChoice, "api · cli · mcp · other — shapes what the agent sees", false},
 		{"What it's for", v.descBuf.String(), "optional — a one-line description", false},
-		{"Base URL", v.urlBuf.String(), "optional — sets an env var like NOTION_BASE_URL", false},
+		{kindSlotLbl, v.urlBuf.String(), kindSlotHint, false},
 		{"Credential name", v.credBuf.String(), "prefilled from the service name — edit if you'll have multiple credentials", false},
 		{"Credential value", v.valueBuf.String(), "the actual API key / token / password", true},
 		{"What it can do", v.scopeBuf.String(), "optional — e.g. read-only on /docs", false},
@@ -545,6 +665,15 @@ func (v *addIntegrationView) View() string {
 		if i == integAddStepPassphrase && !v.protectedChoice {
 			continue
 		}
+		// v1.13.0-rc13 — hide the Kind row inline when the Kind
+		// preset picker renders below. Hide the KindSlot row when
+		// kind=other (no kind-specific field for that kind).
+		if i == integAddStepKind && v.step == integAddStepKind {
+			continue
+		}
+		if i == integAddStepKindSlot && v.kindChoice == vault.IntegrationKindOther {
+			continue
+		}
 		style := mutedSt
 		if i == v.step {
 			style = cursorSt
@@ -566,13 +695,27 @@ func (v *addIntegrationView) View() string {
 		}
 	}
 
-	// v1.13.0-rc12 — Protection preset picker on step 6.
+	// v1.13.0-rc12 — Protection preset picker on step 7.
 	if v.step == integAddStepProtect {
 		b.WriteString("\n" + cursorSt.Render("Protection") + "\n")
 		for i, p := range protectionPresets {
 			prefix := "    "
 			label := p.label
 			if i == v.protectPickCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(p.label)
+			}
+			b.WriteString(prefix + label + "    " + mutedSt.Render(p.hint) + "\n")
+		}
+	}
+
+	// v1.13.0-rc13 — Kind preset picker on step 1.
+	if v.step == integAddStepKind {
+		b.WriteString("\n" + cursorSt.Render("Kind") + "\n")
+		for i, p := range kindPresets {
+			prefix := "    "
+			label := p.label
+			if i == v.kindPickCursor {
 				prefix = "  " + cursorSt.Render("➤ ")
 				label = cursorSt.Render(p.label)
 			}

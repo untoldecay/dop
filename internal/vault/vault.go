@@ -101,6 +101,51 @@ type Integration struct {
 	Tokens      map[string]Token  `yaml:"tokens,omitempty"`
 	Protected   bool              `yaml:"protected,omitempty"`
 	Owner       string            `yaml:"owner,omitempty"` // ed25519 pubkey hex
+	// v1.13.0-rc13 — Kind describes HOW the credential is used so the
+	// agent's env bundle can be self-describing. Empty Kind is treated
+	// as IntegrationKindAPI for backward-compat (every pre-rc13
+	// integration had a base_url and was API-style).
+	Kind string `yaml:"kind,omitempty"` // IntegrationKind* constants below
+}
+
+// Integration kinds. Drive the shape of the env bundle delivered to
+// agents + the per-kind metadata keys the CLI/TUI prompt for.
+const (
+	// IntegrationKindAPI — HTTP service. Hints: base_url, endpoints_url,
+	// auth_header (defaults to "Bearer"). Env export:
+	// ${NAME}_BASE_URL, ${NAME}_ENDPOINTS_URL, ${NAME}_AUTH_HEADER.
+	IntegrationKindAPI = "api"
+	// IntegrationKindCLI — binary invoked with the token in env. Hints:
+	// cli_cmd (the binary name on PATH), cli_args_hint (usage snippet).
+	// Env export: ${NAME}_CMD, ${NAME}_ARGS_HINT.
+	IntegrationKindCLI = "cli"
+	// IntegrationKindMCP — Model Context Protocol server. Hints: one of
+	// mcp_url (http) or mcp_cmd (stdio launcher). Env export:
+	// ${NAME}_MCP_URL / ${NAME}_MCP_CMD.
+	IntegrationKindMCP = "mcp"
+	// IntegrationKindOther — unspecified. Only TOKEN is exported.
+	IntegrationKindOther = "other"
+)
+
+// IntegrationKindOf returns the effective kind of an integration,
+// substituting the legacy default (IntegrationKindAPI) when Kind is
+// empty. Callers should prefer this over reading Kind directly.
+func IntegrationKindOf(integ Integration) string {
+	if integ.Kind == "" {
+		return IntegrationKindAPI
+	}
+	return integ.Kind
+}
+
+// ValidIntegrationKind reports whether s is one of the recognized
+// IntegrationKind* values. Case-sensitive on purpose — vault entries
+// should carry the canonical lowercase form.
+func ValidIntegrationKind(s string) bool {
+	switch s {
+	case IntegrationKindAPI, IntegrationKindCLI, IntegrationKindMCP, IntegrationKindOther:
+		return true
+	}
+	return false
 }
 
 // NormalizeIntegrationName returns the canonical form of an

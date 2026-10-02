@@ -81,7 +81,9 @@ func runIntegrationList(args []string) int {
 			}
 			lock = fmt.Sprintf(" 🔒 owner=%s", owner)
 		}
-		fmt.Printf("- %s  (%s)%s\n", n, desc, lock)
+		// v1.13.0-rc13 — kind prefix so operators scan what each row IS.
+		kind := vault.IntegrationKindOf(integ)
+		fmt.Printf("- [%s] %s  (%s)%s\n", kind, n, desc, lock)
 		for k, vv := range integ.Metadata {
 			fmt.Printf("    %s: %s\n", k, vv)
 		}
@@ -312,16 +314,30 @@ func runIntegrationAdd(args []string) int {
 	// at save when set. Owner locked to current admin pubkey.
 	protected := fs.Bool("protected", false, "mark this integration as owner-locked — only the current admin can modify it (requires approval passphrase)")
 	passphraseStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin instead of the tty (used by scripts and TUI)")
+	// v1.13.0-rc13 — kind + per-kind hint flags. These promote to
+	// canonical env keys for the agent (see resolveGrantsToEnv).
+	kind := fs.String("kind", "", "integration kind — api (default) · cli · mcp · other. Shapes the env bundle the agent sees.")
+	endpointsURL := fs.String("endpoints-url", "", "api kind — URL where the service documents its endpoints (OpenAPI, discovery page, etc). Just a hint, DOP does not fetch it.")
+	authHeader := fs.String("auth-header", "", "api kind — auth-header template, defaults to `Bearer` on the agent side.")
+	cliCmd := fs.String("cmd", "", "cli kind — the binary name the agent should invoke (e.g. dop, boiler).")
+	cliArgsHint := fs.String("args-hint", "", "cli kind — a free-form usage snippet surfaced to the agent (e.g. 'exec --inherit-env').")
+	mcpURL := fs.String("mcp-url", "", "mcp kind — HTTP URL for the MCP server.")
+	mcpCmd := fs.String("mcp-cmd", "", "mcp kind — stdio launcher command for the MCP server.")
 	_ = fs.Parse(args)
 
 	if *name == "" {
 		fmt.Fprintln(os.Stderr, "dop integration add: --name required")
 		return 2
 	}
-	if len(tokens) == 0 {
-		fmt.Fprintln(os.Stderr, "dop integration add: at least one --token required")
+	if *kind != "" && !vault.ValidIntegrationKind(*kind) {
+		fmt.Fprintf(os.Stderr, "dop integration add: --kind %q is not one of api, cli, mcp, other\n", *kind)
 		return 2
 	}
+	// v1.13.0-rc13 — --token is required for NEW integrations but
+	// optional on updates (so operators can flip kind, add metadata,
+	// or change endpoints-url on an existing one without re-stating
+	// every token). The existence check happens below after the vault
+	// loads; defer the validation until we know if the row exists.
 
 	paths, _ := config.Resolve()
 	client, err := requireAdminSession(paths)
@@ -351,6 +367,27 @@ func runIntegrationAdd(args []string) int {
 	if *baseURL != "" {
 		meta["base_url"] = *baseURL
 	}
+	// v1.13.0-rc13 — kind-specific flags fold into metadata under their
+	// canonical keys. These get promoted to typed env vars at resolve
+	// time (see resolveGrantsToEnv / promotedMetadataKeys).
+	if *endpointsURL != "" {
+		meta["endpoints_url"] = *endpointsURL
+	}
+	if *authHeader != "" {
+		meta["auth_header"] = *authHeader
+	}
+	if *cliCmd != "" {
+		meta["cli_cmd"] = *cliCmd
+	}
+	if *cliArgsHint != "" {
+		meta["cli_args_hint"] = *cliArgsHint
+	}
+	if *mcpURL != "" {
+		meta["mcp_url"] = *mcpURL
+	}
+	if *mcpCmd != "" {
+		meta["mcp_cmd"] = *mcpCmd
+	}
 	for _, m := range metadata {
 		if i := strings.IndexByte(m, '='); i > 0 {
 			meta[m[:i]] = m[i+1:]
@@ -377,6 +414,10 @@ func runIntegrationAdd(args []string) int {
 	//     tokens stay). Removing a token still requires a separate
 	//     `dop integration remove-token` (not yet added) or vault edit.
 	key, exists := v.FindIntegrationKey(*name)
+	if !exists && len(tokens) == 0 {
+		fmt.Fprintln(os.Stderr, "dop integration add: at least one --token required when creating a new integration")
+		return 2
+	}
 	action := "added"
 	var existing vault.Integration
 	if exists {
@@ -435,12 +476,21 @@ func runIntegrationAdd(args []string) int {
 			owner = st.AdminPubkey
 		}
 	}
+	// v1.13.0-rc13 — mutable kind: explicit --kind wins; else keep the
+	// existing stored kind; else fall through to empty, which readers
+	// treat as api (IntegrationKindOf). An operator can flip kind by
+	// passing --kind alone on an existing integration.
+	effectiveKind := existing.Kind
+	if *kind != "" {
+		effectiveKind = *kind
+	}
 	v.Integrations[key] = vault.Integration{
 		Description: *desc,
 		Metadata:    meta,
 		Tokens:      parsedTokens,
 		Protected:   protect,
 		Owner:       owner,
+		Kind:        effectiveKind,
 	}
 
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
