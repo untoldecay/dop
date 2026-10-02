@@ -160,10 +160,18 @@ func warnSEUnavailable(err error) {
 		return
 	}
 	seWarnedOnce = true
+	// v1.13.0-rc17 — louder frame per ClaudeMini field report. Prior
+	// output was a muted paragraph that scrolled off before operators
+	// noticed the security downgrade. Boxed warning catches the eye.
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "⚠  Secure Enclave unavailable — this dop binary isn't code-signed for SE access.")
-	fmt.Fprintln(os.Stderr, "   Falling back to file-backed ed25519 (extractable to any process on this uid).")
-	fmt.Fprintln(os.Stderr, "   To harden: install an officially-signed dop release.")
+	fmt.Fprintln(os.Stderr, "╭─ ⚠  SECURE ENCLAVE UNAVAILABLE ──────────────────────────────────────╮")
+	fmt.Fprintln(os.Stderr, "│ This dop binary isn't code-signed for Secure Enclave access.         │")
+	fmt.Fprintln(os.Stderr, "│ Falling back to file-backed ed25519 keys (0600 file, readable by any │")
+	fmt.Fprintln(os.Stderr, "│ process running as this uid).                                        │")
+	fmt.Fprintln(os.Stderr, "│                                                                      │")
+	fmt.Fprintln(os.Stderr, "│ To harden: install an officially-signed dop release.                 │")
+	fmt.Fprintln(os.Stderr, "│ Verify current posture with: dop doctor                              │")
+	fmt.Fprintln(os.Stderr, "╰──────────────────────────────────────────────────────────────────────╯")
 	fmt.Fprintln(os.Stderr, "   Details:", err)
 	fmt.Fprintln(os.Stderr, "")
 }

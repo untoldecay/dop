@@ -23,15 +23,29 @@
 - MUST emit `${PREFIX}_TOKEN` and `${PREFIX}_KIND` for every grant whose integration + token resolves.
 - MUST promote these metadata keys (if present + non-empty) to canonical env suffixes via `promotedMetadataKeys()`:
 
-  | Metadata key   | Env suffix       | Primary kind |
-  |----------------|------------------|--------------|
-  | `base_url`     | `_BASE_URL`      | api          |
-  | `endpoints_url`| `_ENDPOINTS_URL` | api          |
-  | `auth_header`  | `_AUTH_HEADER`   | api          |
-  | `cli_cmd`      | `_CMD`           | cli          |
-  | `cli_args_hint`| `_ARGS_HINT`     | cli          |
-  | `mcp_url`      | `_MCP_URL`       | mcp          |
-  | `mcp_cmd`      | `_MCP_CMD`       | mcp          |
+  | Metadata key    | Env suffix        | Primary kind | Since   |
+  |-----------------|-------------------|--------------|---------|
+  | `base_url`      | `_BASE_URL`       | api          | rc13    |
+  | `endpoints_url` | `_ENDPOINTS_URL`  | api          | rc13    |
+  | `auth_header`   | `_AUTH_HEADER`    | api          | rc13    |
+  | `auth_style`    | `_AUTH_STYLE`     | api          | rc17    |
+  | `cli_cmd`       | `_CMD`            | cli          | rc13    |
+  | `cli_args_hint` | `_ARGS_HINT`      | cli          | rc13    |
+  | `cli_auth_env`  | `_CLI_AUTH_ENV`   | cli          | rc17    |
+  | `cli_install`   | `_CLI_INSTALL`    | cli          | rc17    |
+  | `cli_help`      | `_CLI_HELP`       | cli          | rc17    |
+  | `mcp_url`       | `_MCP_URL`        | mcp          | rc13    |
+  | `mcp_cmd`       | `_MCP_CMD`        | mcp          | rc13    |
+  | `server_root`   | `_SERVER_ROOT`    | any          | rc17    |
+  | `allowed`       | `_ALLOWED`        | any          | rc17    |
+
+### cli_auth_env template expansion (v1.13.0-rc17)
+- MUST parse `cli_auth_env` as a `KEY=VAL;KEY=VAL` template, splitting on `;` and taking the first `=` of each pair.
+- MUST substitute `$TOKEN` → the resolved token value, `$SERVER_ROOT` → `server_root` metadata (falling back to `base_url` when `server_root` is empty), `$BASE_URL` → `base_url` metadata. Substitutions are plain string replace, not shell expansion.
+- MUST export each expanded KEY=VAL pair DIRECTLY into the env bundle (NOT prefixed by `${PREFIX}_`) so a CLI that reads its own well-known env names (e.g. `BOILER_TOKEN`, `BOILER_SERVER`) picks them up without an agent-side wrapper.
+- MUST refuse to export expanded keys whose uppercase form matches a known-dangerous name: `PATH`, `HOME`, `USER`, `SHELL`, `PWD`, `TMPDIR`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `DOP_TOKEN`, `DOP_TOKEN_FILE`, `DOP_NO_TUI`, `DOP_ALLOW_FILE_KEYS`, `DOP_SIGN_IDENTITY`, `DOP_NO_KEYCHAIN`, `DOP_NO_NOTIFY`.
+- MUST refuse to export keys that don't match POSIX env-var naming (`[A-Z_][A-Z0-9_]*`).
+- The template string ITSELF is also exported under `${PREFIX}_CLI_AUTH_ENV` for transparency / debugging.
 
 - Non-promoted metadata keys MUST still fall through under their `vault.SanitizeEnvKey`-sanitized name so free-form metadata keeps working.
 - `PREFIX` MUST be `grant.EffectivePrefix()` (which defaults to `<INTEGRATION>_<TOKEN>` sanitized).

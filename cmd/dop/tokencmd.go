@@ -1598,6 +1598,20 @@ func resolveGrantsToEnv(v *vault.Vault, grants []string) map[string]string {
 				out[prefix+"_"+envSuffix] = mv
 			}
 		}
+		// v1.13.0-rc17 — cli_auth_env template expansion. The
+		// template is also exported as _CLI_AUTH_ENV (above), AND
+		// each KEY=VAL pair in it is parsed, variables substituted,
+		// and the resulting pair exported DIRECTLY. This is what
+		// lets `boiler` just pick up `BOILER_TOKEN` + `BOILER_SERVER`
+		// without any agent-side glue.
+		if tmpl := integ.Metadata["cli_auth_env"]; tmpl != "" {
+			expanded := expandCliAuthEnv(tmpl, tok.Value, integ.Metadata["server_root"], integ.Metadata["base_url"])
+			for k, v := range expanded {
+				if cliAuthEnvKeyAllowed(k) {
+					out[k] = v
+				}
+			}
+		}
 		// Everything else in metadata falls through as-is (sanitized),
 		// so free-form keys continue to work.
 		for mk, mv := range integ.Metadata {
@@ -1610,6 +1624,68 @@ func resolveGrantsToEnv(v *vault.Vault, grants []string) map[string]string {
 	return out
 }
 
+// expandCliAuthEnv parses a `KEY1=VAL1;KEY2=VAL2` template and
+// substitutes `$TOKEN`, `$SERVER_ROOT`, `$BASE_URL` with their values.
+// v1.13.0-rc17 — folds ClaudeMini's #1 field-report ask: the CLI
+// reads its own env names (e.g. BOILER_TOKEN, BOILER_SERVER) which
+// differ from DOP's injected names, so unexpanded injection fails
+// silently. Returns the expanded KEY→VAL map so callers can gate on
+// cliAuthEnvKeyAllowed before export.
+func expandCliAuthEnv(template, token, serverRoot, baseURL string) map[string]string {
+	out := map[string]string{}
+	// Fall back to base_url when server_root wasn't set so templates
+	// using $SERVER_ROOT still work on integrations without the
+	// explicit field.
+	if serverRoot == "" {
+		serverRoot = baseURL
+	}
+	for _, pair := range strings.Split(template, ";") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		eq := strings.Index(pair, "=")
+		if eq < 0 {
+			continue
+		}
+		key := strings.TrimSpace(pair[:eq])
+		val := strings.TrimSpace(pair[eq+1:])
+		val = strings.ReplaceAll(val, "$TOKEN", token)
+		val = strings.ReplaceAll(val, "$SERVER_ROOT", serverRoot)
+		val = strings.ReplaceAll(val, "$BASE_URL", baseURL)
+		if key != "" {
+			out[key] = val
+		}
+	}
+	return out
+}
+
+// cliAuthEnvKeyAllowed is the safety blacklist for cli_auth_env's
+// direct-export path. Admins are trusted on everything they set in
+// the vault, but the direct-export path writes to env vars with any
+// name the template specifies — including ones that would subvert
+// the child process (PATH, LD_PRELOAD, DOP_* overrides). Refuse those.
+func cliAuthEnvKeyAllowed(key string) bool {
+	switch strings.ToUpper(key) {
+	case "", "PATH", "HOME", "USER", "SHELL", "PWD", "TMPDIR":
+		return false
+	case "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH":
+		return false
+	case "DOP_TOKEN", "DOP_TOKEN_FILE", "DOP_NO_TUI", "DOP_ALLOW_FILE_KEYS", "DOP_SIGN_IDENTITY", "DOP_NO_KEYCHAIN", "DOP_NO_NOTIFY":
+		return false
+	}
+	// Env var names must be [A-Z_][A-Z0-9_]* for POSIX portability.
+	for i, c := range key {
+		switch {
+		case c >= 'A' && c <= 'Z', c == '_':
+		case c >= '0' && c <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // promotedMetadataKeys maps raw metadata keys (as stored on
 // Integration.Metadata) to the canonical env suffix they're promoted
 // to at resolve time. Centralized here so TUI/CLI prompts and the env
@@ -1620,12 +1696,19 @@ func promotedMetadataKeys() map[string]string {
 		"base_url":      "BASE_URL",
 		"endpoints_url": "ENDPOINTS_URL",
 		"auth_header":   "AUTH_HEADER",
+		"auth_style":    "AUTH_STYLE", // v1.13.0-rc17 — bearer-header | basic | query-param | …
 		// cli
 		"cli_cmd":       "CMD",
 		"cli_args_hint": "ARGS_HINT",
+		"cli_auth_env":  "CLI_AUTH_ENV", // v1.13.0-rc17 — template, expanded + exported directly too
+		"cli_install":   "CLI_INSTALL",  // v1.13.0-rc17 — install hint
+		"cli_help":      "CLI_HELP",     // v1.13.0-rc17 — help-entry command
 		// mcp
 		"mcp_url": "MCP_URL",
 		"mcp_cmd": "MCP_CMD",
+		// any-kind
+		"server_root": "SERVER_ROOT", // v1.13.0-rc17 — distinct from base_url when they differ
+		"allowed":     "ALLOWED",     // v1.13.0-rc17 — scope hint
 	}
 }
 

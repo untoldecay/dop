@@ -490,6 +490,15 @@ func runIntegrationAdd(args []string) int {
 	// try the common OpenAPI paths against --base-url and stamp the
 	// first match. For kind=mcp + --mcp-url set, probe tools/list.
 	probeEndpoints := fs.Bool("probe-endpoints", false, "opt-in: scan common OpenAPI paths (api) or tools/list (mcp) and stamp the result on the integration metadata. Short per-request timeout; never auto-run.")
+	// v1.13.0-rc17 — 6 new advanced fields from the ClaudeMini field
+	// report. All optional. cli_auth_env uses $TOKEN / $SERVER_ROOT /
+	// $BASE_URL template substitution at env-resolve time.
+	cliAuthEnv := fs.String("cli-auth-env", "", "cli kind — template of KEY=VAL pairs (semicolon-separated) exported DIRECTLY so the CLI picks up its own env names. Supports $TOKEN, $SERVER_ROOT, $BASE_URL substitution. Example: `BOILER_TOKEN=$TOKEN;BOILER_SERVER=$SERVER_ROOT`")
+	serverRoot := fs.String("server-root", "", "any kind — server root distinct from base_url (common when base_url is an API path like `/admin/execute` but the CLI wants the root).")
+	allowed := fs.String("allowed", "", "any kind — scope allowlist hint (free-form string, e.g. `Agent_Collab,Skills_Registry`). Non-enforced; agents read to avoid 403-probing.")
+	authStyle := fs.String("auth-style", "", "api kind — auth-presentation hint, e.g. `bearer-header`, `basic`, `query-param`. Lets agents skip the auth-shape guess.")
+	cliInstall := fs.String("cli-install", "", "cli kind — install hint for the binary (free-form, e.g. `go install github.com/you/mycli/cmd/mycli@latest`).")
+	cliHelp := fs.String("cli-help", "", "cli kind — command the agent can run to self-discover the CLI (e.g. `mycli --help`).")
 	_ = fs.Parse(args)
 
 	if *name == "" {
@@ -554,6 +563,25 @@ func runIntegrationAdd(args []string) int {
 	}
 	if *mcpCmd != "" {
 		meta["mcp_cmd"] = *mcpCmd
+	}
+	// v1.13.0-rc17 — advanced fields.
+	if *cliAuthEnv != "" {
+		meta["cli_auth_env"] = *cliAuthEnv
+	}
+	if *serverRoot != "" {
+		meta["server_root"] = *serverRoot
+	}
+	if *allowed != "" {
+		meta["allowed"] = *allowed
+	}
+	if *authStyle != "" {
+		meta["auth_style"] = *authStyle
+	}
+	if *cliInstall != "" {
+		meta["cli_install"] = *cliInstall
+	}
+	if *cliHelp != "" {
+		meta["cli_help"] = *cliHelp
 	}
 	for _, m := range metadata {
 		if i := strings.IndexByte(m, '='); i > 0 {
@@ -1197,6 +1225,13 @@ func loadVaultForListingWithBearer(paths *config.Paths) (*vault.Vault, string, b
 	vp := paths.Vault + "/vault.yaml"
 	v, err := vault.LoadPlain(vp)
 	if err != nil {
+		// v1.13.0-rc17 — ErrEncryptedVault means the vault is
+		// SOPS-sealed and we have no admin session; return a clean
+		// actionable message instead of leaking the YAML parser's
+		// confusing "cannot parse ENC[...]" time-parse error.
+		if errors.Is(err, vault.ErrEncryptedVault) {
+			return nil, "", false, errors.New("vault is locked — run `dop admin login` (admin on this machine), OR set $DOP_TOKEN to a bearer to see what it has access to.\n  Non-admin inspection: `dop watch` tails the local audit log without needing an admin session.")
+		}
 		return nil, "", false, fmt.Errorf("not an admin session and vault not readable here (%w) — run `dop admin login` or set DOP_TOKEN", err)
 	}
 	// Compute bearer's lookupID.

@@ -56,11 +56,56 @@ const (
 	// before Save; otherwise we jump straight to Save.
 	integAddStepProtect    = 8
 	integAddStepPassphrase = 9
-	integAddStepSave       = 10
-	integAddStepRun        = 11
+	// v1.13.0-rc17 — Advanced optional fields. The yes/no gate +
+	// a sub-form of six optional metadata keys (cli_auth_env,
+	// server_root, allowed, auth_style, cli_install, cli_help).
+	// Default is no so the common path stays short.
+	integAddStepAdvanced   = 10
+	integAddStepAdvFields  = 11
+	integAddStepSave       = 12
+	integAddStepRun        = 13
 	integAddStepDone       = 100
-	integAddFieldCount     = 11 // rows shown (0..10)
+	integAddFieldCount     = 13
 )
+
+// advFieldSpec defines one row in the Advanced sub-form. hiddenFor
+// lists integration kinds for which the row is hidden entirely (so
+// e.g. cli_auth_env doesn't appear on an api integration).
+type advFieldSpec struct {
+	label     string
+	hint      string
+	bufIdx    int    // index into addIntegrationView.advBufs
+	cliFlag   string // flag passed to `dop integration add`
+	hiddenFor []string
+}
+
+var advFieldSpecs = []advFieldSpec{
+	{"CLI auth env template", "KEY1=$TOKEN;KEY2=$SERVER_ROOT · expanded + exported directly", 0, "--cli-auth-env", []string{"api", "mcp", "other"}},
+	{"Server root (CLI/API)", "distinct from base URL when they differ · e.g. https://host (no path)", 1, "--server-root", []string{}},
+	{"Allowed scope hint", "free text · e.g. Agent_Collab,Skills_Registry · agent reads to avoid 403-probing", 2, "--allowed", []string{}},
+	{"Auth style (API)", "e.g. bearer-header · basic · query-param", 3, "--auth-style", []string{"cli", "mcp", "other"}},
+	{"CLI install hint", "e.g. go install github.com/you/mycli/cmd/mycli@latest", 4, "--cli-install", []string{"api", "mcp", "other"}},
+	{"CLI help entry", "e.g. mycli --help", 5, "--cli-help", []string{"api", "mcp", "other"}},
+}
+
+// advFieldsForKind returns the subset of advFieldSpecs applicable to
+// the given kind (so the sub-form hides irrelevant rows).
+func advFieldsForKind(kind string) []int {
+	out := []int{}
+	for i, s := range advFieldSpecs {
+		hidden := false
+		for _, k := range s.hiddenFor {
+			if k == kind {
+				hidden = true
+				break
+			}
+		}
+		if !hidden {
+			out = append(out, i)
+		}
+	}
+	return out
+}
 
 type addIntegrationView struct {
 	client *admin.Client
@@ -118,6 +163,16 @@ type addIntegrationView struct {
 	// at save time.
 	probePickCursor int
 	probeChoice     bool
+	// v1.13.0-rc17 — probe summary extracted from the CLI stderr when
+	// the operator opted into probing. Rendered on the Done screen so
+	// the "did DOP find something?" question is answered loudly.
+	probeSummary string
+
+	// v1.13.0-rc17 — Advanced optional fields.
+	advancedPickCursor int
+	advancedChoice     bool  // false = skip, true = open the sub-form
+	advFieldIdx        int   // which applicable sub-field is active
+	advBufs            [6]strings.Builder
 
 	err   string
 	flash string
@@ -172,6 +227,15 @@ var probePresets = []struct {
 }{
 	{"no", false, "default — only the URL you entered gets stored"},
 	{"yes", true, "scan common OpenAPI paths (or MCP tools/list) and stamp the result"},
+}
+
+// advancedRowValue formats the inline-row text for the Advanced step
+// (shown in the always-visible row list).
+func advancedRowValue(yes bool) string {
+	if yes {
+		return "yes"
+	}
+	return "no"
 }
 
 // probeApplicable reports whether the probe step should be VISIBLE
@@ -242,7 +306,14 @@ func (v *addIntegrationView) Init() tea.Cmd { return nil }
 func (v *addIntegrationView) Done() bool    { return v.done }
 func (v *addIntegrationView) Flash() string { return v.flash }
 
-type integrationAddedMsg struct{ err string }
+type integrationAddedMsg struct {
+	err string
+	// v1.13.0-rc17 — probe outcome summary extracted from the
+	// subprocess stderr when the operator opted into probing. Shown
+	// on the Done screen so the operator sees what happened. Empty
+	// when probe was not requested.
+	probeSummary string
+}
 
 func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch mm := msg.(type) {
@@ -252,6 +323,7 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.step = integAddStepSave
 			return v, nil
 		}
+		v.probeSummary = mm.probeSummary
 		v.step = integAddStepDone
 	case tea.KeyMsg:
 		switch mm.String() {
@@ -355,6 +427,76 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				v.step = integAddStepCred
 				v.prefillIfNeeded()
 				return v, nil
+			}
+			return v, nil
+		}
+		// v1.13.0-rc17 — step 10 (Advanced? yes/no) is a two-item picker.
+		if v.step == integAddStepAdvanced {
+			switch mm.String() {
+			case "up", "k":
+				if v.advancedPickCursor > 0 {
+					v.advancedPickCursor--
+				}
+			case "down", "j":
+				if v.advancedPickCursor < 1 {
+					v.advancedPickCursor++
+				}
+			case "enter":
+				v.advancedChoice = v.advancedPickCursor == 1
+				v.err = ""
+				if v.advancedChoice {
+					v.advFieldIdx = 0
+					v.step = integAddStepAdvFields
+				} else {
+					v.step = integAddStepSave
+				}
+				return v, nil
+			}
+			return v, nil
+		}
+		// v1.13.0-rc17 — step 11 (Advanced sub-form) walks the
+		// kind-applicable fields; tab/shift+tab move between them,
+		// enter on the last field advances to Save, esc returns to
+		// the Advanced yes/no gate.
+		if v.step == integAddStepAdvFields {
+			fields := advFieldsForKind(v.kindChoice)
+			if len(fields) == 0 {
+				v.step = integAddStepSave
+				return v, nil
+			}
+			if v.advFieldIdx >= len(fields) {
+				v.advFieldIdx = len(fields) - 1
+			}
+			bufIdx := advFieldSpecs[fields[v.advFieldIdx]].bufIdx
+			buf := &v.advBufs[bufIdx]
+			switch mm.String() {
+			case "esc":
+				v.step = integAddStepAdvanced
+				return v, nil
+			case "tab", "down":
+				if v.advFieldIdx < len(fields)-1 {
+					v.advFieldIdx++
+				}
+			case "shift+tab", "up":
+				if v.advFieldIdx > 0 {
+					v.advFieldIdx--
+				}
+			case "enter":
+				if v.advFieldIdx < len(fields)-1 {
+					v.advFieldIdx++
+				} else {
+					v.step = integAddStepSave
+				}
+			case "backspace":
+				s := buf.String()
+				if len(s) > 0 {
+					buf.Reset()
+					buf.WriteString(s[:len(s)-1])
+				}
+			default:
+				if len(mm.Runes) > 0 {
+					buf.WriteString(string(mm.Runes))
+				}
 			}
 			return v, nil
 		}
@@ -561,7 +703,7 @@ func (v *addIntegrationView) advance() (tea.Model, tea.Cmd) {
 		if v.protectedChoice {
 			v.step = integAddStepPassphrase
 		} else {
-			v.step = integAddStepSave
+			v.step = integAddStepAdvanced
 		}
 	case integAddStepPassphrase:
 		if v.passphraseBuf.Len() == 0 {
@@ -569,6 +711,18 @@ func (v *addIntegrationView) advance() (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		v.err = ""
+		v.step = integAddStepAdvanced
+	case integAddStepAdvanced:
+		// Non-picker path (tab/enter from the help legend) — commit
+		// whatever the cursor sits on. The picker loop handles the normal
+		// enter-select case.
+		v.advancedChoice = v.advancedPickCursor == 1
+		if v.advancedChoice {
+			v.step = integAddStepAdvFields
+		} else {
+			v.step = integAddStepSave
+		}
+	case integAddStepAdvFields:
 		v.step = integAddStepSave
 	case integAddStepSave:
 		v.step = integAddStepRun
@@ -629,6 +783,13 @@ func (v *addIntegrationView) save() tea.Cmd {
 		if wantProbe {
 			args = append(args, "--probe-endpoints")
 		}
+		// v1.13.0-rc17 — advanced fields. Each non-empty buffer maps
+		// to its CLI flag; empty buffers are silently skipped.
+		for _, s := range advFieldSpecs {
+			if val := strings.TrimSpace(v.advBufs[s.bufIdx].String()); val != "" {
+				args = append(args, s.cliFlag, val)
+			}
+		}
 		if protected {
 			args = append(args, "--protected", "--passphrase-stdin")
 		}
@@ -642,7 +803,27 @@ func (v *addIntegrationView) save() tea.Cmd {
 		if err := cmd.Run(); err != nil {
 			return integrationAddedMsg{err: strings.TrimSpace(stderr.String())}
 		}
-		return integrationAddedMsg{}
+		// v1.13.0-rc17 — extract probe summary from stderr so the Done
+		// screen can surface "probe → <url>" / "probe → no match" /
+		// "probe-endpoints skipped (…)" instead of leaving the operator
+		// to wonder whether the probe ran. Grep for the stderr lines the
+		// CLI emits in runProbe.
+		summary := ""
+		if wantProbe {
+			for _, line := range strings.Split(stderr.String(), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.Contains(line, "probe →") || strings.Contains(line, "probe-endpoints skipped") {
+					if summary != "" {
+						summary += "\n"
+					}
+					summary += line
+				}
+			}
+			if summary == "" {
+				summary = "(no probe output — flag may be unsupported in this dop version)"
+			}
+		}
+		return integrationAddedMsg{probeSummary: summary}
 	}
 }
 
@@ -653,6 +834,16 @@ func (v *addIntegrationView) View() string {
 
 	if v.step == integAddStepDone {
 		b.WriteString(okSt.Render("✓ integration saved") + "\n\n")
+		// v1.13.0-rc17 — surface probe outcome when the operator asked
+		// for one. Operator can see immediately whether the probe found
+		// an endpoints doc or skipped for lack of base URL.
+		if v.probeSummary != "" {
+			b.WriteString(mutedSt.Render("Probe result:") + "\n")
+			for _, line := range strings.Split(v.probeSummary, "\n") {
+				b.WriteString("  " + mutedSt.Render(line) + "\n")
+			}
+			b.WriteString("\n")
+		}
 		b.WriteString(mutedSt.Render("Next: create a grant that binds a name (like `notion.read`) to this credential,") + "\n")
 		b.WriteString(mutedSt.Render("then `Issue token` to hand a bearer to your agent.") + "\n\n")
 		b.WriteString(helpSt.Render("any key to return"))
@@ -731,6 +922,7 @@ func (v *addIntegrationView) View() string {
 		{"What it can do", v.scopeBuf.String(), "optional — e.g. read-only on /docs", false},
 		{"Protection", protectionLabel, "default = any admin can modify; protected = only you (requires passphrase)", false},
 		{"Passphrase", strings.Repeat("•", v.passphraseBuf.Len()), "your admin approval passphrase", true},
+		{"Advanced", advancedRowValue(v.advancedChoice), "optional extra fields (CLI auth env, server root, allowed scope, etc.) · default no", false},
 	}
 	for i, r := range rows {
 		// v1.13.0-rc7 — hide the scope row inline when the preset
@@ -766,6 +958,11 @@ func (v *addIntegrationView) View() string {
 			continue
 		}
 		if i == integAddStepProbe && !probeApplicable(v.kindChoice, v.urlBuf.String()) {
+			continue
+		}
+		// v1.13.0-rc17 — hide the Advanced row inline when the yes/no
+		// picker or the sub-form is rendering below.
+		if i == integAddStepAdvanced && (v.step == integAddStepAdvanced || v.step == integAddStepAdvFields) {
 			continue
 		}
 		style := mutedSt
@@ -814,6 +1011,49 @@ func (v *addIntegrationView) View() string {
 				label = cursorSt.Render(p.label)
 			}
 			b.WriteString(prefix + label + "    " + mutedSt.Render(p.hint) + "\n")
+		}
+	}
+
+	// v1.13.0-rc17 — Advanced yes/no picker on step 10.
+	if v.step == integAddStepAdvanced {
+		b.WriteString("\n" + cursorSt.Render("Advanced optional fields?") + "\n")
+		opts := []struct {
+			label string
+			hint  string
+		}{
+			{"no", "default — skip to Save"},
+			{"yes", "open a sub-form of CLI auth env, server root, allowed scope, auth style, etc."},
+		}
+		for i, o := range opts {
+			prefix := "    "
+			label := o.label
+			if i == v.advancedPickCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(o.label)
+			}
+			b.WriteString(prefix + label + "    " + mutedSt.Render(o.hint) + "\n")
+		}
+	}
+
+	// v1.13.0-rc17 — Advanced sub-form on step 11.
+	if v.step == integAddStepAdvFields {
+		b.WriteString("\n" + cursorSt.Render("Advanced fields") + mutedSt.Render("  (tab/↑↓ move · enter next/save · esc back · any blank = skip)") + "\n")
+		fields := advFieldsForKind(v.kindChoice)
+		for i, idx := range fields {
+			spec := advFieldSpecs[idx]
+			buf := &v.advBufs[spec.bufIdx]
+			style := mutedSt
+			if i == v.advFieldIdx {
+				style = cursorSt
+			}
+			b.WriteString(style.Render(spec.label) + ": " + buf.String())
+			if i == v.advFieldIdx {
+				b.WriteString(cursorSt.Render("▎"))
+			}
+			b.WriteString("\n")
+			if i == v.advFieldIdx {
+				b.WriteString("    " + mutedSt.Render(spec.hint) + "\n")
+			}
 		}
 	}
 
