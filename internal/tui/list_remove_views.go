@@ -485,35 +485,12 @@ func (v *integrationListView) viewDetail() string {
 	}
 	it := v.items[name]
 	var b strings.Builder
-	b.WriteString(titleSt.Render("Integration: "+name) + "\n\n")
-	desc := it.Description
-	if desc == "" {
-		desc = "(none)"
-	}
-	b.WriteString(fmt.Sprintf("  description: %s\n", desc))
-	// v1.13.0-rc13 — surface kind right under description so operators
-	// scan what kind of thing they're looking at.
-	b.WriteString(fmt.Sprintf("  kind: %s\n", vault.IntegrationKindOf(it)))
-	// v1.13.0-rc12 — surface owner-lock state. Short owner hex so the
-	// line stays readable; `dop team list` is the long-form view.
-	if it.Protected {
-		owner := it.Owner
-		if len(owner) > 8 {
-			owner = owner[:8] + "…"
-		}
-		b.WriteString(fmt.Sprintf("  protection: 🔒 owner-locked (owner=%s)\n", owner))
-	}
-	if len(it.Metadata) > 0 {
-		b.WriteString("  metadata:\n")
-		keys := make([]string, 0, len(it.Metadata))
-		for k := range it.Metadata {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			b.WriteString(fmt.Sprintf("    %s: %s\n", k, it.Metadata[k]))
-		}
-	}
+	b.WriteString(titleSt.Render("Integration: "+name) + "\n")
+	// v1.13.0-rc17.1 — share the metadata block with the token
+	// drill-down (viewTokenList) so both views look identical. Keeps
+	// field order + "only non-empty" logic in one place.
+	b.WriteString(integrationMetaBlock(it, len(it.Tokens)))
+	b.WriteString("\n")
 	if len(it.Tokens) > 0 {
 		b.WriteString("  tokens:\n")
 		names := make([]string, 0, len(it.Tokens))
@@ -1358,7 +1335,11 @@ func (v *integrationListView) viewTokenList() string {
 	it := v.items[name]
 	var b strings.Builder
 	b.WriteString(titleSt.Render("Tokens on "+name) + "\n")
-	b.WriteString(mutedSt.Render(fmt.Sprintf("  kind=%s · %d token(s)", vault.IntegrationKindOf(it), len(v.tokenNames))) + "\n\n")
+	// v1.13.0-rc17 — render the full metadata block right under the
+	// title (kind, description, protection, kind-specific hints,
+	// shared/advanced fields). Only non-empty rows render.
+	b.WriteString(integrationMetaBlock(it, len(v.tokenNames)))
+	b.WriteString("\n")
 	if len(v.tokenNames) == 0 {
 		b.WriteString(mutedSt.Render("(no tokens — add one with `dop integration add --token`)") + "\n")
 	}
@@ -1385,6 +1366,87 @@ func (v *integrationListView) viewTokenList() string {
 	if v.flash != "" {
 		b.WriteString("\n" + okSt.Render(v.flash))
 		v.flash = ""
+	}
+	return b.String()
+}
+
+// integrationMetaBlock renders a compact metadata summary for an
+// integration, shown both at the top of the token drill-down view
+// AND inside the integration detail pane so the two places look
+// identical. Only non-empty fields render; order is: kind, token
+// count, description, protection, then kind-specific fields (base
+// URL / endpoints / command / MCP URL / etc.), then shared advanced
+// fields (server root, allowed, auth style, CLI install/help).
+// v1.13.0-rc17 — folds Cam's field-report ask: operators drilling
+// into a token want full context on the parent integration before
+// picking a token. v1.13.0-rc17.1 — reused in viewDetail for
+// visual parity.
+func integrationMetaBlock(it vault.Integration, tokenCount int) string {
+	var b strings.Builder
+	line := func(label, value string) {
+		if strings.TrimSpace(value) == "" {
+			return
+		}
+		b.WriteString("  " + mutedSt.Render(label) + ": " + value + "\n")
+	}
+	// Header: kind + token count on one line.
+	b.WriteString("  " + mutedSt.Render(fmt.Sprintf("kind=%s · %d token(s)", vault.IntegrationKindOf(it), tokenCount)) + "\n")
+	line("description", it.Description)
+	if it.Protected {
+		owner := it.Owner
+		if len(owner) > 8 {
+			owner = owner[:8] + "…"
+		}
+		line("protection", "🔒 owner-locked (owner="+owner+")")
+	}
+	// Kind-specific primary fields.
+	kind := vault.IntegrationKindOf(it)
+	switch kind {
+	case vault.IntegrationKindAPI:
+		line("base_url", it.Metadata["base_url"])
+		line("endpoints_url", it.Metadata["endpoints_url"])
+		line("auth_header", it.Metadata["auth_header"])
+		line("auth_style", it.Metadata["auth_style"])
+	case vault.IntegrationKindCLI:
+		line("cmd", it.Metadata["cli_cmd"])
+		line("args_hint", it.Metadata["cli_args_hint"])
+		line("cli_auth_env", it.Metadata["cli_auth_env"])
+		line("cli_install", it.Metadata["cli_install"])
+		line("cli_help", it.Metadata["cli_help"])
+	case vault.IntegrationKindMCP:
+		line("mcp_url", it.Metadata["mcp_url"])
+		line("mcp_cmd", it.Metadata["mcp_cmd"])
+	}
+	// Any-kind advanced fields.
+	line("server_root", it.Metadata["server_root"])
+	line("allowed", it.Metadata["allowed"])
+	// Free-form metadata that isn't promoted: dump under one line
+	// so operators see what else was stored.
+	promoted := map[string]bool{
+		"base_url": true, "endpoints_url": true, "auth_header": true, "auth_style": true,
+		"cli_cmd": true, "cli_args_hint": true, "cli_auth_env": true, "cli_install": true, "cli_help": true,
+		"mcp_url": true, "mcp_cmd": true,
+		"server_root": true, "allowed": true,
+		// probe stamps — surface for transparency
+		"endpoints_probed_at": true, "mcp_probed_at": true, "mcp_probe_result": true,
+	}
+	var extras []string
+	for k, v := range it.Metadata {
+		if promoted[k] || v == "" {
+			continue
+		}
+		extras = append(extras, k+"="+v)
+	}
+	if len(extras) > 0 {
+		sort.Strings(extras)
+		line("metadata", strings.Join(extras, ", "))
+	}
+	// Probe stamps (if present) — small nod to the probe feature.
+	if it.Metadata["endpoints_probed_at"] != "" {
+		line("endpoints_probed_at", it.Metadata["endpoints_probed_at"])
+	}
+	if it.Metadata["mcp_probed_at"] != "" {
+		line("mcp_probed_at", it.Metadata["mcp_probed_at"]+" ("+it.Metadata["mcp_probe_result"]+")")
 	}
 	return b.String()
 }
