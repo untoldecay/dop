@@ -139,7 +139,7 @@ func (v *resetView) View() string {
 		if v.err != "" {
 			b.WriteString("\n" + failSt.Render(v.err) + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("enter confirm · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("enter confirm | esc cancel"))
 	}
 	if v.step == 1 {
 		b.WriteString(mutedSt.Render("wiping…") + "\n")

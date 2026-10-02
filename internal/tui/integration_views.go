@@ -440,6 +440,17 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "up", "k":
 				if v.advancedPickCursor > 0 {
 					v.advancedPickCursor--
+				} else {
+					// v1.13.0-rc20 fix: at top of picker, up/k returns
+					// to the previous step (Passphrase if protected, else
+					// Protection). Previously only shift+tab worked —
+					// Cam reported the arrow key felt broken.
+					if v.protectedChoice {
+						v.step = integAddStepPassphrase
+					} else {
+						v.step = integAddStepProtect
+					}
+					return v, nil
 				}
 			case "down", "j":
 				if v.advancedPickCursor < 1 {
@@ -915,7 +926,7 @@ func (v *addIntegrationView) View() string {
 			}
 			b.WriteString(prefix + styled + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter select · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter select | esc cancel"))
 		if v.err != "" {
 			b.WriteString("\n" + failSt.Render(v.err))
 		}
@@ -1145,7 +1156,7 @@ func (v *addIntegrationView) View() string {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
 
-	b.WriteString("\n" + helpSt.Render("enter next · tab/↑↓ jump between rows · esc cancel"))
+	b.WriteString("\n" + helpSt.Render("enter next | tab/↑↓ jump between rows | esc cancel"))
 	return b.String()
 }
 
@@ -1442,7 +1453,7 @@ func (v *addGrantView) View() string {
 	case 6:
 		b.WriteString("saving…\n")
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move · enter next · esc cancel"))
+	b.WriteString("\n" + helpSt.Render("↑↓ move | enter next | esc cancel"))
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
 	}

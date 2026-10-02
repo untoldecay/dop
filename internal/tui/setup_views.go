@@ -255,7 +255,7 @@ func (v *setupAdminView) View() string {
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("enter next · tab/↑↓ jump between fields · esc cancel"))
+	b.WriteString("\n" + helpSt.Render("enter next | tab/↑↓ jump between fields | esc cancel"))
 	return b.String()
 }
 
@@ -362,6 +362,6 @@ func (v *attachVaultView) View() string {
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("enter attach · esc cancel"))
+	b.WriteString("\n" + helpSt.Render("enter attach | esc cancel"))
 	return b.String()
 }

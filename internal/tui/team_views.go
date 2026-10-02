@@ -174,7 +174,7 @@ func (v *revokeView) View() string {
 			}
 			b.WriteString(prefix + it.subject + mutedSt.Render(" ("+it.capID[:12]+")") + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter revoke · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter revoke | esc cancel"))
 	case 1:
 		it := v.items[v.cursor]
 		b.WriteString(fmt.Sprintf("Revoke %q?\n", it.subject))
@@ -182,7 +182,7 @@ func (v *revokeView) View() string {
 		if v.err != "" {
 			b.WriteString(failSt.Render(v.err) + "\n\n")
 		}
-		b.WriteString(helpSt.Render("y/enter confirm · n/esc cancel"))
+		b.WriteString(helpSt.Render("y/enter confirm | n/esc cancel"))
 	case 2:
 		b.WriteString("revoking…\n")
 	}
@@ -333,7 +333,7 @@ func (v *teamAddView) View() string {
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("enter next · esc cancel"))
+	b.WriteString("\n" + helpSt.Render("enter next | esc cancel"))
 	return b.String()
 }
 
@@ -385,9 +385,14 @@ func (v *teamListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		sort.Strings(v.names)
 	case tea.KeyMsg:
-		_ = mm
+		// v1.13.0-rc20 — tighten key handling to match other list views:
+		// only esc/q/ctrl+c closes. Previously any key closed; the help
+		// text already says "esc back" so the behavior now matches.
 		if v.loaded {
-			v.done = true
+			switch mm.String() {
+			case "esc", "q", "ctrl+c", "backspace":
+				v.done = true
+			}
 		}
 	}
 	return v, nil
@@ -395,14 +400,16 @@ func (v *teamListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (v *teamListView) View() string {
 	var b strings.Builder
-	b.WriteString(titleSt.Render("Team members") + "\n\n")
+	// v1.13.0-rc20 — Mole-style title + muted count subtitle.
+	b.WriteString(titleSt.Render("Team members") + "   " +
+		mutedSt.Render(fmt.Sprintf("%d admin(s)", len(v.names))) + "\n\n")
 	if !v.loaded {
 		b.WriteString("loading…")
 		return b.String()
 	}
 	if v.loadErr != "" {
 		b.WriteString(failSt.Render(v.loadErr) + "\n\n")
-		b.WriteString(helpSt.Render("any key to go back"))
+		b.WriteString(helpSt.Render("esc back"))
 		return b.String()
 	}
 	if len(v.names) == 0 {
@@ -423,7 +430,8 @@ func (v *teamListView) View() string {
 	b.WriteString("\n" + mutedSt.Render("This list shows distinct admin identities.") + "\n")
 	b.WriteString(mutedSt.Render("Devices you added with 'same identity' share one entry with the machine that invited them.") + "\n")
 	b.WriteString(mutedSt.Render("If you want two separate rows here, invite the second device with 'separate identity'.") + "\n")
-	b.WriteString("\n" + helpSt.Render("any key to go back"))
+	// v1.13.0-rc20 — "any key to go back" → "esc back" for consistency.
+	b.WriteString("\n" + helpSt.Render("esc back"))
 	return b.String()
 }
 
@@ -581,7 +589,7 @@ func (v *teamRemoveView) View() string {
 			}
 			b.WriteString(prefix + n + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter next · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter next | esc cancel"))
 	case 1:
 		b.WriteString(failSt.Render("⚠  ROTATION REQUIRED") + "\n\n")
 		b.WriteString(fmt.Sprintf("You're removing %s. Any cached copy of the vault they cloned before\n", v.names[v.cursor]))
@@ -597,7 +605,7 @@ func (v *teamRemoveView) View() string {
 		if v.err != "" {
 			b.WriteString("\n" + failSt.Render(v.err) + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("y/enter confirm removal · n/esc cancel"))
+		b.WriteString("\n" + helpSt.Render("y/enter confirm removal | n/esc cancel"))
 	case 2:
 		b.WriteString("removing…\n")
 	}

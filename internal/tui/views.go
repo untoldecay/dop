@@ -233,7 +233,7 @@ func (v *loginView) View() string {
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("enter unlock · esc back"))
+	b.WriteString("\n" + helpSt.Render("enter unlock | esc back"))
 	return b.String()
 }
 
@@ -868,13 +868,13 @@ func (v *issueView) View() string {
 	}
 
 	if pickerAtStep1 {
-		b.WriteString("\n" + helpSt.Render("↑↓ move · space toggle · a section · A all · n none · enter next · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | space toggle | a section | A all | n none | enter next | esc cancel"))
 	} else if pickerAtStep2 {
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter select · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter select | esc cancel"))
 	} else if v.step == 2 && v.expiryCustom {
 		b.WriteString("\n" + helpSt.Render("type duration (e.g. 72h, 30d) · backspace at empty returns to presets · enter submit · esc cancel"))
 	} else {
-		b.WriteString("\n" + helpSt.Render("enter next · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("enter next | esc cancel"))
 	}
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
@@ -1651,7 +1651,17 @@ func (v *listView) doRevoke() tea.Cmd {
 
 func (v *listView) View() string {
 	var b strings.Builder
-	b.WriteString(titleSt.Render("Tokens") + "\n\n")
+	// v1.13.0-rc20 — Mole-style title + muted count subtitle. Shows
+	// visible count (either active or all, depending on toggle).
+	vis := v.visible()
+	activeCount := 0
+	for _, c := range v.capabilities {
+		if c.Status == capability.RecordStatusActive {
+			activeCount++
+		}
+	}
+	subtitle := fmt.Sprintf("%d active · %d total", activeCount, len(v.capabilities))
+	b.WriteString(titleSt.Render("Bearers") + "   " + mutedSt.Render(subtitle) + "\n\n")
 	if !v.loaded {
 		b.WriteString("loading…")
 		return b.String()
@@ -1677,7 +1687,6 @@ func (v *listView) View() string {
 		return v.viewRepinDone()
 	}
 
-	vis := v.visible()
 	if len(vis) == 0 {
 		if v.showAll {
 			b.WriteString(mutedSt.Render("(no capabilities issued)"))
@@ -1685,6 +1694,14 @@ func (v *listView) View() string {
 			b.WriteString(mutedSt.Render("(no active capabilities — press `a` to include revoked)"))
 		}
 	}
+	// v1.13.0-rc20 — dynamic label width.
+	labelWidth := 16
+	for _, capIdx := range vis {
+		if w := lipgloss.Width(v.capabilities[capIdx].Subject); w > labelWidth {
+			labelWidth = w
+		}
+	}
+	labelWidth += 2
 	for i, capIdx := range vis {
 		c := v.capabilities[capIdx]
 		statusStyle := okSt
@@ -1705,18 +1722,27 @@ func (v *listView) View() string {
 		if len(capShort) > 8 {
 			capShort = capShort[:8]
 		}
-		// v1.13.0-rc7 — pad `subj` via lipgloss.NewStyle().Width(24)
+		// v1.13.0-rc7 — pad `subj` via lipgloss.NewStyle().Width()
 		// instead of `%-24s`. The latter counted ANSI escape bytes
 		// toward the field width, so the cursor-styled row ended up
 		// visually narrower and following columns shifted leftward
 		// (Fizz's "metadata jumps when the cursor moves" bug).
-		subjPad := lipgloss.NewStyle().Width(24).Render(subj)
+		// v1.13.0-rc20 — row trimmed to subj + capId + status. gen +
+		// expires moved to the status bar.
+		subjPad := lipgloss.NewStyle().Width(labelWidth).Render(subj)
 		b.WriteString(prefix + subjPad + "  " +
 			mutedSt.Render(capShort) + "  " +
-			statusStyle.Render(c.Status) +
-			fmt.Sprintf("  gen=%d  expires=%s\n",
-				c.Generation,
-				expiresDisplay(c.ExpiresAt, "2006-01-02")))
+			statusStyle.Render(c.Status) + "\n")
+	}
+
+	// v1.13.0-rc20 — status bar for the cursor row.
+	if len(vis) > 0 && v.cursor >= 0 && v.cursor < len(vis) {
+		c := v.capabilities[vis[v.cursor]]
+		bar := fmt.Sprintf("selected: %s  |  gen=%d  |  expires=%s  |  grants=%s",
+			c.Subject, c.Generation,
+			expiresDisplay(c.ExpiresAt, "2006-01-02"),
+			strings.Join(c.Grants, ","))
+		b.WriteString("\n" + mutedSt.Render(bar) + "\n")
 	}
 
 	hidden := len(v.capabilities) - len(vis)
@@ -1730,7 +1756,7 @@ func (v *listView) View() string {
 	if v.mode == listModeAction {
 		b.WriteString("\n" + v.renderActionMenu())
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter actions · esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter actions | esc back"))
 	}
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
@@ -1764,7 +1790,7 @@ func (v *listView) renderActionMenu() string {
 		}
 		b.WriteString(fmt.Sprintf("%s%s\n", prefix, lbl))
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move · enter run · backspace back"))
+	b.WriteString("\n" + helpSt.Render("↑↓ move | enter run | backspace back"))
 	return b.String()
 }
 
@@ -1813,7 +1839,7 @@ func (v *listView) viewConfirm() string {
 	b.WriteString(titleSt.Render("Revoke token?") + "\n\n")
 	b.WriteString(fmt.Sprintf("  subject: %s\n  grants:  %v\n\n", c.Subject, c.Grants))
 	b.WriteString(failSt.Render("This is immediate — the bearer will fail on next exec.") + "\n")
-	b.WriteString("\n" + helpSt.Render("y/enter confirm · n/esc cancel"))
+	b.WriteString("\n" + helpSt.Render("y/enter confirm | n/esc cancel"))
 	return b.String()
 }
 
@@ -1874,9 +1900,9 @@ func (v *listView) viewRepin() string {
 	// Help / error footer.
 	switch v.repinField {
 	case 0:
-		b.WriteString("\n" + helpSt.Render("type/paste bearer · enter next · tab switch field · esc back"))
+		b.WriteString("\n" + helpSt.Render("type/paste bearer | enter next | tab switch field | esc back"))
 	case 1:
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter submit · tab switch field · esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter submit | tab switch field | esc back"))
 	}
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
@@ -1932,7 +1958,7 @@ func (v *listView) viewGrantPick() string {
 		}
 		b.WriteString(prefix + marker + "  " + label + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move · space toggle · a all · n none · enter apply · esc back"))
+	b.WriteString("\n" + helpSt.Render("↑↓ move | space toggle | a all | n none | enter apply | esc back"))
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
 	}

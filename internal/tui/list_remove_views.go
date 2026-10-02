@@ -378,7 +378,9 @@ func (v *integrationListView) doRemove() tea.Cmd {
 
 func (v *integrationListView) View() string {
 	var b strings.Builder
-	b.WriteString(titleSt.Render("Integrations") + "\n\n")
+	// v1.13.0-rc20 — Mole-style title + muted count subtitle.
+	b.WriteString(titleSt.Render("Integrations") + "   " +
+		mutedSt.Render(fmt.Sprintf("%d total", len(v.names))) + "\n\n")
 	if !v.loaded {
 		return b.String() + "loading…"
 	}
@@ -410,6 +412,16 @@ func (v *integrationListView) View() string {
 	if len(v.names) == 0 {
 		b.WriteString(mutedSt.Render("(no integrations yet — use `Add integration` from the main menu)"))
 	}
+	// v1.13.0-rc20 — dynamic label width (longest name + 2) so long
+	// service names like `boiler_skills-registry` don't collide with
+	// the description column.
+	labelWidth := 12
+	for _, n := range v.names {
+		if w := lipgloss.Width(n); w > labelWidth {
+			labelWidth = w
+		}
+	}
+	labelWidth += 2
 	for i, n := range v.names {
 		it := v.items[n]
 		prefix := "    "
@@ -431,11 +443,29 @@ func (v *integrationListView) View() string {
 		if desc == "" {
 			desc = "-"
 		}
-		nrefs := len(v.referrers(n))
-		dispPad := lipgloss.NewStyle().Width(20).Render(disp)
-		b.WriteString(prefix + lock + dispPad + "  " +
-			mutedSt.Render(desc) +
-			fmt.Sprintf("  (grants=%d, tokens=%d)\n", nrefs, len(it.Tokens)))
+		// v1.13.0-rc20 — row shows only `name + desc`. The
+		// grants/tokens counts moved to the status bar below so each
+		// row stays scannable.
+		dispPad := lipgloss.NewStyle().Width(labelWidth).Render(disp)
+		b.WriteString(prefix + lock + dispPad + "  " + mutedSt.Render(desc) + "\n")
+	}
+
+	// v1.13.0-rc20 — status bar: contextual details for the cursor row.
+	// Shown ABOVE the help legend so it reads like "selected row info".
+	if len(v.names) > 0 && v.cursor >= 0 && v.cursor < len(v.names) {
+		selName := v.names[v.cursor]
+		selIt := v.items[selName]
+		nrefs := len(v.referrers(selName))
+		bar := fmt.Sprintf("selected: %s  |  kind=%s  |  grants=%d  |  tokens=%d",
+			selName, vault.IntegrationKindOf(selIt), nrefs, len(selIt.Tokens))
+		if selIt.Protected {
+			owner := selIt.Owner
+			if len(owner) > 8 {
+				owner = owner[:8] + "…"
+			}
+			bar += "  |  🔒 owner=" + owner
+		}
+		b.WriteString("\n" + mutedSt.Render(bar) + "\n")
 	}
 
 	// v1.13.0-rc4 — unified footer: help first, then flash/error.
@@ -444,7 +474,7 @@ func (v *integrationListView) View() string {
 	if v.mode == integModeAction {
 		b.WriteString("\n" + v.renderActionMenu())
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter manage tokens · d details · e edit · r remove · esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter manage tokens | d details | e edit | r remove | esc back"))
 	}
 	if v.flash != "" {
 		b.WriteString("\n" + okSt.Render(v.flash))
@@ -474,7 +504,7 @@ func (v *integrationListView) renderActionMenu() string {
 		}
 		b.WriteString(fmt.Sprintf("%s%s\n", prefix, lbl))
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move · enter run · backspace back"))
+	b.WriteString("\n" + helpSt.Render("↑↓ move | enter run | backspace back"))
 	return b.String()
 }
 
@@ -551,7 +581,7 @@ func (v *integrationListView) viewConfirm() string {
 	if v.err != "" {
 		b.WriteString(failSt.Render(v.err) + "\n\n")
 	}
-	b.WriteString(helpSt.Render("y/enter confirm · n/esc cancel"))
+	b.WriteString(helpSt.Render("y/enter confirm | n/esc cancel"))
 	return b.String()
 }
 
@@ -877,7 +907,7 @@ func (v *integrationRemoveView) View() string {
 			}
 			b.WriteString(prefix + n + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter next · esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter next | esc back"))
 	case 1:
 		target := v.names[v.cursor]
 		b.WriteString(fmt.Sprintf("Pick credentials under %q to remove:\n\n", target))
@@ -894,7 +924,7 @@ func (v *integrationRemoveView) View() string {
 			}
 			b.WriteString(prefix + marker + "  " + label + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move · space toggle · a all · n none · enter next · esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | space toggle | a all | n none | enter next | esc back"))
 		if v.err != "" {
 			b.WriteString("\n" + failSt.Render(v.err))
 		}
@@ -941,7 +971,7 @@ func (v *integrationRemoveView) View() string {
 		if v.err != "" {
 			b.WriteString("\n" + failSt.Render(v.err) + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("y/enter confirm · n/esc cancel"))
+		b.WriteString("\n" + helpSt.Render("y/enter confirm | n/esc cancel"))
 	case 3:
 		b.WriteString("removing…\n")
 	}
@@ -1343,6 +1373,15 @@ func (v *integrationListView) viewTokenList() string {
 	if len(v.tokenNames) == 0 {
 		b.WriteString(mutedSt.Render("(no tokens — add one with `dop integration add --token`)") + "\n")
 	}
+	// v1.13.0-rc20 — dynamic label width from longest token name so
+	// names like `boiler_skills-registry` don't collide with scope.
+	tokLabelWidth := 14
+	for _, tn := range v.tokenNames {
+		if w := lipgloss.Width(tn); w > tokLabelWidth {
+			tokLabelWidth = w
+		}
+	}
+	tokLabelWidth += 2
 	for i, tn := range v.tokenNames {
 		tok := it.Tokens[tn]
 		prefix := "    "
@@ -1355,13 +1394,13 @@ func (v *integrationListView) viewTokenList() string {
 		if scope == "" {
 			scope = "-"
 		}
-		dispPad := lipgloss.NewStyle().Width(20).Render(disp)
+		dispPad := lipgloss.NewStyle().Width(tokLabelWidth).Render(disp)
 		b.WriteString(prefix + dispPad + "  " + mutedSt.Render("("+scope+")") + "\n")
 	}
 	if v.mode == integModeTokenAction {
 		b.WriteString("\n" + v.renderTokenActionMenu())
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter actions · e edit integration · r remove integration · esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter actions | e edit integration | r remove integration | esc back"))
 	}
 	if v.flash != "" {
 		b.WriteString("\n" + okSt.Render(v.flash))
@@ -1468,7 +1507,7 @@ func (v *integrationListView) renderTokenActionMenu() string {
 		}
 		b.WriteString(fmt.Sprintf("%s%s\n", prefix, lbl))
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move · enter run · backspace back"))
+	b.WriteString("\n" + helpSt.Render("↑↓ move | enter run | backspace back"))
 	return b.String()
 }
 
@@ -1510,11 +1549,11 @@ func (v *integrationListView) viewTokenEditScope() string {
 			}
 			b.WriteString(prefix + label + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter select · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter select | esc cancel"))
 	} else {
 		b.WriteString(cursorSt.Render("Scope note") + ": " + v.tokenEditBuf.String() + cursorSt.Render("▎") + "\n")
 		b.WriteString("    " + mutedSt.Render("free text · empty + backspace → return to presets") + "\n")
-		b.WriteString("\n" + helpSt.Render("enter save · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("enter save | esc cancel"))
 	}
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
@@ -1529,7 +1568,7 @@ func (v *integrationListView) viewTokenRotate() string {
 	masked := strings.Repeat("•", v.tokenEditBuf.Len())
 	b.WriteString(cursorSt.Render("New value") + ": " + masked + cursorSt.Render("▎") + "\n")
 	b.WriteString("    " + mutedSt.Render("the new credential — never echoed; sent to the CLI via stdin") + "\n")
-	b.WriteString("\n" + helpSt.Render("enter save · esc cancel"))
+	b.WriteString("\n" + helpSt.Render("enter save | esc cancel"))
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
 	}
@@ -1545,7 +1584,7 @@ func (v *integrationListView) viewTokenRemoveConfirm() string {
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("y/enter confirm · n/esc cancel"))
+	b.WriteString("\n" + helpSt.Render("y/enter confirm | n/esc cancel"))
 	return b.String()
 }
 
@@ -1601,7 +1640,7 @@ func (v *integrationListView) viewIntEdit() string {
 		b.WriteString("    " + mutedSt.Render(slotHint) + "\n")
 	}
 
-	b.WriteString("\n" + helpSt.Render("enter next/save · tab/↑↓ jump · esc cancel"))
+	b.WriteString("\n" + helpSt.Render("enter next/save | tab/↑↓ jump | esc cancel"))
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
 	}
@@ -1971,7 +2010,9 @@ func (v *grantListView) doEdit() tea.Cmd {
 
 func (v *grantListView) View() string {
 	var b strings.Builder
-	b.WriteString(titleSt.Render("Grants") + "\n\n")
+	// v1.13.0-rc20 — Mole-style title + muted count subtitle.
+	b.WriteString(titleSt.Render("Grants") + "   " +
+		mutedSt.Render(fmt.Sprintf("%d total", len(v.ids))) + "\n\n")
 	if !v.loaded {
 		return b.String() + "loading…"
 	}
@@ -1994,6 +2035,14 @@ func (v *grantListView) View() string {
 	if len(v.ids) == 0 {
 		b.WriteString(mutedSt.Render("(no grants yet — use `Add grant` from the main menu)"))
 	}
+	// v1.13.0-rc20 — dynamic label width.
+	labelWidth := 14
+	for _, id := range v.ids {
+		if w := lipgloss.Width(id); w > labelWidth {
+			labelWidth = w
+		}
+	}
+	labelWidth += 2
 	for i, id := range v.ids {
 		g := v.items[id]
 		prefix := "    "
@@ -2002,23 +2051,42 @@ func (v *grantListView) View() string {
 			prefix = "  " + cursorSt.Render("➤ ")
 			disp = cursorSt.Render(id)
 		}
-		projTag := "(none)"
-		if len(g.Projects) > 0 {
-			projTag = strings.Join(g.Projects, ",")
-		}
-		// v1.13.0-rc7 — see views.go/list_remove_views.go: lipgloss.Width
-		// padding so cursor styling doesn't shift the metadata columns.
-		dispPad := lipgloss.NewStyle().Width(22).Render(disp)
+		// v1.13.0-rc20 — row shows id + target only. Projects moved to
+		// the status bar so the row stays clean.
+		dispPad := lipgloss.NewStyle().Width(labelWidth).Render(disp)
 		b.WriteString(prefix + dispPad +
-			fmt.Sprintf("  → %s.%s  projects=%s\n",
-				g.Integration, g.Token, mutedSt.Render(projTag)))
+			fmt.Sprintf("  → %s.%s\n", g.Integration, g.Token))
+	}
+
+	// v1.13.0-rc20 — status bar for the cursor row.
+	if len(v.ids) > 0 && v.cursor >= 0 && v.cursor < len(v.ids) {
+		selID := v.ids[v.cursor]
+		selG := v.items[selID]
+		projTag := "(none)"
+		if len(selG.Projects) > 0 {
+			projTag = strings.Join(selG.Projects, ",")
+		}
+		tagTag := "(none)"
+		if len(selG.Tags) > 0 {
+			tagTag = strings.Join(selG.Tags, ",")
+		}
+		bar := fmt.Sprintf("selected: %s  |  projects=%s  |  tags=%s",
+			selID, projTag, tagTag)
+		if selG.Protected {
+			owner := selG.Owner
+			if len(owner) > 8 {
+				owner = owner[:8] + "…"
+			}
+			bar += "  |  🔒 owner=" + owner
+		}
+		b.WriteString("\n" + mutedSt.Render(bar) + "\n")
 	}
 
 	// v1.13.0-rc4 — unified footer: help first, then flash/error.
 	if v.mode == grantModeAction {
 		b.WriteString("\n" + v.renderActionMenu())
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter actions · esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter actions | esc back"))
 	}
 	if v.flash != "" {
 		b.WriteString("\n" + okSt.Render(v.flash))
@@ -2048,7 +2116,7 @@ func (v *grantListView) renderActionMenu() string {
 		}
 		b.WriteString(fmt.Sprintf("%s%s\n", prefix, lbl))
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move · enter run · backspace back"))
+	b.WriteString("\n" + helpSt.Render("↑↓ move | enter run | backspace back"))
 	return b.String()
 }
 
@@ -2094,7 +2162,7 @@ func (v *grantListView) viewConfirm() string {
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("y confirm · n cancel"))
+	b.WriteString("\n" + helpSt.Render("y confirm | n cancel"))
 	return b.String()
 }
 
@@ -2132,7 +2200,7 @@ func (v *grantListView) viewEdit() string {
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("tab / ↑↓ field · enter save (on [Save]) · esc cancel"))
+	b.WriteString("\n" + helpSt.Render("tab / ↑↓ field | enter save (on [Save]) · esc cancel"))
 	return b.String()
 }
 
@@ -2265,13 +2333,13 @@ func (v *grantRemoveView) View() string {
 			}
 			b.WriteString(prefix + id + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter next · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter next | esc cancel"))
 	case 1:
 		b.WriteString(fmt.Sprintf("Remove grant %q?\n\n", v.ids[v.cursor]))
 		if v.err != "" {
 			b.WriteString(failSt.Render(v.err) + "\n\n")
 		}
-		b.WriteString(helpSt.Render("y/enter confirm · n/esc cancel"))
+		b.WriteString(helpSt.Render("y/enter confirm | n/esc cancel"))
 	case 2:
 		b.WriteString("removing…\n")
 	}

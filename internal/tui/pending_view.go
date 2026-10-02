@@ -153,7 +153,7 @@ func (v *pendingView) View() string {
 		if v.err != "" {
 			b.WriteString("\n" + failSt.Render(v.err) + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move · a/enter approve · r reject · esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | a/enter approve | r reject | esc back"))
 		return b.String()
 	}
 
@@ -166,7 +166,7 @@ func (v *pendingView) View() string {
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("enter confirm · esc cancel"))
+	b.WriteString("\n" + helpSt.Render("enter confirm | esc cancel"))
 	return b.String()
 }
 

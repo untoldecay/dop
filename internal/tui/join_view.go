@@ -375,13 +375,13 @@ func (v *joinView) View() string {
 
 	switch v.step {
 	case joinStepIdentity:
-		b.WriteString("\n" + helpSt.Render("← → toggle · enter confirm · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("← → toggle | enter confirm | esc cancel"))
 	case joinStepRunning:
-		b.WriteString("\n" + helpSt.Render("esc kill · (auto-completes when admin approves)"))
+		b.WriteString("\n" + helpSt.Render("esc kill | (auto-completes when admin approves)"))
 	case joinStepDone:
 		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
 	default:
-		b.WriteString("\n" + helpSt.Render("enter next · esc cancel"))
+		b.WriteString("\n" + helpSt.Render("enter next | esc cancel"))
 	}
 	return b.String()
 }
