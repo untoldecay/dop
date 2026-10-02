@@ -4,14 +4,18 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/probe"
 	"github.com/fray/dop/internal/vault"
 )
 
@@ -323,6 +327,11 @@ func runIntegrationAdd(args []string) int {
 	cliArgsHint := fs.String("args-hint", "", "cli kind — a free-form usage snippet surfaced to the agent (e.g. 'exec --inherit-env').")
 	mcpURL := fs.String("mcp-url", "", "mcp kind — HTTP URL for the MCP server.")
 	mcpCmd := fs.String("mcp-cmd", "", "mcp kind — stdio launcher command for the MCP server.")
+	// v1.13.0-rc15 — opt-in endpoints-doc probe. OFF by default (DOP
+	// never auto-fetches). When set + kind=api + no --endpoints-url,
+	// try the common OpenAPI paths against --base-url and stamp the
+	// first match. For kind=mcp + --mcp-url set, probe tools/list.
+	probeEndpoints := fs.Bool("probe-endpoints", false, "opt-in: scan common OpenAPI paths (api) or tools/list (mcp) and stamp the result on the integration metadata. Short per-request timeout; never auto-run.")
 	_ = fs.Parse(args)
 
 	if *name == "" {
@@ -484,6 +493,15 @@ func runIntegrationAdd(args []string) int {
 	if *kind != "" {
 		effectiveKind = *kind
 	}
+
+	// v1.13.0-rc15 — opt-in probe. Runs AFTER kind is resolved so we
+	// know which kind of probe to try. Updates `meta` in place (adds
+	// endpoints_url for api, or a boolean-ish mcp_probed_ok flag for
+	// mcp). Never fatal: a failed probe still lets the add proceed
+	// but emits an audit event with the failure cause.
+	if *probeEndpoints {
+		runProbe(paths, &meta, effectiveKind, key)
+	}
 	v.Integrations[key] = vault.Integration{
 		Description: *desc,
 		Metadata:    meta,
@@ -508,6 +526,91 @@ func runIntegrationAdd(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop integration add: %s integration %q with %d token(s)\n", action, *name, len(parsedTokens))
 	}
 	return 0
+}
+
+// runProbe performs the opt-in endpoints-doc discovery for `integration add
+// --probe-endpoints`. Updates meta in place with the resolved URL / outcome
+// and emits an EventIntegrationProbed audit event. Non-fatal: a probe
+// failure never blocks the save path — the integration is created either
+// way and the operator can set --endpoints-url manually later.
+func runProbe(paths *config.Paths, meta *map[string]string, kind, key string) {
+	kindAPI := kind == "" || kind == vault.IntegrationKindAPI
+	kindMCP := kind == vault.IntegrationKindMCP
+	switch {
+	case kindAPI:
+		baseURL := (*meta)["base_url"]
+		if baseURL == "" {
+			fmt.Fprintln(os.Stderr, "dop integration add: --probe-endpoints skipped (no --base-url set)")
+			return
+		}
+		if (*meta)["endpoints_url"] != "" {
+			fmt.Fprintln(os.Stderr, "dop integration add: --probe-endpoints skipped (endpoints_url already set)")
+			return
+		}
+		fmt.Fprintln(os.Stderr, "dop integration add: probing OpenAPI paths…")
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		res, err := probe.OpenAPI(ctx, baseURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop integration add: probe setup: %v\n", err)
+			audit.Append(paths, audit.Event{
+				Kind:    audit.EventIntegrationProbed,
+				Subject: key,
+				Extra:   map[string]string{"kind": "api", "result": "setup_error", "err": err.Error()},
+			})
+			return
+		}
+		if res.FoundURL != "" {
+			(*meta)["endpoints_url"] = res.FoundURL
+			(*meta)["endpoints_probed_at"] = time.Now().UTC().Format(time.RFC3339)
+			fmt.Fprintf(os.Stderr, "dop integration add: probe → %s (%s)\n", res.FoundURL, res.Duration.Round(time.Millisecond))
+			audit.Append(paths, audit.Event{
+				Kind:    audit.EventIntegrationProbed,
+				Subject: key,
+				Extra:   map[string]string{"kind": "api", "result": "found", "endpoints_url": res.FoundURL},
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "dop integration add: probe → no match on %d paths (%s). Set --endpoints-url manually if the service exposes a doc at a non-standard path.\n", len(res.Attempts), res.Duration.Round(time.Millisecond))
+			audit.Append(paths, audit.Event{
+				Kind:    audit.EventIntegrationProbed,
+				Subject: key,
+				Extra:   map[string]string{"kind": "api", "result": "no_match", "attempts": fmt.Sprintf("%d", len(res.Attempts))},
+			})
+		}
+	case kindMCP:
+		mcpURL := (*meta)["mcp_url"]
+		if mcpURL == "" {
+			fmt.Fprintln(os.Stderr, "dop integration add: --probe-endpoints skipped (mcp kind needs --mcp-url for probe)")
+			return
+		}
+		fmt.Fprintln(os.Stderr, "dop integration add: probing MCP tools/list…")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		res, _ := probe.MCPToolsList(ctx, mcpURL)
+		if res.FoundURL != "" {
+			(*meta)["mcp_probed_at"] = time.Now().UTC().Format(time.RFC3339)
+			(*meta)["mcp_probe_result"] = "ok"
+			fmt.Fprintf(os.Stderr, "dop integration add: probe → MCP tools/list responded (%s)\n", res.Duration.Round(time.Millisecond))
+			audit.Append(paths, audit.Event{
+				Kind:    audit.EventIntegrationProbed,
+				Subject: key,
+				Extra:   map[string]string{"kind": "mcp", "result": "ok", "mcp_url": mcpURL},
+			})
+		} else {
+			errTxt := ""
+			if len(res.Attempts) > 0 {
+				errTxt = res.Attempts[0].ErrText
+			}
+			fmt.Fprintf(os.Stderr, "dop integration add: probe → MCP tools/list did not match (status=%d, err=%q)\n", res.Attempts[0].Status, errTxt)
+			audit.Append(paths, audit.Event{
+				Kind:    audit.EventIntegrationProbed,
+				Subject: key,
+				Extra:   map[string]string{"kind": "mcp", "result": "no_match", "err": errTxt},
+			})
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "dop integration add: --probe-endpoints has no meaning for kind=%s\n", kind)
+	}
 }
 
 // parseTokenSpec splits `NAME=VALUE:SCOPE_NOTE` where SCOPE_NOTE is optional.

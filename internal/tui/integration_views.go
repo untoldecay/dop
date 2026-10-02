@@ -42,20 +42,24 @@ const (
 	// placeholder change based on kind picked at step 1.
 	integAddStepKind     = 1
 	integAddStepDesc     = 2
-	integAddStepKindSlot = 3 // was integAddStepKindSlot
-	integAddStepCred     = 4
-	integAddStepValue    = 5
-	integAddStepScope    = 6
+	integAddStepKindSlot = 3
+	// v1.13.0-rc15 — opt-in endpoints probe. Preset picker (yes/no);
+	// only rendered when kind=api AND KindSlot has a URL, OR kind=mcp
+	// AND KindSlot has an mcp URL. Skipped silently otherwise.
+	integAddStepProbe = 4
+	integAddStepCred  = 5
+	integAddStepValue = 6
+	integAddStepScope = 7
 	// v1.13.0-rc12 — new protection step mirrors the scope-note preset
 	// picker shape (two-item preset list, enter to pick, backspace to
 	// return). If "protected" is picked, we insert a passphrase step
 	// before Save; otherwise we jump straight to Save.
-	integAddStepProtect    = 7
-	integAddStepPassphrase = 8
-	integAddStepSave       = 9
-	integAddStepRun        = 10
+	integAddStepProtect    = 8
+	integAddStepPassphrase = 9
+	integAddStepSave       = 10
+	integAddStepRun        = 11
 	integAddStepDone       = 100
-	integAddFieldCount     = 10 // rows shown (0..9)
+	integAddFieldCount     = 11 // rows shown (0..10)
 )
 
 type addIntegrationView struct {
@@ -108,6 +112,13 @@ type addIntegrationView struct {
 	kindPickCursor int
 	kindChoice     string // IntegrationKind* value picked by the user
 
+	// v1.13.0-rc15 — Probe preset picker (step 4). Only visited when
+	// kind=api AND the KindSlot (base URL) is non-empty, OR kind=mcp
+	// AND the KindSlot is a URL. probeChoice becomes --probe-endpoints
+	// at save time.
+	probePickCursor int
+	probeChoice     bool
+
 	err   string
 	flash string
 	done  bool
@@ -150,6 +161,34 @@ var kindPresets = []struct {
 	{"cli", vault.IntegrationKindCLI, "command-line tool — token exported to a binary's env"},
 	{"mcp", vault.IntegrationKindMCP, "Model Context Protocol server — URL or stdio launcher"},
 	{"other", vault.IntegrationKindOther, "unspecified — only the token is exported"},
+}
+
+// v1.13.0-rc15 — probePresets drives the opt-in endpoints discovery
+// step. "no" default — DOP never auto-fetches without an explicit yes.
+var probePresets = []struct {
+	label string
+	value bool
+	hint  string
+}{
+	{"no", false, "default — only the URL you entered gets stored"},
+	{"yes", true, "scan common OpenAPI paths (or MCP tools/list) and stamp the result"},
+}
+
+// probeApplicable reports whether the probe step should be visited
+// for the current kind + KindSlot buffer. Returns false for cli/other
+// and for api/mcp when the KindSlot is empty.
+func probeApplicable(kind, urlBuf string) bool {
+	url := strings.TrimSpace(urlBuf)
+	if url == "" {
+		return false
+	}
+	switch kind {
+	case vault.IntegrationKindAPI:
+		return strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
+	case vault.IntegrationKindMCP:
+		return strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
+	}
+	return false
 }
 
 // kindSlotLabel returns the row label + hint for the kind-adaptive
@@ -291,6 +330,28 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					v.step = integAddStepSave
 				}
+				return v, nil
+			}
+			return v, nil
+		}
+		// v1.13.0-rc15 — step 4 (Probe) is a two-item preset picker.
+		// Only visited when probeApplicable(kind, urlBuf). On enter,
+		// commits the choice and advances to Credential name.
+		if v.step == integAddStepProbe {
+			switch mm.String() {
+			case "up", "k":
+				if v.probePickCursor > 0 {
+					v.probePickCursor--
+				}
+			case "down", "j":
+				if v.probePickCursor < len(probePresets)-1 {
+					v.probePickCursor++
+				}
+			case "enter":
+				v.probeChoice = probePresets[v.probePickCursor].value
+				v.err = ""
+				v.step = integAddStepCred
+				v.prefillIfNeeded()
 				return v, nil
 			}
 			return v, nil
@@ -462,6 +523,16 @@ func (v *addIntegrationView) advance() (tea.Model, tea.Cmd) {
 		}
 	case integAddStepKindSlot:
 		v.err = ""
+		// v1.13.0-rc15 — route to Probe step only when applicable.
+		// Otherwise skip straight to Cred, preserving the pre-rc15 flow.
+		if probeApplicable(v.kindChoice, v.urlBuf.String()) {
+			v.step = integAddStepProbe
+		} else {
+			v.step = integAddStepCred
+			v.prefillIfNeeded()
+		}
+	case integAddStepProbe:
+		v.err = ""
 		v.step = integAddStepCred
 		v.prefillIfNeeded()
 	case integAddStepCred:
@@ -522,6 +593,9 @@ func (v *addIntegrationView) save() tea.Cmd {
 	// v1.13.0-rc13 — capture kind + route the KindSlot buffer (urlBuf)
 	// into the right CLI flag per kind.
 	kind := v.kindChoice
+	// v1.13.0-rc15 — snapshot the probe choice. Append --probe-endpoints
+	// to the subprocess call when the operator said yes.
+	wantProbe := v.probeChoice
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		args := []string{"integration", "add", "--name", name}
@@ -550,6 +624,9 @@ func (v *addIntegrationView) save() tea.Cmd {
 			}
 		}
 		args = append(args, "--token", fmt.Sprintf("%s=%s:%s", cred, value, scope))
+		if wantProbe {
+			args = append(args, "--probe-endpoints")
+		}
 		if protected {
 			args = append(args, "--protected", "--passphrase-stdin")
 		}
@@ -631,6 +708,11 @@ func (v *addIntegrationView) View() string {
 	}
 	// v1.13.0-rc13 — kind-adaptive KindSlot row label/hint.
 	kindSlotLbl, kindSlotHint := kindSlotLabel(v.kindChoice)
+	// v1.13.0-rc15 — Probe row value.
+	probeLabel := "no"
+	if v.probeChoice {
+		probeLabel = "yes"
+	}
 	rows := []struct {
 		label string
 		value string
@@ -641,6 +723,7 @@ func (v *addIntegrationView) View() string {
 		{"Kind", v.kindChoice, "api · cli · mcp · other — shapes what the agent sees", false},
 		{"What it's for", v.descBuf.String(), "optional — a one-line description", false},
 		{kindSlotLbl, v.urlBuf.String(), kindSlotHint, false},
+		{"Scan endpoints doc", probeLabel, "only applies when kind=api or kind=mcp with a URL set", false},
 		{"Credential name", v.credBuf.String(), "prefilled from the service name — edit if you'll have multiple credentials", false},
 		{"Credential value", v.valueBuf.String(), "the actual API key / token / password", true},
 		{"What it can do", v.scopeBuf.String(), "optional — e.g. read-only on /docs", false},
@@ -672,6 +755,15 @@ func (v *addIntegrationView) View() string {
 			continue
 		}
 		if i == integAddStepKindSlot && v.kindChoice == vault.IntegrationKindOther {
+			continue
+		}
+		// v1.13.0-rc15 — hide the Probe row inline when its picker
+		// renders below, and skip it entirely when the probe isn't
+		// applicable to this kind+URL combination.
+		if i == integAddStepProbe && v.step == integAddStepProbe {
+			continue
+		}
+		if i == integAddStepProbe && !probeApplicable(v.kindChoice, v.urlBuf.String()) {
 			continue
 		}
 		style := mutedSt
@@ -716,6 +808,20 @@ func (v *addIntegrationView) View() string {
 			prefix := "    "
 			label := p.label
 			if i == v.kindPickCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(p.label)
+			}
+			b.WriteString(prefix + label + "    " + mutedSt.Render(p.hint) + "\n")
+		}
+	}
+
+	// v1.13.0-rc15 — Probe preset picker on step 4.
+	if v.step == integAddStepProbe {
+		b.WriteString("\n" + cursorSt.Render("Scan endpoints doc") + "\n")
+		for i, p := range probePresets {
+			prefix := "    "
+			label := p.label
+			if i == v.probePickCursor {
 				prefix = "  " + cursorSt.Render("➤ ")
 				label = cursorSt.Render(p.label)
 			}
