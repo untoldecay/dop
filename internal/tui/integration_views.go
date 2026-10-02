@@ -402,7 +402,11 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					v.step = integAddStepPassphrase
 					v.passphraseBuf.Reset()
 				} else {
-					v.step = integAddStepSave
+					// v1.13.0-rc17 fix: route through Advanced step
+					// (was skipping straight to Save, missed by the
+					// rc17 step-renumber because this picker handler
+					// has its own enter path separate from advance()).
+					v.step = integAddStepAdvanced
 				}
 				return v, nil
 			}
@@ -451,6 +455,26 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					v.step = integAddStepSave
 				}
 				return v, nil
+			case "shift+tab":
+				// v1.13.0-rc17 fix: step-back escape so operators can
+				// return to Passphrase/Protection without esc-cancelling
+				// the whole form.
+				if v.protectedChoice {
+					v.step = integAddStepPassphrase
+				} else {
+					v.step = integAddStepProtect
+				}
+				return v, nil
+			case "tab":
+				// Forward: commit current cursor as the choice and advance.
+				v.advancedChoice = v.advancedPickCursor == 1
+				if v.advancedChoice {
+					v.advFieldIdx = 0
+					v.step = integAddStepAdvFields
+				} else {
+					v.step = integAddStepSave
+				}
+				return v, nil
 			}
 			return v, nil
 		}
@@ -480,6 +504,11 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "shift+tab", "up":
 				if v.advFieldIdx > 0 {
 					v.advFieldIdx--
+				} else {
+					// v1.13.0-rc17 fix: at the top of the sub-form,
+					// shift+tab/up escapes back to the Advanced yes/no
+					// gate so operators can navigate freely.
+					v.step = integAddStepAdvanced
 				}
 			case "enter":
 				if v.advFieldIdx < len(fields)-1 {
@@ -498,6 +527,17 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					buf.WriteString(string(mm.Runes))
 				}
 			}
+			// v1.13.0-rc17 fix: any content in a sub-form field flips
+			// advancedChoice to true so the Advanced row display + Save
+			// path reflect reality (previously stayed "no" if the user
+			// arrived here via up-arrow from Save without ever picking
+			// yes at the gate).
+			for i := range v.advBufs {
+				if v.advBufs[i].Len() > 0 {
+					v.advancedChoice = true
+					break
+				}
+			}
 			return v, nil
 		}
 		// v1.13.0-rc12 — step 7 (passphrase) is a masked text input,
@@ -511,7 +551,8 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return v, nil
 				}
 				v.err = ""
-				v.step = integAddStepSave
+				// v1.13.0-rc17 fix: route through Advanced step.
+				v.step = integAddStepAdvanced
 				return v, nil
 			case "backspace":
 				s := v.passphraseBuf.String()
