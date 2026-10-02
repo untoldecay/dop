@@ -889,7 +889,10 @@ func (v *integrationRemoveView) doRemove() tea.Cmd {
 
 func (v *integrationRemoveView) View() string {
 	var b strings.Builder
-	b.WriteString(titleSt.Render("Remove credentials") + "\n\n")
+	// v1.13.0-rc20 — title + muted subtitle count, matching other
+	// top-level list views.
+	b.WriteString(titleSt.Render("Remove credentials") + "   " +
+		mutedSt.Render(fmt.Sprintf("%d service(s)", len(v.names))) + "\n\n")
 	if !v.loaded {
 		return b.String() + "loading…"
 	}
@@ -899,19 +902,59 @@ func (v *integrationRemoveView) View() string {
 	}
 	switch v.step {
 	case 0:
-		b.WriteString("Pick a service:\n\n")
-		for i, n := range v.names {
-			prefix := "  "
-			if i == v.cursor {
-				prefix = cursorSt.Render("➤ ")
+		// v1.13.0-rc20 — dynamic label width + 4-space indent to match
+		// the rc20 Integrations list row shape.
+		labelWidth := 12
+		for _, n := range v.names {
+			if w := lipgloss.Width(n); w > labelWidth {
+				labelWidth = w
 			}
-			b.WriteString(prefix + n + "\n")
+		}
+		labelWidth += 2
+		for i, n := range v.names {
+			it := v.items[n]
+			prefix := "    "
+			disp := n
+			if i == v.cursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				disp = cursorSt.Render(n)
+			}
+			lock := "  "
+			if it.Protected {
+				lock = mutedSt.Render("🔒 ")
+			}
+			desc := it.Description
+			if desc == "" {
+				desc = "-"
+			}
+			dispPad := lipgloss.NewStyle().Width(labelWidth).Render(disp)
+			b.WriteString(prefix + lock + dispPad + "  " + mutedSt.Render(desc) + "\n")
+		}
+		// Status bar for selected service (parity with Integrations list).
+		if v.cursor >= 0 && v.cursor < len(v.names) {
+			selName := v.names[v.cursor]
+			selIt := v.items[selName]
+			bar := fmt.Sprintf("selected: %s  |  kind=%s  |  tokens=%d",
+				selName, vault.IntegrationKindOf(selIt), len(selIt.Tokens))
+			b.WriteString("\n" + mutedSt.Render(bar) + "\n")
 		}
 		b.WriteString("\n" + helpSt.Render("↑↓ move | enter next | esc back"))
 	case 1:
 		target := v.names[v.cursor]
-		b.WriteString(fmt.Sprintf("Pick credentials under %q to remove:\n\n", target))
+		// v1.13.0-rc20 — breadcrumb header (title + context + subtitle)
+		// instead of the inline "Pick credentials under %q" sentence.
+		// Mirrors the token drill-down header style.
+		b.WriteString(mutedSt.Render(fmt.Sprintf("Service: %s   %d credential(s)", target, len(v.tokenNames))) + "\n\n")
+		// Dynamic label width from longest token name.
+		tokLabelWidth := 14
+		for _, tn := range v.tokenNames {
+			if w := lipgloss.Width(tn); w > tokLabelWidth {
+				tokLabelWidth = w
+			}
+		}
+		tokLabelWidth += 2
 		for i, tn := range v.tokenNames {
+			tok := v.items[target].Tokens[tn]
 			prefix := "    "
 			marker := mutedSt.Render("○")
 			if v.tokenSelected[tn] {
@@ -922,8 +965,15 @@ func (v *integrationRemoveView) View() string {
 				prefix = "  " + cursorSt.Render("➤ ")
 				label = cursorSt.Render(tn)
 			}
-			b.WriteString(prefix + marker + "  " + label + "\n")
+			scope := tok.ScopeNote
+			if scope == "" {
+				scope = "-"
+			}
+			labelPad := lipgloss.NewStyle().Width(tokLabelWidth).Render(label)
+			b.WriteString(prefix + marker + "  " + labelPad + "  " + mutedSt.Render("("+scope+")") + "\n")
 		}
+		// Status bar with selected count.
+		b.WriteString("\n" + mutedSt.Render(fmt.Sprintf("%d / %d selected", v.selectedTokenCount(), len(v.tokenNames))) + "\n")
 		b.WriteString("\n" + helpSt.Render("↑↓ move | space toggle | a all | n none | enter next | esc back"))
 		if v.err != "" {
 			b.WriteString("\n" + failSt.Render(v.err))
