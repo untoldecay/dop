@@ -32,10 +32,11 @@
 - MUST skip when `--mcp-url` is empty (operator probably only set `--mcp-cmd`).
 
 ### TUI port
-- A new preset-picker step (`integAddStepProbe`) MUST render after `integAddStepKindSlot` ONLY when `probeApplicable(kindChoice, urlBuf) == true` (api/mcp with an http(s) URL).
+- A new preset-picker step (`integAddStepProbe`) MUST render after `integAddStepKindSlot` whenever the chosen kind is `api` or `mcp` (regardless of what's in the URL buffer — see rc16 note below).
 - The picker MUST default to `no` (DOP never auto-fetches unless the operator says yes).
 - On "yes", the TUI subprocess call MUST append `--probe-endpoints` to the `dop integration add` invocation.
 - The Probe row MUST render in the row list for api/mcp integrations; the TUI MUST hide it entirely for cli/other kinds.
+- v1.13.0-rc16 update: the earlier rc15 heuristic ("only show probe if URL has http(s) scheme") silently skipped the step for URLs the operator typed without a scheme. That failure mode was invisible — operators could not tell whether a probe had been offered. Now the step is always shown for api/mcp; if "yes" is picked but the base URL is empty or scheme-less, the CLI prints a clear `probe-endpoints skipped (no --base-url set)` and the save still succeeds.
 
 ### Validation + user feedback
 - Non-200 responses MUST NOT short-circuit the probe — walk the full list.
