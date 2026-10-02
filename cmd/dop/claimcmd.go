@@ -1146,6 +1146,13 @@ func writeAgentKeyLegacyEd25519(paths *config.Paths, lookupID string, priv ed255
 // subjects + lookup prefixes + ask operator to narrow with
 // $DOP_TOKEN. Zero → nothing to report.
 func runClaimStatusNoBearer(paths *config.Paths, asJSON bool) int {
+	// v1.13.0-rc17 — reap stale pending-claim files before listing so
+	// orphans from SIGKILL/power-loss don't pollute the status output.
+	// Non-fatal: if the reaper hits an fs error we just continue with
+	// whatever we can read.
+	if reaped, _ := pendingclaim.Reap(paths); len(reaped) > 0 && !asJSON {
+		fmt.Fprintf(os.Stderr, "dop claim --status: reaped %d stale pending claim(s)\n", len(reaped))
+	}
 	recs, err := pendingclaim.List(paths)
 	if err != nil {
 		if asJSON {

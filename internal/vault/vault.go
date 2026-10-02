@@ -40,6 +40,7 @@
 package vault
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -443,6 +444,12 @@ func (v *Vault) BumpGeneration(subject string) uint64 {
 
 // LoadPlain reads a file, returns the parsed Vault. Missing file returns
 // a fresh empty Vault (used during bootstrap).
+//
+// v1.13.0-rc17 — returns ErrEncryptedVault when the file is still
+// SOPS-sealed rather than falling through to ParsePlain which would
+// emit a confusing "cannot parse ENC[AES256_GCM...] as 2006"
+// time-parse error. Caller is expected to short-circuit to a clean
+// "run dop admin login" message.
 func LoadPlain(path string) (*Vault, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -451,7 +458,30 @@ func LoadPlain(path string) (*Vault, error) {
 		}
 		return nil, err
 	}
+	if looksSOPSEncrypted(b) {
+		return nil, ErrEncryptedVault
+	}
 	return ParsePlain(b)
+}
+
+// ErrEncryptedVault is returned by LoadPlain when the vault.yaml on
+// disk is still SOPS-encrypted. Callers in non-admin contexts should
+// catch this and emit a clean actionable message instead of leaking
+// the time-parse error from a half-parsed SOPS envelope.
+var ErrEncryptedVault = errors.New("vault is encrypted at rest — run `dop admin login` to unlock, or set $DOP_TOKEN to read via a bearer")
+
+// looksSOPSEncrypted reports whether b appears to be a SOPS-encrypted
+// YAML envelope. SOPS always writes a `sops:` top-level key and
+// decorates every scalar with `ENC[AES256_GCM,...]`. We check for
+// both: either marker alone is a strong enough signal, but the
+// combination makes false positives nearly impossible.
+func looksSOPSEncrypted(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	hasSops := bytes.Contains(b, []byte("\nsops:")) || bytes.HasPrefix(b, []byte("sops:"))
+	hasEnc := bytes.Contains(b, []byte("ENC[AES256_GCM"))
+	return hasSops || hasEnc
 }
 
 // ---

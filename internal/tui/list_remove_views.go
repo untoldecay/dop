@@ -66,6 +66,11 @@ type integrationListView struct {
 	tokenActionCursor int
 	tokenEditBuf      strings.Builder // scope note edit OR rotation value
 	tokenPending      string          // "remove-token" | "rotate" | "edit-scope"
+	// v1.13.0-rc17 — scope-note edit uses the same preset picker shape
+	// as add-integration (parity ask from the field report).
+	// tokenScopeMode true = preset picker, false = free-text input.
+	tokenScopeMode       bool
+	tokenScopePickCursor int
 
 	// Integration-level edit form state (integModeIntEdit).
 	intEditField        int // 0=kind picker, 1=description, 2=KindSlot (URL/CMD), 3=save
@@ -1047,10 +1052,22 @@ func (v *integrationListView) runTokenAction(a integAction) (tea.Model, tea.Cmd)
 	case "d":
 		v.mode = integModeTokenDetail
 	case "s":
-		// Seed the edit buffer with the current scope note.
+		// v1.13.0-rc17 — enter the scope editor in PICKER mode by
+		// default, mirroring the add-integration flow. Position the
+		// cursor on the matching preset if the current scope exactly
+		// equals one; else land on "other…" (last entry) so the
+		// operator sees "pick a preset OR drop to free-text."
 		cur := v.items[v.selectedName()].Tokens[tokenName].ScopeNote
 		v.tokenEditBuf.Reset()
 		v.tokenEditBuf.WriteString(cur)
+		v.tokenScopePickCursor = len(scopePresets) - 1
+		for i, p := range scopePresets {
+			if p.value != "" && p.value == cur {
+				v.tokenScopePickCursor = i
+				break
+			}
+		}
+		v.tokenScopeMode = true
 		v.mode = integModeTokenEditScope
 	case "o":
 		v.tokenEditBuf.Reset()
@@ -1071,8 +1088,40 @@ func (v *integrationListView) selectedTokenName() string {
 	return v.tokenNames[v.tokenCursor]
 }
 
-// updateTokenEditScope handles the single-line scope note editor.
+// updateTokenEditScope handles the scope note editor. v1.13.0-rc17 —
+// now with preset-picker parity to add-integration. Operator starts
+// in picker mode; "other…" drops to free-text; empty + backspace
+// returns to picker.
 func (v *integrationListView) updateTokenEditScope(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if v.tokenScopeMode {
+		switch mm.String() {
+		case "esc":
+			v.mode = integModeTokenAction
+		case "up", "k":
+			if v.tokenScopePickCursor > 0 {
+				v.tokenScopePickCursor--
+			}
+		case "down", "j":
+			if v.tokenScopePickCursor < len(scopePresets)-1 {
+				v.tokenScopePickCursor++
+			}
+		case "enter":
+			sel := scopePresets[v.tokenScopePickCursor]
+			if sel.value == "" {
+				// "other…" — drop into free-text input, preserve
+				// current buffer so the operator can tweak the value
+				// they already have.
+				v.tokenScopeMode = false
+				return v, nil
+			}
+			v.tokenEditBuf.Reset()
+			v.tokenEditBuf.WriteString(sel.value)
+			v.mode = integModeRun
+			return v, v.doTokenSetScope()
+		}
+		return v, nil
+	}
+	// Free-text mode.
 	switch mm.String() {
 	case "esc":
 		v.mode = integModeTokenAction
@@ -1084,6 +1133,9 @@ func (v *integrationListView) updateTokenEditScope(mm tea.KeyMsg) (tea.Model, te
 		if len(s) > 0 {
 			v.tokenEditBuf.Reset()
 			v.tokenEditBuf.WriteString(s[:len(s)-1])
+		} else {
+			// Empty + backspace returns to the preset picker.
+			v.tokenScopeMode = true
 		}
 	default:
 		if len(mm.Runes) > 0 {
@@ -1388,9 +1440,24 @@ func (v *integrationListView) viewTokenEditScope() string {
 	tn := v.selectedTokenName()
 	var b strings.Builder
 	b.WriteString(titleSt.Render("Edit scope note: "+tn) + "\n\n")
-	b.WriteString(cursorSt.Render("Scope note") + ": " + v.tokenEditBuf.String() + cursorSt.Render("▎") + "\n")
-	b.WriteString("    " + mutedSt.Render("free text — e.g. read-only, admin") + "\n")
-	b.WriteString("\n" + helpSt.Render("enter save · esc cancel"))
+	if v.tokenScopeMode {
+		// Preset picker — mirrors add-integration scope step shape.
+		b.WriteString(cursorSt.Render("Scope note") + "\n")
+		for i, p := range scopePresets {
+			prefix := "    "
+			label := p.label
+			if i == v.tokenScopePickCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(p.label)
+			}
+			b.WriteString(prefix + label + "\n")
+		}
+		b.WriteString("\n" + helpSt.Render("↑↓ move · enter select · esc cancel"))
+	} else {
+		b.WriteString(cursorSt.Render("Scope note") + ": " + v.tokenEditBuf.String() + cursorSt.Render("▎") + "\n")
+		b.WriteString("    " + mutedSt.Render("free text · empty + backspace → return to presets") + "\n")
+		b.WriteString("\n" + helpSt.Render("enter save · esc cancel"))
+	}
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
 	}

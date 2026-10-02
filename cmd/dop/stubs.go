@@ -725,6 +725,15 @@ func dopCheckAgentKeys(paths *config.Paths, line func(status, name, detail strin
 		line("!", "agent:keys",
 			fmt.Sprintf("%d Secure Enclave · %d ed25519 file (LEGACY, extractable — run `dop agent migrate <lookup>` to harden) · %d p256 file",
 				seCount, fileEd, fileP256))
+	} else if seCount == 0 && fileP256 > 0 {
+		// v1.13.0-rc17 — louder flag when NO keys reached the Secure
+		// Enclave. ClaudeMini field report: a cheerful "✓ 0 Secure
+		// Enclave · 2 p256 file" obscures the fact that every key is
+		// extractable. On signed builds this would be ✓ with ≥ 1 SE
+		// key; a zero-SE count on Darwin means the binary isn't
+		// Developer-ID-signed.
+		line("!", "agent:keys",
+			fmt.Sprintf("%d p256 file (EXTRACTABLE — 0 Secure Enclave on this install). Unsigned build → file-backed fallback. Install an officially-signed release to upgrade.", fileP256))
 	} else {
 		line("✓", "agent:keys",
 			fmt.Sprintf("%d Secure Enclave · %d p256 file", seCount, fileP256))

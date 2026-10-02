@@ -259,6 +259,54 @@ func List(paths *config.Paths) ([]*Record, error) {
 	return out, nil
 }
 
+// Reap walks the pending-claims directory and removes any record whose
+// owning process is dead OR whose ExpiresAt is in the past. Returns
+// the list of lookup IDs it reaped. v1.13.0-rc17 — folds ClaudeMini's
+// "auto-expire dead in-flight locks" ask: an orphan file leftover
+// from a SIGKILL used to require a manual `dop claim --cancel`.
+//
+// Safe to call speculatively (e.g. at the top of List / Read): no error
+// is returned when a file disappears underneath us.
+func Reap(paths *config.Paths) ([]string, error) {
+	d, err := dir(paths)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(d)
+	if err != nil {
+		return nil, err
+	}
+	reaped := []string{}
+	now := time.Now()
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), ".dop-pending-") {
+			continue
+		}
+		p := filepath.Join(d, e.Name())
+		r, rerr := readFile(p)
+		if rerr != nil {
+			// Corrupt / unreadable — remove it; nothing else can use it.
+			_ = os.Remove(p)
+			_ = os.Remove(strings.TrimSuffix(p, ".json") + ".lock")
+			_ = os.Remove(strings.TrimSuffix(p, ".json") + ".qr.png")
+			reaped = append(reaped, strings.TrimSuffix(e.Name(), ".json"))
+			continue
+		}
+		stale := !ownerAlive(r) || (!r.ExpiresAt.IsZero() && now.After(r.ExpiresAt))
+		if !stale {
+			continue
+		}
+		_ = os.Remove(p)
+		_ = os.Remove(strings.TrimSuffix(p, ".json") + ".lock")
+		_ = os.Remove(strings.TrimSuffix(p, ".json") + ".qr.png")
+		reaped = append(reaped, r.LookupID)
+	}
+	return reaped, nil
+}
+
 // FindBySAS scans all pending files for one whose SAS matches (after
 // normalization). Returns nil if none match.
 func FindBySAS(paths *config.Paths, sas string) (*Record, error) {
