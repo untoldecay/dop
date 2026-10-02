@@ -27,6 +27,20 @@ const (
 	integModeConfirm = 2
 	integModeRun     = 3
 	integModeDetail  = 4
+	// v1.13.0-rc16 — token drill-down inside the integration list.
+	// Enter on an integration row now opens integModeTokenList for
+	// that integration. From there each token is pickable with its
+	// own action menu (view / edit scope / rotate / remove), parity
+	// with the grant list behavior.
+	integModeTokenList          = 5
+	integModeTokenAction        = 6
+	integModeTokenDetail        = 7
+	integModeTokenEditScope     = 8
+	integModeTokenRotate        = 9
+	integModeTokenRemoveConfirm = 10
+	// Integration-level edit (kind / description / URL). Reached via
+	// the `e` key on the integration list or the token-list footer.
+	integModeIntEdit = 11
 )
 
 type integrationListView struct {
@@ -44,6 +58,21 @@ type integrationListView struct {
 	actionCursor int
 	flash        string
 	pending      string // "remove"
+
+	// v1.13.0-rc16 — token drill-down state. Populated when the
+	// operator presses enter on an integration row.
+	tokenNames        []string
+	tokenCursor       int
+	tokenActionCursor int
+	tokenEditBuf      strings.Builder // scope note edit OR rotation value
+	tokenPending      string          // "remove-token" | "rotate" | "edit-scope"
+
+	// Integration-level edit form state (integModeIntEdit).
+	intEditField        int // 0=kind picker, 1=description, 2=KindSlot (URL/CMD), 3=save
+	intEditKindCursor   int
+	intEditKindChoice   string
+	intEditDescBuf      strings.Builder
+	intEditKindSlotBuf  strings.Builder
 }
 
 func newIntegrationListView(c *admin.Client, p *config.Paths) *integrationListView {
@@ -154,6 +183,20 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateConfirm(mm)
 		case integModeDetail:
 			v.mode = integModeList
+		case integModeTokenList:
+			return v.updateTokenList(mm)
+		case integModeTokenAction:
+			return v.updateTokenAction(mm)
+		case integModeTokenDetail:
+			v.mode = integModeTokenList
+		case integModeTokenEditScope:
+			return v.updateTokenEditScope(mm)
+		case integModeTokenRotate:
+			return v.updateTokenRotate(mm)
+		case integModeTokenRemoveConfirm:
+			return v.updateTokenRemoveConfirm(mm)
+		case integModeIntEdit:
+			return v.updateIntEdit(mm)
 		}
 	}
 	return v, nil
@@ -172,17 +215,85 @@ func (v *integrationListView) updateList(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.cursor++
 		}
 	case "enter":
-		// v1.13.0-rc6 — enter drills down into the integration's
-		// detail (its tokens + referrer grants). The intermediate
-		// action menu is gone — the only destructive op (remove)
-		// lives on the main menu as "Remove integration" and the
-		// detail view surfaces it inline too.
+		// v1.13.0-rc16 — enter drills down into the integration's
+		// TOKEN picker (not the read-only detail — that's `d`). From
+		// the token picker each token can be viewed / edited / rotated
+		// / removed, parity with grant list.
 		if len(v.names) == 0 {
 			return v, nil
 		}
-		v.mode = integModeDetail
+		return v.enterTokenList(), nil
+	case "d":
+		if len(v.names) > 0 {
+			v.mode = integModeDetail
+		}
+	case "e":
+		if len(v.names) > 0 {
+			return v.enterIntEdit(), nil
+		}
+	case "r":
+		if len(v.names) > 0 {
+			v.mode = integModeConfirm
+			v.pending = "remove"
+		}
 	}
 	return v, nil
+}
+
+// enterTokenList primes the token-drill-down state for the integration
+// currently under the cursor and switches mode. Reads the integration's
+// Tokens map, sorts the keys, resets cursors.
+func (v *integrationListView) enterTokenList() *integrationListView {
+	name := v.selectedName()
+	if name == "" {
+		return v
+	}
+	it := v.items[name]
+	v.tokenNames = v.tokenNames[:0]
+	for k := range it.Tokens {
+		v.tokenNames = append(v.tokenNames, k)
+	}
+	sort.Strings(v.tokenNames)
+	v.tokenCursor = 0
+	v.tokenActionCursor = 0
+	v.mode = integModeTokenList
+	return v
+}
+
+// enterIntEdit primes the integration-level edit form with the current
+// values of the selected integration.
+func (v *integrationListView) enterIntEdit() *integrationListView {
+	name := v.selectedName()
+	if name == "" {
+		return v
+	}
+	it := v.items[name]
+	v.intEditField = 0
+	v.intEditKindChoice = vault.IntegrationKindOf(it)
+	// Pre-position the kind cursor on the current kind.
+	for i, p := range kindPresets {
+		if p.value == v.intEditKindChoice {
+			v.intEditKindCursor = i
+			break
+		}
+	}
+	v.intEditDescBuf.Reset()
+	v.intEditDescBuf.WriteString(it.Description)
+	v.intEditKindSlotBuf.Reset()
+	switch vault.IntegrationKindOf(it) {
+	case vault.IntegrationKindCLI:
+		v.intEditKindSlotBuf.WriteString(it.Metadata["cli_cmd"])
+	case vault.IntegrationKindMCP:
+		if it.Metadata["mcp_url"] != "" {
+			v.intEditKindSlotBuf.WriteString(it.Metadata["mcp_url"])
+		} else {
+			v.intEditKindSlotBuf.WriteString(it.Metadata["mcp_cmd"])
+		}
+	default: // api, other
+		v.intEditKindSlotBuf.WriteString(it.Metadata["base_url"])
+	}
+	v.mode = integModeIntEdit
+	return v
 }
 
 func (v *integrationListView) updateAction(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -276,7 +387,19 @@ func (v *integrationListView) View() string {
 	case integModeConfirm:
 		return v.viewConfirm()
 	case integModeRun:
-		return titleSt.Render("Removing…") + "\n\n" + mutedSt.Render("running dop integration remove…")
+		return titleSt.Render("working…") + "\n\n" + mutedSt.Render("running dop CLI…")
+	case integModeTokenList, integModeTokenAction:
+		return v.viewTokenList()
+	case integModeTokenDetail:
+		return v.viewTokenDetail()
+	case integModeTokenEditScope:
+		return v.viewTokenEditScope()
+	case integModeTokenRotate:
+		return v.viewTokenRotate()
+	case integModeTokenRemoveConfirm:
+		return v.viewTokenRemoveConfirm()
+	case integModeIntEdit:
+		return v.viewIntEdit()
 	}
 
 	if len(v.names) == 0 {
@@ -311,12 +434,12 @@ func (v *integrationListView) View() string {
 	}
 
 	// v1.13.0-rc4 — unified footer: help first, then flash/error.
-	// v1.13.0-rc6 — enter drills down to the service's tokens, no
-	// intermediate action menu (remove lives on the main menu).
+	// v1.13.0-rc16 — enter drills into TOKENS list. Keys: d details,
+	// e edit integration, r remove.
 	if v.mode == integModeAction {
 		b.WriteString("\n" + v.renderActionMenu())
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move · enter show tokens · esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move · enter manage tokens · d details · e edit · r remove · esc back"))
 	}
 	if v.flash != "" {
 		b.WriteString("\n" + okSt.Render(v.flash))
@@ -839,6 +962,523 @@ func (v *integrationRemoveView) View() string {
 		b.WriteString("\n" + helpSt.Render("y/enter confirm · n/esc cancel"))
 	case 3:
 		b.WriteString("removing…\n")
+	}
+	return b.String()
+}
+
+// ---------- v1.13.0-rc16 — Token drill-down (sub-view of integrationListView) ----------
+
+// updateTokenList handles key input while in the token picker.
+func (v *integrationListView) updateTokenList(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch mm.String() {
+	case "esc", "backspace":
+		v.mode = integModeList
+	case "up", "k":
+		if v.tokenCursor > 0 {
+			v.tokenCursor--
+		}
+	case "down", "j":
+		if v.tokenCursor < len(v.tokenNames)-1 {
+			v.tokenCursor++
+		}
+	case "enter":
+		if len(v.tokenNames) == 0 {
+			return v, nil
+		}
+		v.mode = integModeTokenAction
+		v.tokenActionCursor = 0
+	case "e":
+		return v.enterIntEdit(), nil
+	case "r":
+		v.mode = integModeConfirm
+		v.pending = "remove"
+	}
+	return v, nil
+}
+
+// tokenActions returns the per-token menu, parity with grantListView.
+func (v *integrationListView) tokenActions() []integAction {
+	if v.tokenCursor < 0 || v.tokenCursor >= len(v.tokenNames) {
+		return nil
+	}
+	return []integAction{
+		{label: "View details", key: "d"},
+		{label: "Edit scope note", key: "s"},
+		{label: "Rotate value", key: "o"},
+		{label: "Remove", key: "r", destructive: true},
+		{label: "Back to tokens", key: "b"},
+	}
+}
+
+func (v *integrationListView) updateTokenAction(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	acts := v.tokenActions()
+	switch mm.String() {
+	case "esc", "backspace":
+		v.mode = integModeTokenList
+	case "up", "k":
+		if v.tokenActionCursor > 0 {
+			v.tokenActionCursor--
+		}
+	case "down", "j":
+		if v.tokenActionCursor < len(acts)-1 {
+			v.tokenActionCursor++
+		}
+	case "enter":
+		if v.tokenActionCursor < 0 || v.tokenActionCursor >= len(acts) {
+			return v, nil
+		}
+		return v.runTokenAction(acts[v.tokenActionCursor])
+	default:
+		for _, a := range acts {
+			if a.key == mm.String() {
+				return v.runTokenAction(a)
+			}
+		}
+	}
+	return v, nil
+}
+
+func (v *integrationListView) runTokenAction(a integAction) (tea.Model, tea.Cmd) {
+	tokenName := v.selectedTokenName()
+	if tokenName == "" {
+		return v, nil
+	}
+	switch a.key {
+	case "d":
+		v.mode = integModeTokenDetail
+	case "s":
+		// Seed the edit buffer with the current scope note.
+		cur := v.items[v.selectedName()].Tokens[tokenName].ScopeNote
+		v.tokenEditBuf.Reset()
+		v.tokenEditBuf.WriteString(cur)
+		v.mode = integModeTokenEditScope
+	case "o":
+		v.tokenEditBuf.Reset()
+		v.mode = integModeTokenRotate
+	case "r":
+		v.mode = integModeTokenRemoveConfirm
+		v.tokenPending = "remove-token"
+	case "b":
+		v.mode = integModeTokenList
+	}
+	return v, nil
+}
+
+func (v *integrationListView) selectedTokenName() string {
+	if v.tokenCursor < 0 || v.tokenCursor >= len(v.tokenNames) {
+		return ""
+	}
+	return v.tokenNames[v.tokenCursor]
+}
+
+// updateTokenEditScope handles the single-line scope note editor.
+func (v *integrationListView) updateTokenEditScope(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch mm.String() {
+	case "esc":
+		v.mode = integModeTokenAction
+	case "enter":
+		v.mode = integModeRun
+		return v, v.doTokenSetScope()
+	case "backspace":
+		s := v.tokenEditBuf.String()
+		if len(s) > 0 {
+			v.tokenEditBuf.Reset()
+			v.tokenEditBuf.WriteString(s[:len(s)-1])
+		}
+	default:
+		if len(mm.Runes) > 0 {
+			v.tokenEditBuf.WriteString(string(mm.Runes))
+		}
+	}
+	return v, nil
+}
+
+// updateTokenRotate handles the masked new-value editor.
+func (v *integrationListView) updateTokenRotate(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch mm.String() {
+	case "esc":
+		v.mode = integModeTokenAction
+	case "enter":
+		if v.tokenEditBuf.Len() == 0 {
+			v.err = "new value required"
+			return v, nil
+		}
+		v.err = ""
+		v.mode = integModeRun
+		return v, v.doTokenRotate()
+	case "backspace":
+		s := v.tokenEditBuf.String()
+		if len(s) > 0 {
+			v.tokenEditBuf.Reset()
+			v.tokenEditBuf.WriteString(s[:len(s)-1])
+		}
+	default:
+		if len(mm.Runes) > 0 {
+			v.tokenEditBuf.WriteString(string(mm.Runes))
+		}
+	}
+	return v, nil
+}
+
+func (v *integrationListView) updateTokenRemoveConfirm(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch mm.String() {
+	case "y", "Y", "enter":
+		v.mode = integModeRun
+		return v, v.doTokenRemove()
+	case "n", "N", "esc":
+		v.mode = integModeTokenAction
+		v.tokenPending = ""
+	}
+	return v, nil
+}
+
+func (v *integrationListView) doTokenSetScope() tea.Cmd {
+	integ := v.selectedName()
+	tok := v.selectedTokenName()
+	scope := v.tokenEditBuf.String()
+	return func() tea.Msg {
+		self, _ := os.Executable()
+		cmd := exec.Command(self, "integration", "set-token",
+			"--name", integ,
+			"--token-name", tok,
+			"--scope-note", scope)
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return integActionMsg{err: strings.TrimSpace(stderr.String())}
+		}
+		return integActionMsg{}
+	}
+}
+
+func (v *integrationListView) doTokenRotate() tea.Cmd {
+	integ := v.selectedName()
+	tok := v.selectedTokenName()
+	newValue := v.tokenEditBuf.String()
+	return func() tea.Msg {
+		self, _ := os.Executable()
+		cmd := exec.Command(self, "integration", "set-token",
+			"--name", integ,
+			"--token-name", tok,
+			"--value-stdin")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Stdin = strings.NewReader(newValue + "\n")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return integActionMsg{err: strings.TrimSpace(stderr.String())}
+		}
+		return integActionMsg{}
+	}
+}
+
+func (v *integrationListView) doTokenRemove() tea.Cmd {
+	integ := v.selectedName()
+	tok := v.selectedTokenName()
+	return func() tea.Msg {
+		self, _ := os.Executable()
+		cmd := exec.Command(self, "integration", "remove-token",
+			"--name", integ,
+			"--token", tok)
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return integActionMsg{err: strings.TrimSpace(stderr.String())}
+		}
+		return integActionMsg{}
+	}
+}
+
+// updateIntEdit handles the integration-level edit form (kind, desc, URL/CMD).
+func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Field 0 is the Kind preset picker — treat up/down as cursor move,
+	// enter to advance.
+	if v.intEditField == 0 {
+		switch mm.String() {
+		case "esc":
+			v.mode = integModeList
+		case "up", "k":
+			if v.intEditKindCursor > 0 {
+				v.intEditKindCursor--
+			}
+		case "down", "j":
+			if v.intEditKindCursor < len(kindPresets)-1 {
+				v.intEditKindCursor++
+			}
+		case "enter":
+			v.intEditKindChoice = kindPresets[v.intEditKindCursor].value
+			v.intEditField = 1
+		}
+		return v, nil
+	}
+	// Fields 1/2 are text inputs.
+	switch mm.String() {
+	case "esc":
+		v.mode = integModeList
+	case "enter":
+		if v.intEditField < 2 {
+			v.intEditField++
+		} else {
+			v.mode = integModeRun
+			return v, v.doIntEdit()
+		}
+	case "tab", "down":
+		if v.intEditField < 2 {
+			v.intEditField++
+		}
+	case "shift+tab", "up":
+		if v.intEditField > 0 {
+			v.intEditField--
+		}
+	case "backspace":
+		buf := v.intEditCurBuf()
+		if buf == nil {
+			return v, nil
+		}
+		s := buf.String()
+		if len(s) > 0 {
+			buf.Reset()
+			buf.WriteString(s[:len(s)-1])
+		}
+	default:
+		if len(mm.Runes) > 0 {
+			if buf := v.intEditCurBuf(); buf != nil {
+				buf.WriteString(string(mm.Runes))
+			}
+		}
+	}
+	return v, nil
+}
+
+func (v *integrationListView) intEditCurBuf() *strings.Builder {
+	switch v.intEditField {
+	case 1:
+		return &v.intEditDescBuf
+	case 2:
+		return &v.intEditKindSlotBuf
+	}
+	return nil
+}
+
+func (v *integrationListView) doIntEdit() tea.Cmd {
+	name := v.selectedName()
+	kind := v.intEditKindChoice
+	desc := v.intEditDescBuf.String()
+	slot := v.intEditKindSlotBuf.String()
+	return func() tea.Msg {
+		self, _ := os.Executable()
+		args := []string{"integration", "add", "--name", name, "--kind", kind}
+		if desc != "" {
+			args = append(args, "--description", desc)
+		}
+		if slot != "" {
+			switch kind {
+			case vault.IntegrationKindCLI:
+				args = append(args, "--cmd", slot)
+			case vault.IntegrationKindMCP:
+				if strings.HasPrefix(slot, "http://") || strings.HasPrefix(slot, "https://") {
+					args = append(args, "--mcp-url", slot)
+				} else {
+					args = append(args, "--mcp-cmd", slot)
+				}
+			default:
+				args = append(args, "--base-url", slot)
+			}
+		}
+		cmd := exec.Command(self, args...)
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return integActionMsg{err: strings.TrimSpace(stderr.String())}
+		}
+		return integActionMsg{}
+	}
+}
+
+// viewTokenList renders the token picker for the integration under
+// the main cursor. When in integModeTokenAction the action menu
+// renders below the list.
+func (v *integrationListView) viewTokenList() string {
+	name := v.selectedName()
+	it := v.items[name]
+	var b strings.Builder
+	b.WriteString(titleSt.Render("Tokens on "+name) + "\n")
+	b.WriteString(mutedSt.Render(fmt.Sprintf("  kind=%s · %d token(s)", vault.IntegrationKindOf(it), len(v.tokenNames))) + "\n\n")
+	if len(v.tokenNames) == 0 {
+		b.WriteString(mutedSt.Render("(no tokens — add one with `dop integration add --token`)") + "\n")
+	}
+	for i, tn := range v.tokenNames {
+		tok := it.Tokens[tn]
+		prefix := "    "
+		disp := tn
+		if i == v.tokenCursor && v.mode == integModeTokenList {
+			prefix = "  " + cursorSt.Render("➤ ")
+			disp = cursorSt.Render(tn)
+		}
+		scope := tok.ScopeNote
+		if scope == "" {
+			scope = "-"
+		}
+		dispPad := lipgloss.NewStyle().Width(20).Render(disp)
+		b.WriteString(prefix + dispPad + "  " + mutedSt.Render("("+scope+")") + "\n")
+	}
+	if v.mode == integModeTokenAction {
+		b.WriteString("\n" + v.renderTokenActionMenu())
+	} else {
+		b.WriteString("\n" + helpSt.Render("↑↓ move · enter actions · e edit integration · r remove integration · esc back"))
+	}
+	if v.flash != "" {
+		b.WriteString("\n" + okSt.Render(v.flash))
+		v.flash = ""
+	}
+	return b.String()
+}
+
+func (v *integrationListView) renderTokenActionMenu() string {
+	tok := v.selectedTokenName()
+	if tok == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(mutedSt.Render(fmt.Sprintf("─── actions for token %q ───", tok)) + "\n")
+	for i, a := range v.tokenActions() {
+		prefix := "    "
+		lbl := a.label
+		if i == v.tokenActionCursor {
+			prefix = "  " + cursorSt.Render("➤ ")
+			lbl = cursorSt.Render(lbl)
+			if a.destructive {
+				lbl = failSt.Render(a.label)
+			}
+		} else if a.destructive {
+			lbl = failSt.Render(a.label)
+		}
+		b.WriteString(fmt.Sprintf("%s%s\n", prefix, lbl))
+	}
+	b.WriteString("\n" + helpSt.Render("↑↓ move · enter run · backspace back"))
+	return b.String()
+}
+
+func (v *integrationListView) viewTokenDetail() string {
+	name := v.selectedName()
+	tn := v.selectedTokenName()
+	tok := v.items[name].Tokens[tn]
+	var b strings.Builder
+	b.WriteString(titleSt.Render("Token: "+name+"/"+tn) + "\n\n")
+	val := tok.Value
+	if len(val) > 4 {
+		val = strings.Repeat("•", len(val)-4) + val[len(val)-4:]
+	} else {
+		val = strings.Repeat("•", len(val))
+	}
+	b.WriteString(fmt.Sprintf("  value:      %s\n", val))
+	scope := tok.ScopeNote
+	if scope == "" {
+		scope = "-"
+	}
+	b.WriteString(fmt.Sprintf("  scope_note: %s\n", scope))
+	b.WriteString("\n" + helpSt.Render("any key back"))
+	return b.String()
+}
+
+func (v *integrationListView) viewTokenEditScope() string {
+	tn := v.selectedTokenName()
+	var b strings.Builder
+	b.WriteString(titleSt.Render("Edit scope note: "+tn) + "\n\n")
+	b.WriteString(cursorSt.Render("Scope note") + ": " + v.tokenEditBuf.String() + cursorSt.Render("▎") + "\n")
+	b.WriteString("    " + mutedSt.Render("free text — e.g. read-only, admin") + "\n")
+	b.WriteString("\n" + helpSt.Render("enter save · esc cancel"))
+	if v.err != "" {
+		b.WriteString("\n" + failSt.Render(v.err))
+	}
+	return b.String()
+}
+
+func (v *integrationListView) viewTokenRotate() string {
+	tn := v.selectedTokenName()
+	var b strings.Builder
+	b.WriteString(titleSt.Render("Rotate value: "+tn) + "\n\n")
+	masked := strings.Repeat("•", v.tokenEditBuf.Len())
+	b.WriteString(cursorSt.Render("New value") + ": " + masked + cursorSt.Render("▎") + "\n")
+	b.WriteString("    " + mutedSt.Render("the new credential — never echoed; sent to the CLI via stdin") + "\n")
+	b.WriteString("\n" + helpSt.Render("enter save · esc cancel"))
+	if v.err != "" {
+		b.WriteString("\n" + failSt.Render(v.err))
+	}
+	return b.String()
+}
+
+func (v *integrationListView) viewTokenRemoveConfirm() string {
+	name := v.selectedName()
+	tn := v.selectedTokenName()
+	var b strings.Builder
+	b.WriteString(titleSt.Render("Remove token "+name+"/"+tn+"?") + "\n\n")
+	b.WriteString(failSt.Render("Grants referencing this token will be dropped and bearers resealed where possible.") + "\n")
+	if v.err != "" {
+		b.WriteString("\n" + failSt.Render(v.err) + "\n")
+	}
+	b.WriteString("\n" + helpSt.Render("y/enter confirm · n/esc cancel"))
+	return b.String()
+}
+
+func (v *integrationListView) viewIntEdit() string {
+	name := v.selectedName()
+	var b strings.Builder
+	b.WriteString(titleSt.Render("Edit integration: "+name) + "\n\n")
+
+	// Kind picker (field 0).
+	kindLbl := "Kind"
+	kindVal := v.intEditKindChoice
+	if v.intEditField == 0 {
+		kindLbl = cursorSt.Render("Kind")
+	} else {
+		kindLbl = mutedSt.Render("Kind")
+	}
+	b.WriteString(kindLbl + ": " + kindVal + "\n")
+	if v.intEditField == 0 {
+		for i, p := range kindPresets {
+			prefix := "    "
+			label := p.label
+			if i == v.intEditKindCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(p.label)
+			}
+			b.WriteString(prefix + label + "    " + mutedSt.Render(p.hint) + "\n")
+		}
+	}
+
+	// Description (field 1).
+	descLbl := mutedSt.Render("What it's for")
+	if v.intEditField == 1 {
+		descLbl = cursorSt.Render("What it's for")
+	}
+	b.WriteString(descLbl + ": " + v.intEditDescBuf.String())
+	if v.intEditField == 1 {
+		b.WriteString(cursorSt.Render("▎"))
+	}
+	b.WriteString("\n")
+
+	// KindSlot (field 2) — label depends on kind.
+	slotLbl, slotHint := kindSlotLabel(v.intEditKindChoice)
+	st := mutedSt
+	if v.intEditField == 2 {
+		st = cursorSt
+	}
+	b.WriteString(st.Render(slotLbl) + ": " + v.intEditKindSlotBuf.String())
+	if v.intEditField == 2 {
+		b.WriteString(cursorSt.Render("▎"))
+	}
+	b.WriteString("\n")
+	if v.intEditField == 2 {
+		b.WriteString("    " + mutedSt.Render(slotHint) + "\n")
+	}
+
+	b.WriteString("\n" + helpSt.Render("enter next/save · tab/↑↓ jump · esc cancel"))
+	if v.err != "" {
+		b.WriteString("\n" + failSt.Render(v.err))
 	}
 	return b.String()
 }

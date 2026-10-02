@@ -49,6 +49,11 @@ const (
 	// failure). Lets operators audit "did DOP make an outbound HTTP
 	// call on my behalf, and what did it find?"
 	EventIntegrationProbed = "integration_probed"
+	// v1.13.0-rc16 — `dop integration set-token` mutations. Fires on
+	// every value rotation + every scope-note edit. Carries flags
+	// `rotated`/`scope_changed` (both bool-as-string) and the token
+	// name; NEVER the new value.
+	EventIntegrationTokenSet = "integration_token_set"
 )
 
 // Event is one line in the log.

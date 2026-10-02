@@ -21,6 +21,7 @@ Short, scannable list of every feature contract. Each contract pins the invarian
 | 15 | [Protected Credentials](15_protected_credentials.md) | Owner-locked integrations + grants (Shape B + daemon revert). |
 | 16 | [Integration Kinds](16_integration_kinds.md) | `api`/`cli`/`mcp`/`other` + canonical env-key promotion. |
 | 17 | [Endpoints Discovery Probe](17_endpoints_probe.md) | Opt-in probe at `integration add` time. OpenAPI path order + MCP tools/list. |
+| 18 | [Token Lifecycle](18_token_lifecycle.md) | `integration set-token` (rotate value / edit scope). TUI token drill-down parity with grants. |
 
 ## Status
 
