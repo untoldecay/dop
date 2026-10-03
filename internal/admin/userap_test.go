@@ -1,4 +1,4 @@
-// v1.14.0-rc1 — admin-use wrap/unwrap primitives. Round-trips a
+// v1.14.0-rc1 — portable wrap/unwrap primitives. Round-trips a
 // bearer-looking string through WrapToRecipient → UnwrapWithIdentity
 // and verifies that a mismatched identity fails to decrypt.
 

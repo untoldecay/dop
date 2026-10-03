@@ -8,7 +8,7 @@
 //     identity needed to decrypt the stashed bearer; without an
 //     unlock, we have no way to retrieve it.
 //   - The capability for <subject> MUST have been issued with
-//     `--for-admin-use`. If it wasn't, we can't retrieve the bearer
+//     `--portable`. If it wasn't, we can't retrieve the bearer
 //     (DOP intentionally doesn't store bearer values otherwise) —
 //     refuse with a clear hint.
 //   - Protected bearers (rc12) are additionally owner-gated: refuse
@@ -55,7 +55,7 @@ func runUse(args []string) int {
 		fmt.Fprintln(os.Stderr, "  Attaches an admin-stashed bearer to the current shell.")
 		fmt.Fprintln(os.Stderr, "  Default: prints `export DOP_TOKEN=…` to stdout for `eval \"$(…)\"`.")
 		fmt.Fprintln(os.Stderr, "  Issue the bearer with:")
-		fmt.Fprintln(os.Stderr, "    dop token issue --name <subject> --grants … --for-admin-use")
+		fmt.Fprintln(os.Stderr, "    dop token issue --name <subject> --grants … --portable")
 		return 2
 	}
 	subject := rest[0]
@@ -83,11 +83,11 @@ func runUse(args []string) int {
 	// Refuse if the capability wasn't stashed. Explicit hint rather
 	// than a vague "nothing to unwrap" since this is the most common
 	// first-encounter error.
-	if crec.AdminUseWrapped == "" {
+	if crec.PortableWrapped == "" {
 		fmt.Fprintf(os.Stderr,
-			"dop use: capability %q has no admin-use stash — the bearer value is not retrievable.\n"+
-				"  Re-issue it with --for-admin-use, OR use the one-shot bearer printed at issue time:\n"+
-				"    dop token issue --name %s --grants … --for-admin-use\n",
+			"dop use: capability %q has no portable stash — the bearer value is not retrievable.\n"+
+				"  Re-issue it with --portable, OR use the one-shot bearer printed at issue time:\n"+
+				"    dop token issue --name %s --grants … --portable\n",
 			subject, subject)
 		return 1
 	}
@@ -100,7 +100,7 @@ func runUse(args []string) int {
 	}
 
 	// Unwrap via daemon.
-	bearerBytes, err := client.UnwrapAdminUse(crec.AdminUseWrapped)
+	bearerBytes, err := client.UnwrapPortable(crec.PortableWrapped)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop use: unwrap: %v\n", err)
 		return 1

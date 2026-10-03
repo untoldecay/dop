@@ -2,8 +2,8 @@
 # V1.14.0-rc1 e2e: `dop use <subject>` — admin's own bearer shortcut.
 # Covers:
 #   [1] admin init + login + base integration/grant
-#   [2] issue bearer WITHOUT --for-admin-use → `dop use` refuses with hint
-#   [3] issue bearer WITH --for-admin-use → `dop use` emits export line
+#   [2] issue bearer WITHOUT --portable → `dop use` refuses with hint
+#   [3] issue bearer WITH --portable → `dop use` emits export line
 #   [4] eval'd export → bearer actually works for `dop env`
 #   [5] --token-file path writes JSON envelope with mode 0600 + TTL
 #   [6] unknown subject refused
@@ -37,17 +37,17 @@ echo -n "$PASS" | "$DOP" admin login --passphrase-stdin >/dev/null
 "$DOP" grant add --id svc.api --integration svc --token api >/dev/null
 pass "fixture ready"
 
-echo "=== [2] bearer WITHOUT --for-admin-use → dop use refuses"
+echo "=== [2] bearer WITHOUT --portable → dop use refuses"
 OUT2=$("$DOP" token issue --grants svc.api --name without-stash --no-bind 2>&1)
 B2=$(echo "$OUT2" | grep -E '^tok_1' | head -1)
 [[ -n "$B2" ]] || fail "no bearer emitted on without-stash: $OUT2"
 OUT=$("$DOP" use without-stash 2>&1 || true)
-echo "$OUT" | grep -q "no admin-use stash" || fail "expected refusal with hint, got: $OUT"
+echo "$OUT" | grep -q "no portable stash" || fail "expected refusal with hint, got: $OUT"
 pass "refused without stash + hint shown"
 
-echo "=== [3] bearer WITH --for-admin-use → dop use emits export line"
-"$DOP" token issue --grants svc.api --name CamAdmin --no-bind --for-admin-use >/dev/null 2>&1 \
-    || fail "token issue --for-admin-use failed"
+echo "=== [3] bearer WITH --portable → dop use emits export line"
+"$DOP" token issue --grants svc.api --name CamAdmin --no-bind --portable >/dev/null 2>&1 \
+    || fail "token issue --portable failed"
 OUT_USE=$("$DOP" use CamAdmin 2>&1)
 echo "$OUT_USE" | grep -qE "^export DOP_TOKEN=tok_1" || fail "no export line: $OUT_USE"
 pass "dop use emitted eval line"

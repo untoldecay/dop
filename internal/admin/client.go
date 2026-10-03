@@ -125,15 +125,15 @@ func (c *Client) EncryptVault(vaultPath string, plaintext []byte, ageRecipient s
 	return err
 }
 
-// UnwrapAdminUse — v1.14.0-rc1. Decrypts an admin-use-stashed bearer
+// UnwrapPortable — v1.14.0-rc1. Decrypts an portable-stashed bearer
 // value via the daemon's age identity. Used by `dop use <subject>`.
-func (c *Client) UnwrapAdminUse(ciphertextB64 string) ([]byte, error) {
-	req, _ := json.Marshal(UnwrapAdminUseReq{CiphertextB64: ciphertextB64})
-	resp, err := c.call(Request{Op: OpUnwrapAdminUse, Data: req})
+func (c *Client) UnwrapPortable(ciphertextB64 string) ([]byte, error) {
+	req, _ := json.Marshal(UnwrapPortableReq{CiphertextB64: ciphertextB64})
+	resp, err := c.call(Request{Op: OpUnwrapPortable, Data: req})
 	if err != nil {
 		return nil, err
 	}
-	var r UnwrapAdminUseResp
+	var r UnwrapPortableResp
 	if err := json.Unmarshal(resp.Data, &r); err != nil {
 		return nil, err
 	}

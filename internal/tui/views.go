@@ -281,6 +281,13 @@ type issueView struct {
 	// custom and starts typing.
 	expiryPickCursor int
 	expiryCustom     bool
+
+	// v1.14.0-rc2 — portable toggle. Step 3 is a picker over
+	// portablePresets (yes/no). When yes, the issue subprocess
+	// receives --portable so the bearer gets age-wrapped on the
+	// capability record for later `dop use <subject>` recall.
+	portableChoice     bool
+	portablePickCursor int
 }
 
 type grantRow struct {
@@ -330,6 +337,19 @@ var expiryPresets = []struct {
 	{"1y   (one year — 365d)", "365d"},
 	{"never (no expiry — revoke manually)", "never"},
 	{"custom…", ""},
+}
+
+// portablePresets drives the Portable step (v1.14.0-rc2). Yes stashes
+// an age-wrapped bearer on the capability so the issuing admin can
+// later `dop use <subject>` from any shell on any of their machines.
+// Only the issuing admin's daemon can unwrap — other admins can't.
+var portablePresets = []struct {
+	label string
+	value bool
+	hint  string
+}{
+	{"no", false, "default · bearer shown once, you copy it yourself"},
+	{"yes", true, "keep a copy for your own shell · run `dop use <subject>` later to export it"},
 }
 
 // grantsListMode returns true when we should show the picker instead
@@ -540,6 +560,23 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return v, nil
 		}
+		// v1.14.0-rc2 — portable step: yes/no picker.
+		if v.step == 3 {
+			switch mm.String() {
+			case "up", "k":
+				if v.portablePickCursor > 0 {
+					v.portablePickCursor--
+				}
+			case "down", "j":
+				if v.portablePickCursor < len(portablePresets)-1 {
+					v.portablePickCursor++
+				}
+			case "enter", " ":
+				v.portableChoice = portablePresets[v.portablePickCursor].value
+				return v.advance()
+			}
+			return v, nil
+		}
 		switch mm.String() {
 		case "enter":
 			return v.advance()
@@ -576,11 +613,14 @@ func (v *issueView) currentBuf() *strings.Builder {
 
 func (v *issueView) advance() (tea.Model, tea.Cmd) {
 	val := strings.TrimSpace(v.currentBuf().String())
-	if val == "" && v.step != 2 {
+	// Step 0/1 require a buffer value; step 2 is the expiry picker and
+	// step 3 is the portable picker — both commit via Update's picker
+	// path, so the buffer check doesn't apply.
+	if val == "" && v.step != 2 && v.step != 3 {
 		return v, nil
 	}
 	v.step++
-	if v.step == 3 {
+	if v.step == 4 {
 		return v, v.issue()
 	}
 	return v, nil
@@ -659,12 +699,17 @@ func (v *issueView) issue() tea.Cmd {
 	}
 	v.subject = name
 	prefs := v.prefs
+	portable := v.portableChoice
 	return func() tea.Msg {
 		self, err := os.Executable()
 		if err != nil {
 			return issueResultMsg{err: err.Error()}
 		}
-		cmd := exec.Command(self, "token", "issue", "--grants", grants, "--name", name, "--expires", expires)
+		args := []string{"token", "issue", "--grants", grants, "--name", name, "--expires", expires}
+		if portable {
+			args = append(args, "--portable")
+		}
+		cmd := exec.Command(self, args...)
 		cmdEnv := append(os.Environ(), "DOP_NO_TUI=1")
 		// v1.13 — when the prefs toggle is on, flow DOP_ALLOW_FILE_KEYS
 		// through so the agent's claim can land a P-256 file-backed
@@ -759,15 +804,21 @@ func (v *issueView) View() string {
 		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
 		return b.String()
 	}
-	labels := []string{"Subject (label)", "Grants", "Expires"}
-	values := []string{v.nameBuf.String(), v.grantsBuf.String(), v.expiryBuf.String()}
+	portableLabel := "no"
+	if v.portableChoice {
+		portableLabel = "yes"
+	}
+	labels := []string{"Subject (label)", "Grants", "Expires", "Portable"}
+	values := []string{v.nameBuf.String(), v.grantsBuf.String(), v.expiryBuf.String(), portableLabel}
 
 	// Steps 0 and 2 render specially. Step 1 renders as a
 	// picker when the vault has grants, otherwise text-entry.
 	// v1.13.0-rc5: step 2 defaults to a preset picker; drops into
 	// text input only when the user picks "custom…".
+	// v1.14.0-rc2: step 3 is the portable picker (yes/no).
 	pickerAtStep1 := v.step == 1 && v.grantsListMode()
 	pickerAtStep2 := v.step == 2 && !v.expiryCustom
+	pickerAtStep3 := v.step == 3
 
 	for i, l := range labels {
 		if i == 1 && pickerAtStep1 {
@@ -776,6 +827,10 @@ func (v *issueView) View() string {
 		}
 		if i == 2 && pickerAtStep2 {
 			// Skip; the preset picker renders below.
+			continue
+		}
+		if i == 3 && pickerAtStep3 {
+			// Skip; the portable picker renders below.
 			continue
 		}
 		style := mutedSt
@@ -867,12 +922,30 @@ func (v *issueView) View() string {
 		}
 	}
 
+	// v1.14.0-rc2: portable picker on step 3.
+	if pickerAtStep3 {
+		b.WriteString("\n" + cursorSt.Render("Portable") + "  " +
+			mutedSt.Render("· keep a copy for your own shell, recoverable later with `dop use`") + "\n")
+		for i, p := range portablePresets {
+			prefix := "    "
+			label := p.label
+			hint := mutedSt.Render(p.hint)
+			if i == v.portablePickCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(p.label)
+			}
+			b.WriteString(prefix + label + "  " + hint + "\n")
+		}
+	}
+
 	if pickerAtStep1 {
 		b.WriteString("\n" + helpSt.Render("↑↓ move | space toggle | a section | A all | n none | enter next | esc cancel"))
 	} else if pickerAtStep2 {
 		b.WriteString("\n" + helpSt.Render("↑↓ move | enter select | esc cancel"))
 	} else if v.step == 2 && v.expiryCustom {
 		b.WriteString("\n" + helpSt.Render("type duration (e.g. 72h, 30d) · backspace at empty returns to presets · enter submit · esc cancel"))
+	} else if pickerAtStep3 {
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter select | esc cancel"))
 	} else {
 		b.WriteString("\n" + helpSt.Render("enter next | esc cancel"))
 	}
@@ -969,6 +1042,11 @@ type listView struct {
 	capIDs       []string
 	done         bool
 
+	// v1.14.0-rc2 — the viewing admin's pubkey, so the row renderer
+	// can draw 👤 for "mine" and 🔒 for "another admin's" based on
+	// each capability's IssuedBy. Set from the daemon status at load.
+	viewerPubkey string
+
 	// v1.10.0 picker state
 	mode          int    // listMode*
 	cursor        int    // index into visible()
@@ -1041,6 +1119,7 @@ func (v *listView) Flash() string { return v.flash }
 type listLoadedMsg struct {
 	capabilities []vault.Capability
 	capIDs       []string
+	viewerPubkey string
 	err          string
 }
 type listActionMsg struct {
@@ -1087,7 +1166,15 @@ func (v *listView) load() tea.Msg {
 		caps[i] = k.c
 		ids[i] = k.id
 	}
-	return listLoadedMsg{capabilities: caps, capIDs: ids}
+	// v1.14.0-rc2 — fetch the viewer's admin pubkey so the row renderer
+	// can draw ownership perspective (👤 mine vs 🔒 another admin's).
+	// Best-effort — if status fails for any reason, we just render
+	// without the icon.
+	viewerPubkey := ""
+	if st, serr := v.client.Status(); serr == nil {
+		viewerPubkey = st.AdminPubkey
+	}
+	return listLoadedMsg{capabilities: caps, capIDs: ids, viewerPubkey: viewerPubkey}
 }
 
 // visible returns the indexes into v.capabilities that should be shown
@@ -1157,6 +1244,7 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.loaded = true
 		v.capabilities = mm.capabilities
 		v.capIDs = mm.capIDs
+		v.viewerPubkey = mm.viewerPubkey
 		v.loadErr = mm.err
 	case listActionMsg:
 		if mm.err != "" {
@@ -1714,6 +1802,25 @@ func (v *listView) View() string {
 			prefix = "  " + cursorSt.Render("➤ ")
 			subj = cursorSt.Render(subj)
 		}
+		// v1.14.0-rc2 — ownership glyph. The vault's IssuedBy field
+		// carries the issuing admin's pubkey hex. 👤 = this admin's
+		// own capability; 🔒 = another admin's. Always reserve the
+		// column so names stay aligned across rows.
+		ownerGlyph := "  "
+		if c.IssuedBy != "" && v.viewerPubkey != "" {
+			if c.IssuedBy == v.viewerPubkey {
+				ownerGlyph = "👤"
+			} else {
+				ownerGlyph = "🔒"
+			}
+		}
+		// v1.14.0-rc2 — portable prefix. `p.` on the name column when
+		// the capability carries an admin-use stash. Dim style so it's
+		// noticeable but not loud. Column always reserved for parity.
+		portPrefix := "   "
+		if c.PortableWrapped != "" {
+			portPrefix = mutedSt.Render("p. ")
+		}
 		// v1.13 — surface the cap-id prefix in every row so two
 		// tokens sharing a subject are visibly distinct. Without
 		// this they looked identical in the TUI and only the first
@@ -1730,18 +1837,34 @@ func (v *listView) View() string {
 		// v1.13.0-rc20 — row trimmed to subj + capId + status. gen +
 		// expires moved to the status bar.
 		subjPad := lipgloss.NewStyle().Width(labelWidth).Render(subj)
-		b.WriteString(prefix + subjPad + "  " +
+		b.WriteString(prefix + ownerGlyph + " " + portPrefix + subjPad + "  " +
 			mutedSt.Render(capShort) + "  " +
 			statusStyle.Render(c.Status) + "\n")
 	}
 
 	// v1.13.0-rc20 — status bar for the cursor row.
+	// v1.14.0-rc2 — adds portable + owner markers.
 	if len(vis) > 0 && v.cursor >= 0 && v.cursor < len(vis) {
 		c := v.capabilities[vis[v.cursor]]
-		bar := fmt.Sprintf("selected: %s  |  gen=%d  |  expires=%s  |  grants=%s",
+		portable := "no"
+		if c.PortableWrapped != "" {
+			portable = "yes"
+		}
+		owner := "—"
+		if c.IssuedBy != "" {
+			if c.IssuedBy == v.viewerPubkey {
+				owner = "you"
+			} else if len(c.IssuedBy) >= 8 {
+				owner = c.IssuedBy[:8] + "…"
+			} else {
+				owner = c.IssuedBy
+			}
+		}
+		bar := fmt.Sprintf("%s  ·  gen %d  ·  expires %s  ·  grants %s  ·  portable %s  ·  owner %s",
 			c.Subject, c.Generation,
 			expiresDisplay(c.ExpiresAt, "2006-01-02"),
-			strings.Join(c.Grants, ","))
+			strings.Join(c.Grants, ","),
+			portable, owner)
 		b.WriteString("\n" + mutedSt.Render(bar) + "\n")
 	}
 
@@ -1756,7 +1879,8 @@ func (v *listView) View() string {
 	if v.mode == listModeAction {
 		b.WriteString("\n" + v.renderActionMenu())
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move | enter actions | esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter actions | esc back") +
+			"\n" + helpSt.Render("👤 yours · 🔒 another admin's · p. portable"))
 	}
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))

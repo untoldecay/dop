@@ -10,7 +10,10 @@ coverage.txt
 
 # Local BeadsLog devlogs (session narratives — private engineering notes;
 # structured artifacts live in _rules/_documentation/ + _rules/_requirements/)
-/_rules/_devlog/
+/_rules/_devlog/*
+# ... but keep the devlog index tracked (bd requires _index.md to be
+# updated+committed on every devlog-bearing commit).
+!/_rules/_devlog/_index.md
 
 # BeadsLog runtime state (init locally with `bd init`)
 /.beads/

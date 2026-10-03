@@ -230,7 +230,7 @@ func runTokenIssue(args []string) int {
 	// v1.13.0-rc12 — issuing a bearer that contains protected grants
 	// requires the admin passphrase (same gate as creating one).
 	passphraseStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin instead of the tty (used when any of --grants is protected; TUI passes this)")
-	// v1.14.0-rc1 — opt-in admin-use stash. When set, DOP additionally
+	// v1.14.0-rc1 — opt-in portable stash. When set, DOP additionally
 	// age-wraps the fresh bearer value with the issuing admin's age
 	// recipient and stores the ciphertext on the capability record.
 	// `dop use <subject>` later unwraps via the admin daemon to make
@@ -238,7 +238,7 @@ func runTokenIssue(args []string) int {
 	// unwrap. Opt-in because the normal flow is "bearer leaves admin,
 	// lives only with agent"; this is specifically for bearers the
 	// admin itself will use across their own shells.
-	forAdminUse := fs.Bool("for-admin-use", false, "also wrap the bearer to the issuing admin's age recipient and stash it on the capability record, so the admin can later `dop use <subject>` from any shell on any of their machines (vault pull carries the stash)")
+	portable := fs.Bool("portable", false, "also wrap the bearer to the issuing admin's age recipient and stash it on the capability record, so the admin can later `dop use <subject>` from any shell on any of their machines (vault pull carries the stash)")
 	_ = fs.Parse(args)
 	_ = note
 
@@ -508,19 +508,19 @@ func runTokenIssue(args []string) int {
 		v.Capabilities = map[string]vault.Capability{}
 	}
 	stored := capability2VaultCapability(rec)
-	// v1.14.0-rc1 — opt-in admin-use stash. Wrap the fresh bearer with
+	// v1.14.0-rc1 — opt-in portable stash. Wrap the fresh bearer with
 	// the issuing admin's age recipient (fetched from the session
 	// Status) and store the ciphertext on the capability so `dop use`
 	// can later retrieve it. Encryption uses only the recipient
 	// (public key); unwrapping requires the identity (daemon-held).
-	if *forAdminUse {
+	if *portable {
 		st, err := client.Status()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "dop token issue: session status for --for-admin-use: %v\n", err)
+			fmt.Fprintf(os.Stderr, "dop token issue: session status for --portable: %v\n", err)
 			return 1
 		}
 		if st.AgeRecipient == "" {
-			fmt.Fprintln(os.Stderr, "dop token issue: --for-admin-use requires an active admin session with an age recipient")
+			fmt.Fprintln(os.Stderr, "dop token issue: --portable requires an active admin session with an age recipient")
 			return 1
 		}
 		wrapped, err := admin.WrapToRecipient([]byte(bearer), st.AgeRecipient)
@@ -528,7 +528,7 @@ func runTokenIssue(args []string) int {
 			fmt.Fprintf(os.Stderr, "dop token issue: wrap bearer for admin use: %v\n", err)
 			return 1
 		}
-		stored.AdminUseWrapped = wrapped
+		stored.PortableWrapped = wrapped
 	}
 	v.Capabilities[capIDHex] = stored
 
@@ -1284,13 +1284,13 @@ func syncSidecars(client *admin.Client, paths *config.Paths, v *vault.Vault) err
 			return fmt.Errorf("resign %s: %w", c.LookupID, err)
 		}
 		// Reflect the new signature back into the vault map so the two
-		// stay coherent. v1.14.0-rc1 — preserve AdminUseWrapped across
+		// stay coherent. v1.14.0-rc1 — preserve PortableWrapped across
 		// the record round-trip; it's admin-only and doesn't live on
 		// capability.Record (unlike EnvWrapped/BearerWrapped which do).
-		preservedStash := c.AdminUseWrapped
+		preservedStash := c.PortableWrapped
 		updated := capability2VaultCapability(rec)
 		if preservedStash != "" {
-			updated.AdminUseWrapped = preservedStash
+			updated.PortableWrapped = preservedStash
 		}
 		v.Capabilities[capID] = updated
 		if err := writeRecordSidecar(paths, rec); err != nil {
