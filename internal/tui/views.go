@@ -1802,12 +1802,19 @@ func (v *listView) View() string {
 			prefix = "  " + cursorSt.Render("➤ ")
 			subj = cursorSt.Render(subj)
 		}
-		// v1.14.0-rc2 — ownership glyph. The vault's IssuedBy field
-		// carries the issuing admin's pubkey hex. 👤 = this admin's
-		// own capability; 🔒 = another admin's. Always reserve the
-		// column so names stay aligned across rows.
+		// v1.14.0-rc3 — ownership glyph is gated on OWNER-EXCLUSIVITY,
+		// not merely on IssuedBy. Showing an icon on every token the
+		// viewer issued reads as "locked to me" for plain tokens, which
+		// are mutable by any admin and have no such lock. The glyph
+		// only appears when a lock relationship actually exists: today
+		// that's portable (bearer stash wrapped to one admin's age
+		// recipient); after the Phase 2 protection migration lands,
+		// also when any grant on this capability is protected.
+		// 👤 = owner-locked to this viewer; 🔒 = owner-locked to another
+		// admin. Column always reserved so rows stay aligned.
 		ownerGlyph := "  "
-		if c.IssuedBy != "" && v.viewerPubkey != "" {
+		ownerExclusive := c.PortableWrapped != ""
+		if ownerExclusive && c.IssuedBy != "" && v.viewerPubkey != "" {
 			if c.IssuedBy == v.viewerPubkey {
 				ownerGlyph = "👤"
 			} else {
