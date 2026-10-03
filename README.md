@@ -34,10 +34,11 @@ Then run `dop` to launch the TUI. For every other command, see the [CLI referenc
 
 ## Guides
 
-- **[Onboarding](_rules/_documentation/01_Admin-Lifecycle.md)** — install, create vault, add tokens, add a device, add an admin
-- **[Teams](_rules/_documentation/02_Vault-Attach-Sync.md)** — multi-admin, cross-grant, revocation
-- **[Agents in agentic hubs](https://github.com/block/buzz)** — DOP alongside [Buzz](https://github.com/block/buzz) and similar workspaces where humans and agents share rooms *(local guide landing soon)*
-- **[Secure elements](DESIGN_v1.11_agent_key_SE.md)** — hardware-backed agent identity (Secure Enclave; *still landing*)
-- **[Threat model](_rules/_requirements/contracts/)** — what DOP protects and what it doesn't
-- **[CI / headless](_rules/_documentation/05_Agent-Exec-and-Env.md)** — pre-bound bearers for runners
-- **[CLI reference](_rules/_documentation/08_CLI-Reference.md)** — every command by section, nicer-formatted `dop --help` *(landing soon — meanwhile run `dop --help`)*
+- **[Onboarding](docs/01-onboarding.md)** — install, create vault, add tokens, pair your first agent
+- **[Teams](docs/02-teams.md)** — multi-admin, cross-grant, revocation, concurrent-admin merges, laptop-loss recovery
+- **[Agents in agentic hubs](docs/03-agentic-hubs.md)** — DOP alongside [Buzz](https://github.com/block/buzz) and similar workspaces where humans and agents share rooms
+- **[Secure elements](docs/04-secure-elements.md)** — hardware-backed agent identity (ed25519, P-256, Secure Enclave)
+- **[Threat model](docs/05-threat-model.md)** — what DOP protects and what it doesn't
+- **[CI / headless](docs/06-ci-headless.md)** — pre-bound bearers for runners
+- **[CLI reference](docs/07-cli-reference.md)** — every command by section, nicer-formatted `dop --help`
+- **[Recipes](docs/RECIPES.md)** — copy-pasteable patterns for shell, cron, Claude Code, Buzz
