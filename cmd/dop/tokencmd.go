@@ -1284,8 +1284,15 @@ func syncSidecars(client *admin.Client, paths *config.Paths, v *vault.Vault) err
 			return fmt.Errorf("resign %s: %w", c.LookupID, err)
 		}
 		// Reflect the new signature back into the vault map so the two
-		// stay coherent.
-		v.Capabilities[capID] = capability2VaultCapability(rec)
+		// stay coherent. v1.14.0-rc1 — preserve AdminUseWrapped across
+		// the record round-trip; it's admin-only and doesn't live on
+		// capability.Record (unlike EnvWrapped/BearerWrapped which do).
+		preservedStash := c.AdminUseWrapped
+		updated := capability2VaultCapability(rec)
+		if preservedStash != "" {
+			updated.AdminUseWrapped = preservedStash
+		}
+		v.Capabilities[capID] = updated
 		if err := writeRecordSidecar(paths, rec); err != nil {
 			return fmt.Errorf("write sidecar %s: %w", c.LookupID, err)
 		}

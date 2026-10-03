@@ -54,6 +54,11 @@ const (
 	// `rotated`/`scope_changed` (both bool-as-string) and the token
 	// name; NEVER the new value.
 	EventIntegrationTokenSet = "integration_token_set"
+	// v1.14.0-rc1 — `dop use <subject>` attached a bearer to a shell.
+	// Carries `subject`, `by` (admin pubkey short-form), `disk`
+	// (bool-as-string: did it write to --token-file). NEVER the
+	// bearer value.
+	EventUseAttached = "use_attached"
 )
 
 // Event is one line in the log.
