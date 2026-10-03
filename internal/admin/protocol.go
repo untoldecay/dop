@@ -31,12 +31,13 @@ type Response struct {
 // Phase 2 has no backwards-compat concerns because there are no other
 // callers yet.
 const (
-	OpStatus       = "status"
-	OpKeepAlive    = "keep_alive"
-	OpLogout       = "logout"
-	OpSign         = "sign"
-	OpDecryptVault = "decrypt_vault" // Phase 3
-	OpEncryptVault = "encrypt_vault" // Phase 3
+	OpStatus          = "status"
+	OpKeepAlive       = "keep_alive"
+	OpLogout          = "logout"
+	OpSign            = "sign"
+	OpDecryptVault    = "decrypt_vault" // Phase 3
+	OpEncryptVault    = "encrypt_vault" // Phase 3
+	OpUnwrapAdminUse  = "unwrap_admin_use" // v1.14.0-rc1 — `dop use`
 )
 
 // StatusResp is the payload of an `OpStatus` response.
@@ -75,6 +76,21 @@ type EncryptVaultReq struct {
 	VaultPath    string `json:"vault_path"`
 	PlaintextB64 string `json:"plaintext_b64"`
 	AgeRecipient string `json:"age_recipient"` // recipient(s) for encryption
+}
+
+// UnwrapAdminUseReq — v1.14.0-rc1. Payload of OpUnwrapAdminUse.
+// The daemon decrypts CiphertextB64 with the admin's age identity;
+// the plaintext is a bearer value stashed on a capability record
+// at `token issue --for-admin-use` time.
+type UnwrapAdminUseReq struct {
+	CiphertextB64 string `json:"ciphertext_b64"`
+}
+
+// UnwrapAdminUseResp — bearer plaintext as base64 (same convention
+// as DecryptVaultResp — JSON doesn't love binary, and bearer is
+// opaque enough that base64 is the clean carrier).
+type UnwrapAdminUseResp struct {
+	PlaintextB64 string `json:"plaintext_b64"`
 }
 
 // --- Wire helpers ---

@@ -226,6 +226,8 @@ func (s *Session) dispatch(req Request) Response {
 		return s.opDecryptVault(req.Data)
 	case OpEncryptVault:
 		return s.opEncryptVault(req.Data)
+	case OpUnwrapAdminUse:
+		return s.opUnwrapAdminUse(req.Data)
 	default:
 		return Response{Error: "unknown op: " + req.Op}
 	}
@@ -359,6 +361,40 @@ func (s *Session) opEncryptVault(payload []byte) Response {
 	}
 	s.bumpActivity()
 	return okResp(nil)
+}
+
+// opUnwrapAdminUse — v1.14.0-rc1. Decrypts a bearer value that was
+// stashed at `token issue --for-admin-use` time (wrapped to the
+// admin's own age recipient). Used by `dop use <subject>` to retrieve
+// the bearer so the shell can set DOP_TOKEN.
+//
+// Only works while the session is unlocked (the age identity lives
+// in s.keys.Age, same as DecryptVault). Returns the plaintext bearer
+// as base64 so JSON stays binary-safe, mirroring DecryptVaultResp.
+func (s *Session) opUnwrapAdminUse(payload []byte) Response {
+	var req UnwrapAdminUseReq
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return Response{Error: "unwrap_admin_use: bad payload"}
+	}
+	if req.CiphertextB64 == "" {
+		return Response{Error: "unwrap_admin_use: ciphertext_b64 required"}
+	}
+	s.mu.Lock()
+	if s.keys == nil {
+		s.mu.Unlock()
+		return Response{Error: "unwrap_admin_use: session locked"}
+	}
+	id := s.keys.Age
+	s.mu.Unlock()
+	plaintext, err := UnwrapWithIdentity(req.CiphertextB64, id)
+	if err != nil {
+		return Response{Error: "unwrap_admin_use: " + err.Error()}
+	}
+	s.bumpActivity()
+	body, _ := json.Marshal(UnwrapAdminUseResp{
+		PlaintextB64: base64.StdEncoding.EncodeToString(plaintext),
+	})
+	return okResp(body)
 }
 
 func okResp(data []byte) Response {
