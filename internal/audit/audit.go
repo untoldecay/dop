@@ -44,6 +44,10 @@ const (
 	EventProtectedCreate        = "protected_create"         // integration or grant marked protected
 	EventProtectedTokenIssue    = "protected_token_issue"    // bearer issued containing a protected grant
 	EventProtectedBypassAttempt = "protected_bypass_attempt" // daemon reverted a non-owner's protected mutation
+	// v1.14.0-rc3 — owner-initiated unlock. Mirrors EventProtectedCreate
+	// so the audit trail is symmetric: every protect transition logs,
+	// in either direction. Fires only on actual true→false flips.
+	EventProtectedUnlock = "protected_unlock"
 	// v1.13.0-rc15 — endpoints doc probe at `integration add` time.
 	// Opt-in via --probe-endpoints. One event per run (success OR
 	// failure). Lets operators audit "did DOP make an outbound HTTP

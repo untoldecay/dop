@@ -647,13 +647,27 @@ func runIntegrationAdd(args []string) int {
 	}
 
 	// v1.13.0-rc12 — protection claim path.
-	// `--protected` on an EXISTING, already-protected (and owned-by-us)
-	// integration is a no-op flag preservation; on a non-protected one
-	// it's a flip. In both cases we gate on the approval passphrase
-	// and stamp Owner = current admin pubkey.
-	protect := *protected || existing.Protected
+	// v1.14.0-rc3 — tri-state semantic for --protected:
+	//   flag unset             → inherit existing.Protected
+	//   --protected / =true    → set true (prompts passphrase; stamps owner)
+	//   --protected=false      → set false (owner-only unlock path)
+	// Previously the OR expression made --protected=false a no-op because
+	// the Go flag parser can't distinguish "unset" from "set to false" on
+	// a plain Bool. We walk fs.Visit to recover that distinction.
+	protectedSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "protected" {
+			protectedSet = true
+		}
+	})
+	protect := existing.Protected
+	if protectedSet {
+		protect = *protected
+	}
 	owner := existing.Owner
-	if protect {
+	switch {
+	case protect && !existing.Protected:
+		// New lock or re-lock after unlock. Prompt passphrase + stamp owner.
 		if err := promptProtectionPassphrase(paths, "approval passphrase (protect integration "+key+"): ", *passphraseStdin); err != nil {
 			fmt.Fprintf(os.Stderr, "dop integration add: %v\n", err)
 			return 1
@@ -663,13 +677,15 @@ func runIntegrationAdd(args []string) int {
 			fmt.Fprintf(os.Stderr, "dop integration add: session: %v\n", err)
 			return 1
 		}
-		// A flip-to-protected (or brand-new protected) always claims
-		// the CURRENT admin as owner. Previously-set Owner on an
-		// already-protected resource stays — enforcePathOnSave would
-		// have refused us upstream if it belonged to someone else.
-		if owner == "" {
-			owner = st.AdminPubkey
-		}
+		owner = st.AdminPubkey
+	case protect && existing.Protected:
+		// Already-protected no-op (owner stays). enforceProtectedOnSave
+		// would have refused us upstream if we weren't the owner.
+	case !protect && existing.Protected:
+		// Explicit unlock. enforceProtectedOnSave gates on ownership —
+		// a non-owner's save attempt reverts and audits as bypass. Clear
+		// the owner field so no stale pointer survives the flip.
+		owner = ""
 	}
 	// v1.13.0-rc13 — mutable kind: explicit --kind wins; else keep the
 	// existing stored kind; else fall through to empty, which readers
@@ -704,6 +720,20 @@ func runIntegrationAdd(args []string) int {
 	// Audit the protection claim (only on flip or new-protected).
 	if protect && !existing.Protected {
 		logProtectedCreate(paths, "integration", key, owner)
+	}
+	// v1.14.0-rc3 — audit the inverse flip (unlock) so operators have
+	// a trail. Fires only on an actual existing.Protected → false
+	// transition, not on repeated --protected=false against an already
+	// unprotected integration.
+	if !protect && existing.Protected {
+		audit.Append(paths, audit.Event{
+			Kind:    audit.EventProtectedUnlock,
+			Subject: key,
+			Extra: map[string]string{
+				"kind":        "integration",
+				"prior_owner": existing.Owner,
+			},
+		})
 	}
 	// Surface the normalized key so operators learn the saved form.
 	if key != *name {

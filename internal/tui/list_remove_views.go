@@ -73,11 +73,18 @@ type integrationListView struct {
 	tokenScopePickCursor int
 
 	// Integration-level edit form state (integModeIntEdit).
-	intEditField        int // 0=kind picker, 1=description, 2=KindSlot (URL/CMD), 3=save
-	intEditKindCursor   int
-	intEditKindChoice   string
-	intEditDescBuf      strings.Builder
-	intEditKindSlotBuf  strings.Builder
+	// v1.14.0-rc3 — adds a Protection picker (field 3) + conditional
+	// passphrase field (4) when flipping from unprotected → protected.
+	// Field 5 is the implicit save (enter commits).
+	intEditField         int
+	intEditKindCursor    int
+	intEditKindChoice    string
+	intEditDescBuf       strings.Builder
+	intEditKindSlotBuf   strings.Builder
+	intEditProtectCursor int
+	intEditProtectChoice bool // mirrors protectionPresets[cursor].value
+	intEditProtectWas    bool // snapshot at enter time, used to decide if passphrase step is needed
+	intEditPassBuf       strings.Builder
 }
 
 func newIntegrationListView(c *admin.Client, p *config.Paths) *integrationListView {
@@ -297,6 +304,16 @@ func (v *integrationListView) enterIntEdit() *integrationListView {
 	default: // api, other
 		v.intEditKindSlotBuf.WriteString(it.Metadata["base_url"])
 	}
+	// v1.14.0-rc3 — prime protection state + reset passphrase buffer.
+	v.intEditProtectChoice = it.Protected
+	v.intEditProtectWas = it.Protected
+	for i, p := range protectionPresets {
+		if p.value == it.Protected {
+			v.intEditProtectCursor = i
+			break
+		}
+	}
+	v.intEditPassBuf.Reset()
 	v.mode = integModeIntEdit
 	return v
 }
@@ -1300,10 +1317,21 @@ func (v *integrationListView) doTokenRemove() tea.Cmd {
 	}
 }
 
-// updateIntEdit handles the integration-level edit form (kind, desc, URL/CMD).
+// updateIntEdit handles the integration-level edit form.
+// v1.14.0-rc3 — field layout:
+//   0 = Kind preset picker
+//   1 = Description (text)
+//   2 = KindSlot URL/cmd (text)
+//   3 = Protection preset picker (NEW)
+//   4 = Approval passphrase (NEW; only when flipping from unprotected → protected)
+//   enter at the last visible field triggers doIntEdit().
 func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Field 0 is the Kind preset picker — treat up/down as cursor move,
-	// enter to advance.
+	// needsPass is true when the user is flipping protection ON on an
+	// integration that wasn't already protected. Unlock (true→false) and
+	// no-change paths skip the passphrase step entirely.
+	needsPass := v.intEditProtectChoice && !v.intEditProtectWas
+
+	// Field 0 — Kind picker.
 	if v.intEditField == 0 {
 		switch mm.String() {
 		case "esc":
@@ -1322,23 +1350,67 @@ func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) 
 		}
 		return v, nil
 	}
-	// Fields 1/2 are text inputs.
+	// Field 3 — Protection picker.
+	if v.intEditField == 3 {
+		switch mm.String() {
+		case "esc":
+			v.mode = integModeList
+		case "up", "k":
+			if v.intEditProtectCursor > 0 {
+				v.intEditProtectCursor--
+			}
+		case "down", "j":
+			if v.intEditProtectCursor < len(protectionPresets)-1 {
+				v.intEditProtectCursor++
+			}
+		case "enter":
+			v.intEditProtectChoice = protectionPresets[v.intEditProtectCursor].value
+			if v.intEditProtectChoice && !v.intEditProtectWas {
+				v.intEditField = 4
+			} else {
+				v.mode = integModeRun
+				return v, v.doIntEdit()
+			}
+		case "tab":
+			// Forward-tab from the picker: commit the choice and advance
+			// to passphrase if needed; otherwise stay here (enter commits).
+			v.intEditProtectChoice = protectionPresets[v.intEditProtectCursor].value
+			if v.intEditProtectChoice && !v.intEditProtectWas {
+				v.intEditField = 4
+			}
+		case "shift+tab", "left":
+			v.intEditField = 2
+		}
+		return v, nil
+	}
+	// Fields 1, 2, 4 — text inputs. Enter commits unless there's a next
+	// field to visit.
 	switch mm.String() {
 	case "esc":
 		v.mode = integModeList
 	case "enter":
-		if v.intEditField < 2 {
+		switch v.intEditField {
+		case 1, 2:
 			v.intEditField++
-		} else {
+		case 4:
+			if v.intEditPassBuf.Len() == 0 {
+				v.err = "approval passphrase required to lock"
+				return v, nil
+			}
+			v.err = ""
 			v.mode = integModeRun
 			return v, v.doIntEdit()
 		}
 	case "tab", "down":
-		if v.intEditField < 2 {
+		if v.intEditField < 3 {
 			v.intEditField++
+		} else if v.intEditField == 4 && needsPass {
+			// no next field
 		}
 	case "shift+tab", "up":
-		if v.intEditField > 0 {
+		if v.intEditField == 4 {
+			v.intEditField = 3
+		} else if v.intEditField > 0 {
 			v.intEditField--
 		}
 	case "backspace":
@@ -1367,6 +1439,8 @@ func (v *integrationListView) intEditCurBuf() *strings.Builder {
 		return &v.intEditDescBuf
 	case 2:
 		return &v.intEditKindSlotBuf
+	case 4:
+		return &v.intEditPassBuf
 	}
 	return nil
 }
@@ -1376,6 +1450,13 @@ func (v *integrationListView) doIntEdit() tea.Cmd {
 	kind := v.intEditKindChoice
 	desc := v.intEditDescBuf.String()
 	slot := v.intEditKindSlotBuf.String()
+	// v1.14.0-rc3 — capture protection choice + passphrase. The CLI uses
+	// fs.Visit on --protected to tell "unset" from "=false", so we must
+	// pass the flag in both lock and unlock paths. Lock also feeds the
+	// approval passphrase via stdin.
+	protectChoice := v.intEditProtectChoice
+	protectWas := v.intEditProtectWas
+	passphrase := v.intEditPassBuf.String()
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		args := []string{"integration", "add", "--name", name, "--kind", kind}
@@ -1396,8 +1477,17 @@ func (v *integrationListView) doIntEdit() tea.Cmd {
 				args = append(args, "--base-url", slot)
 			}
 		}
+		switch {
+		case protectChoice && !protectWas:
+			args = append(args, "--protected", "--passphrase-stdin")
+		case !protectChoice && protectWas:
+			args = append(args, "--protected=false")
+		}
 		cmd := exec.Command(self, args...)
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		if protectChoice && !protectWas {
+			cmd.Stdin = strings.NewReader(passphrase + "\n")
+		}
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -1690,7 +1780,49 @@ func (v *integrationListView) viewIntEdit() string {
 		b.WriteString("    " + mutedSt.Render(slotHint) + "\n")
 	}
 
-	b.WriteString("\n" + helpSt.Render("enter next/save | tab/↑↓ jump | esc cancel"))
+	// v1.14.0-rc3 — Protection picker (field 3).
+	protectLbl := "Protection"
+	protectVal := "default"
+	if v.intEditProtectChoice {
+		protectVal = "protected"
+	}
+	if v.intEditField == 3 {
+		protectLbl = cursorSt.Render(protectLbl)
+	} else {
+		protectLbl = mutedSt.Render(protectLbl)
+	}
+	b.WriteString(protectLbl + ": " + protectVal + "\n")
+	if v.intEditField == 3 {
+		for i, p := range protectionPresets {
+			prefix := "    "
+			label := p.label
+			hint := p.hint
+			if i == v.intEditProtectCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(p.label)
+			}
+			b.WriteString(prefix + label + "    " + mutedSt.Render(hint) + "\n")
+		}
+	}
+
+	// v1.14.0-rc3 — Passphrase (field 4). Rendered only when flipping
+	// from unprotected → protected. For unlock + no-change, enter at
+	// field 3 commits directly without this row ever showing.
+	needsPass := v.intEditProtectChoice && !v.intEditProtectWas
+	if needsPass {
+		passLbl := mutedSt.Render("Approval passphrase")
+		if v.intEditField == 4 {
+			passLbl = cursorSt.Render("Approval passphrase")
+		}
+		masked := strings.Repeat("•", v.intEditPassBuf.Len())
+		b.WriteString(passLbl + ": " + masked)
+		if v.intEditField == 4 {
+			b.WriteString(cursorSt.Render("▎"))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n" + helpSt.Render("enter next/save · tab/↑↓ jump · esc cancel"))
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
 	}
