@@ -1,8 +1,8 @@
 // Admin-use bearer stash helpers (v1.14.0-rc1).
 //
-// `dop token issue --for-admin-use` wraps the fresh bearer value with
+// `dop token issue --portable` wraps the fresh bearer value with
 // the issuing admin's age recipient and stores the ciphertext on the
-// capability record (vault.Capability.AdminUseWrapped). Only the
+// capability record (vault.Capability.PortableWrapped). Only the
 // admin that owns the matching age identity can later unwrap it —
 // typically via the admin session daemon, which holds the identity
 // in memory while unlocked.

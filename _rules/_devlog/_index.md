@@ -1,0 +1,1 @@
+| [feat] v1.14.0-rc2 — portable rename + TUI wiring | rc1 was CLI-only and named for admin segment not property | untoldecay | Unknown | 2026-10-03 22:08 | feat/v1.14.0-rc2-portable-tui (local) | [2026-10-03_v1.14.0-rc2-portable-tui.md](2026-10-03_v1.14.0-rc2-portable-tui.md?id=sess-a5a704&sha=0c65600f504d3260425256beae255771d60eaf66) |

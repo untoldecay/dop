@@ -22,7 +22,7 @@ Short, scannable list of every feature contract. Each contract pins the invarian
 | 16 | [Integration Kinds](16_integration_kinds.md) | `api`/`cli`/`mcp`/`other` + canonical env-key promotion. |
 | 17 | [Endpoints Discovery Probe](17_endpoints_probe.md) | Opt-in probe at `integration add` time. OpenAPI path order + MCP tools/list. |
 | 18 | [Token Lifecycle](18_token_lifecycle.md) | `integration set-token` (rotate value / edit scope). TUI token drill-down parity with grants. |
-| 19 | [`dop use`](19_dop_use.md) | Admin's shortcut: `token issue --for-admin-use` stashes bearer; `dop use <subject>` emits export line via daemon unwrap. |
+| 19 | [`dop use`](19_dop_use.md) | Admin's shortcut: `token issue --portable` stashes bearer; `dop use <subject>` emits export line via daemon unwrap. |
 
 ## Status
 
