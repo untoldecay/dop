@@ -34,6 +34,7 @@ Then run `dop` to launch the TUI. For every other command, see the [CLI referenc
 
 ## Guides
 
+- **[Feature sheet](docs/00-features.md)** — every DOP feature, grouped by surface
 - **[Onboarding](docs/01-onboarding.md)** — install, create vault, add tokens, pair your first agent
 - **[Teams](docs/02-teams.md)** — multi-admin, cross-grant, revocation, concurrent-admin merges, laptop-loss recovery
 - **[Agents in agentic hubs](docs/03-agentic-hubs.md)** — DOP alongside [Buzz](https://github.com/block/buzz) and similar workspaces where humans and agents share rooms
