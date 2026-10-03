@@ -20,6 +20,7 @@
   - v1.9: `invite`, `invite_response`, `invite_complete` (two-admin bootstrap handshake).
   - v1.11: `agent_migrated` (ed25519 → P-256 re-enrollment).
   - v1.13.0-rc12: `protected_create`, `protected_token_issue`, `protected_bypass_attempt` (see contract 15).
+  - v1.14.0-rc1: `use_attached` (`dop use` attached a bearer to a shell; see contract 19). Carries `subject`, `lookup_id`, `actor`, `extra.capability_id`, `extra.disk`. NEVER the bearer value.
 - MUST include reason strings on denial: `pin_mismatch`, `pin_expired`, `rejected`, `approval_timeout`, `admin_removed`.
 - MUST fire `audit.Notify` on Darwin for `claim_pending`, `claim`, `claim_denied`, `revoke`.
 - MUST honor `DOP_NO_NOTIFY=1` (used by tests + headless CI).
