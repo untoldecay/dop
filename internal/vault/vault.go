@@ -321,7 +321,16 @@ type Capability struct {
 	// capability round-trips cleanly through vault → record → sidecar.
 	EnvWrapped    *WrappedEnv    `yaml:"env_wrapped,omitempty" json:"env_wrapped,omitempty"`
 	BearerWrapped *WrappedBearer `yaml:"bearer_wrapped,omitempty" json:"bearer_wrapped,omitempty"`
-	Signature     string         `yaml:"signature"`
+	// v1.14.0-rc1 — opt-in admin-use stash. When `token issue
+	// --for-admin-use` runs, DOP wraps the bearer value with the
+	// issuing admin's age recipient and stores the ciphertext here.
+	// `dop use <subject>` later unwraps via the admin daemon to
+	// retrieve the bearer in a shell on any of the admin's machines
+	// (vault pulls carry the stash). Opt-in because the usual flow
+	// is "bearer leaves the admin, lives only with the agent"; this
+	// stash is specifically for bearers the admin itself will use.
+	AdminUseWrapped string `yaml:"admin_use_wrapped,omitempty" json:"admin_use_wrapped,omitempty"`
+	Signature       string `yaml:"signature"`
 }
 
 // WrappedEnv / WrappedBearer mirror the identically-named types in

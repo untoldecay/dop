@@ -230,6 +230,15 @@ func runTokenIssue(args []string) int {
 	// v1.13.0-rc12 — issuing a bearer that contains protected grants
 	// requires the admin passphrase (same gate as creating one).
 	passphraseStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin instead of the tty (used when any of --grants is protected; TUI passes this)")
+	// v1.14.0-rc1 — opt-in admin-use stash. When set, DOP additionally
+	// age-wraps the fresh bearer value with the issuing admin's age
+	// recipient and stores the ciphertext on the capability record.
+	// `dop use <subject>` later unwraps via the admin daemon to make
+	// the bearer available in a shell. Only the issuing admin can
+	// unwrap. Opt-in because the normal flow is "bearer leaves admin,
+	// lives only with agent"; this is specifically for bearers the
+	// admin itself will use across their own shells.
+	forAdminUse := fs.Bool("for-admin-use", false, "also wrap the bearer to the issuing admin's age recipient and stash it on the capability record, so the admin can later `dop use <subject>` from any shell on any of their machines (vault pull carries the stash)")
 	_ = fs.Parse(args)
 	_ = note
 
@@ -498,7 +507,30 @@ func runTokenIssue(args []string) int {
 	if v.Capabilities == nil {
 		v.Capabilities = map[string]vault.Capability{}
 	}
-	v.Capabilities[capIDHex] = capability2VaultCapability(rec)
+	stored := capability2VaultCapability(rec)
+	// v1.14.0-rc1 — opt-in admin-use stash. Wrap the fresh bearer with
+	// the issuing admin's age recipient (fetched from the session
+	// Status) and store the ciphertext on the capability so `dop use`
+	// can later retrieve it. Encryption uses only the recipient
+	// (public key); unwrapping requires the identity (daemon-held).
+	if *forAdminUse {
+		st, err := client.Status()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop token issue: session status for --for-admin-use: %v\n", err)
+			return 1
+		}
+		if st.AgeRecipient == "" {
+			fmt.Fprintln(os.Stderr, "dop token issue: --for-admin-use requires an active admin session with an age recipient")
+			return 1
+		}
+		wrapped, err := admin.WrapToRecipient([]byte(bearer), st.AgeRecipient)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop token issue: wrap bearer for admin use: %v\n", err)
+			return 1
+		}
+		stored.AdminUseWrapped = wrapped
+	}
+	v.Capabilities[capIDHex] = stored
 
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
 		// v1.6.4: clean the orphan bundle so the on-disk state stays
