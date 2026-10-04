@@ -241,13 +241,15 @@ func runTokenIssue(args []string) int {
 	// admin itself will use across their own shells.
 	portable := fs.Bool("portable", false, "also wrap the bearer to the issuing admin's age recipient and stash it on the capability record, so the admin can later `dop use <subject>` from any shell on any of their machines (vault pull carries the stash)")
 	// v1.14.0-rc4 — Tier 2 opt-in to printing bearer+PIN on a non-tty.
-	// Default (unset): non-tty invocations REFUSE to print, matching the
-	// `dop use` default. Set this when a CI/script pipeline redirects
-	// stdout and genuinely needs the bearer. Non-tty + flag triggers
-	// Tier 3 approval via the admin daemon's local popup.
-	printBearer := fs.Bool("print-bearer", false, "force printing the bearer (and PIN, if any) to stdout even when stdout is NOT a tty. Scripts that pipe or capture dop token issue must set this. Default (unset): refuse to print on non-tty. Setting this on non-tty triggers an approval popup.")
+	// rc6h — --print-bearer retired (no-op since rc5 Option A, same as
+	// --print-export). Accepted silently for backward-compat with a
+	// one-line deprecation warning if set.
+	legacyPrintBearer := fs.Bool("print-bearer", false, "DEPRECATED (rc6h): no-op, accepted for backward-compat.")
 	_ = fs.Parse(args)
 	_ = note
+	if *legacyPrintBearer {
+		fmt.Fprintln(os.Stderr, "dop token issue: --print-bearer is deprecated and has no effect (removed in rc6h).")
+	}
 
 	if strings.TrimSpace(*grantsCSV) == "" && strings.TrimSpace(*projectFilter) == "" {
 		fmt.Fprintln(os.Stderr, "dop token issue: one of --grants or --project is required")
@@ -572,21 +574,17 @@ func runTokenIssue(args []string) int {
 		logProtectedTokenIssue(paths, subject, protectedGrants)
 	}
 	fmt.Fprintf(os.Stderr, "dop token issue: issued %s (grants: %v, expires: %s)\n", subject, grants, tokenExpiryDisplay(expiresAt))
-	// v1.14.0-rc4 — Tier 1/2/3 gate on the bearer+PIN print. If a non-tty
-	// caller runs this without --print-bearer, the vault mutation is
-	// already done (capability exists) but the bearer value is NOT
-	// printed. We return 0 (success) because the mutation is intact;
-	// stderr tells the operator what to do if they need the bearer.
-	// Only the actual print surface is gated here.
+	// rc5 Option A: approval runs for every print surface. The capability
+	// is already written to the vault; if approval is denied the mutation
+	// stays intact — only the stdout print is suppressed.
 	if err := printguard.Guard(printguard.Request{
-		Kind:      printguard.KindTokenIssue,
-		Subject:   subject,
-		PrintFlag: *printBearer,
-		Out:       os.Stdout,
-		Paths:     paths,
-		Client:    client,
+		Kind:    printguard.KindTokenIssue,
+		Subject: subject,
+		Out:     os.Stdout,
+		Paths:   paths,
+		Client:  client,
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "  (capability was created in the vault; bearer NOT printed. Revoke + reissue at a tty if you need a visible bearer, or re-run with --print-bearer to approve the stdout print.)\n")
+		fmt.Fprintf(os.Stderr, "  (capability was created in the vault; bearer NOT printed. Revoke + reissue if you need a visible bearer at a terminal.)\n")
 		return 0
 	}
 	if pin != "" {

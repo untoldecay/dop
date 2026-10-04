@@ -65,10 +65,9 @@ func runClaim(args []string) int {
 	fs := flag.NewFlagSet("claim", flag.ExitOnError)
 	tokenFile := fs.String("token-file", "", "read bearer from file (alternative to $DOP_TOKEN)")
 	shell := fs.Bool("shell", false, "after claim, print `eval $(dop env-shell ...)`-style exports")
-	// v1.14.0-rc4 — same Tier 2 opt-in as other print surfaces. When
-	// --shell AND the environment is non-tty, require --print-export
-	// (and trigger Tier 3 approval popup) before emitting the export.
-	printExport := fs.Bool("print-export", false, "when --shell is set on a non-tty, opts in to printing the export line (triggers an approval popup). Default (unset): refuse on non-tty.")
+	// rc6h — --print-export retired (no-op since rc5 Option A). Accepted
+	// silently with a one-line deprecation warning if set.
+	legacyPrintExport := fs.Bool("print-export", false, "DEPRECATED (rc6h): no-op, accepted for backward-compat.")
 	skipApproval := fs.Bool("skip-approval", false, "finalize immediately without out-of-band approval (unsafe for chat handoff)")
 	noTunnel := fs.Bool("no-tunnel", false, "serve the approval page on LAN only (no Cloudflare tunnel)")
 	bindAddr := fs.String("bind", "", "interface to bind the approval server (default: 127.0.0.1 with tunnel, 0.0.0.0 with --no-tunnel)")
@@ -84,6 +83,9 @@ func runClaim(args []string) int {
 	asJSON := fs.Bool("json", false, "emit JSONL events (pending, result) on stdout instead of human-readable output on stderr")
 	flagArgs, posArgs := splitFlagsAndPositionals(fs, args)
 	_ = fs.Parse(flagArgs)
+	if *legacyPrintExport {
+		fmt.Fprintln(os.Stderr, "dop claim: --print-export is deprecated and has no effect (removed in rc6h).")
+	}
 
 	// Default bind depends on tunnel mode: 127.0.0.1 is fine when the
 	// tunnel is the reachability path; --no-tunnel needs 0.0.0.0 so a
@@ -373,14 +375,13 @@ func runClaim(args []string) int {
 		pathsClaim, _ := config.Resolve()
 		clientClaim := admin.NewClient(admin.SockPath(pathsClaim))
 		if err := printguard.Guard(printguard.Request{
-			Kind:      printguard.KindClaim,
-			Subject:   env.Subject,
-			PrintFlag: *printExport,
-			Out:       os.Stdout,
-			Paths:     pathsClaim,
-			Client:    clientClaim,
+			Kind:    printguard.KindClaim,
+			Subject: env.Subject,
+			Out:     os.Stdout,
+			Paths:   pathsClaim,
+			Client:  clientClaim,
 		}); err != nil {
-			fmt.Fprintln(os.Stderr, "  (claim succeeded; export line NOT printed. Set DOP_TOKEN from your bearer env, or re-run with --print-export to approve the stdout print.)")
+			fmt.Fprintln(os.Stderr, "  (claim succeeded; export line NOT printed. Set DOP_TOKEN from your bearer env, or wait for the approval popup.)")
 			return 0
 		}
 		fmt.Printf("export DOP_TOKEN=%s\n", bearer)

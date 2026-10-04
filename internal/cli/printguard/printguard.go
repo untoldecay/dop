@@ -21,8 +21,13 @@
 //     unreachable, OR platform unsupported. Prints URL + QR to stderr;
 //     admin approves on phone with the same approval passphrase.
 //
-// The PrintFlag field on Request is retained for Option-A backward-
-// compat but has no auth role — flags are no-ops.
+// rc6h — removed PrintFlag from the Request struct. The pre-rc5 three-
+// tier model (non-tty refuse / --print-* opt-in / approval on non-tty)
+// kept the flag as a gate; Option A collapsed the model so the flag
+// became a no-op kept for backward-compat. Stale help text misled
+// callers into setting the flag defensively, which did nothing. Flags
+// are now accepted at the CLI layer with a one-line deprecation warning
+// and never reach this package.
 package printguard
 
 import (
@@ -54,24 +59,21 @@ const (
 )
 
 // Request bundles everything the caller passes to Guard. All fields
-// except PrintFlag are set by the caller based on CLI arg parsing.
+// are populated by the caller based on CLI arg parsing.
 type Request struct {
 	// Kind is the print-surface tag. Required.
 	Kind Kind
 	// Subject identifies what's being printed (bearer subject, grant,
 	// etc.). Surfaces in the dialog + audit event.
 	Subject string
-	// PrintFlag is the value of the surface's `--print-*` flag.
-	// False → Tier 1 refusal when non-tty.
-	// True  → Tier 2 opt-in; Tier 3 approval runs on non-tty.
-	PrintFlag bool
 	// Out is the stream we're about to write the secret to. We check
-	// its tty-ness; `os.Stdout` in almost every real caller.
+	// its tty-ness for the shell-trust cache fast path; `os.Stdout`
+	// in almost every real caller.
 	Out io.Writer
 	// Audit stores the paths needed for audit emission. Set to the
 	// caller's resolved config.Paths.
 	Paths *config.Paths
-	// Client is the admin daemon client, used for Tier 3 approval.
+	// Client is the admin daemon client, used for the approval popup.
 	// May be nil when the caller doesn't have one; Guard then
 	// treats "daemon unreachable" and falls back / refuses.
 	Client *admin.Client
@@ -89,23 +91,18 @@ var ErrRefused = errors.New("printguard: print refused")
 //   - Emits one audit event per approval request/decision.
 //   - Does NOT write to req.Out itself; caller does the actual print.
 func Guard(req Request) error {
-	// v1.14.0-rc5 — Option A. Approval is required for every print
-	// invocation regardless of tty/non-tty state. The old tty bypass
-	// was removed because an LLM running `! dop use X` in the operator's
-	// own terminal has a tty from DOP's point of view AND leaks the
-	// output into the chat transcript. One rule everywhere.
+	// Option A (rc5): approval required for every print invocation
+	// regardless of tty/non-tty state. The old tty bypass was removed
+	// because an LLM running `! dop use X` in the operator's own
+	// terminal has a tty from DOP's point of view AND leaks the output
+	// into the chat transcript. One rule everywhere.
 	//
-	// Two bypasses remain:
+	// Two bypasses:
 	//   1. DOP_FROM_TUI=1 — the TUI shells out to this CLI; the TUI is
 	//      the operator's interactive surface, output goes back to the
 	//      TUI render path, no LLM-capture risk.
 	//   2. DOP_APPROVAL_PASSPHRASE — scripted/CI pre-approval via env
 	//      (same auth strength as the popup).
-	//
-	// The PrintFlag field on req is retained for backward-compat but
-	// has no auth role in Option A — it's a no-op. Callers can leave it
-	// unset or pass legacy --print-* flags for one release before we
-	// retire the flags entirely.
 	isTTY := isTerminal(req.Out)
 
 	if os.Getenv("DOP_FROM_TUI") == "1" {

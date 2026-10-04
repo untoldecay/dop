@@ -249,12 +249,15 @@ func runWhoami(args []string) int {
 }
 
 func runEnv(args []string) int {
-	// v1.14.0-rc4 — parse --print-export opt-in for Tier 2 (non-tty
-	// print). Default (unset) → refuse printing to non-tty, same
-	// pattern as `dop use` and `dop token issue`.
+	// rc6h — --print-export retired (was a no-op since rc5 Option A).
+	// Accepted silently for backward-compat with a one-line deprecation
+	// warning. See cmd/dop/usecmd.go for the longer rationale.
 	fs := flag.NewFlagSet("env", flag.ExitOnError)
-	printExport := fs.Bool("print-export", false, "force printing `export KEY=VAL` lines to stdout even when stdout is NOT a tty. Scripts that pipe or capture `dop env` must set this. Default (unset): refuse to print on non-tty. Setting this on non-tty triggers an approval popup.")
+	legacyPrintExport := fs.Bool("print-export", false, "DEPRECATED (rc6h): no-op, accepted for backward-compat.")
 	_ = fs.Parse(args)
+	if *legacyPrintExport {
+		fmt.Fprintln(os.Stderr, "dop env: --print-export is deprecated and has no effect (removed in rc6h).")
+	}
 
 	// v1.13.0-rc7 — same silent auto-pull as exec. `dop env` is often
 	// the first thing an agent script runs (`$(dop env)` style), so
@@ -323,12 +326,11 @@ func runEnv(args []string) int {
 	// them into an LLM transcript is exactly the attack this closes.
 	client := admin.NewClient(admin.SockPath(paths))
 	if err := printguard.Guard(printguard.Request{
-		Kind:      printguard.KindEnv,
-		Subject:   res.subject,
-		PrintFlag: *printExport,
-		Out:       os.Stdout,
-		Paths:     paths,
-		Client:    client,
+		Kind:    printguard.KindEnv,
+		Subject: res.subject,
+		Out:     os.Stdout,
+		Paths:   paths,
+		Client:  client,
 	}); err != nil {
 		return 1
 	}
