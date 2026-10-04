@@ -1121,6 +1121,11 @@ func runGrantAdd(args []string) int {
 	envPrefix := fs.String("env-prefix", "", "env var prefix (defaults to <INTEGRATION>_<TOKEN>, sanitized)")
 	projectsCSV := fs.String("projects", "", "comma-separated project tags (cosmetic grouping; a grant can belong to multiple)")
 	tagsCSV := fs.String("tags", "", "comma-separated free-form tags (e.g. read,write,admin)")
+	// v1.14.0-rc3 — tri-state --protected, parallel to integration add.
+	// Pins grant-level protection explicitly instead of relying only on
+	// integration-level inheritance. See _rules/_plans/rc3-plan.md Phase 3.
+	protected := fs.Bool("protected", false, "mark this grant as owner-locked — only the current admin can modify or issue tokens on it (requires approval passphrase)")
+	passphraseStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin instead of the tty (used by scripts and TUI)")
 	_ = fs.Parse(args)
 
 	if *id == "" || *integration == "" || *token == "" {
@@ -1198,15 +1203,59 @@ func runGrantAdd(args []string) int {
 	if normalizedPrefix != "" {
 		normalizedPrefix = vault.SanitizeEnvKey(normalizedPrefix)
 	}
-	// v1.13.0-rc12 — grants inherit protection from the parent
-	// integration. If the parent is protected, the grant is too, and
-	// its Owner matches. Preserves any existing grant-level protection
-	// on update (shouldn't happen in practice — the integration path
-	// is the only source — but keeps the invariant stable).
-	protected := integ.Protected || existingGrant.Protected
-	owner := integ.Owner
+	// Protection resolution — grant-level is now independently settable
+	// (v1.14.0-rc3), with integration-level inheritance kept as the
+	// *default* for a new grant whose parent is protected.
+	//
+	// Rules:
+	//   flag unset, new grant       → inherit from parent integration
+	//   flag unset, existing grant  → preserve existing grant.Protected
+	//   --protected / =true         → set true (prompts passphrase, stamps owner)
+	//   --protected=false           → set false (owner-only unlock path)
+	protectedSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "protected" {
+			protectedSet = true
+		}
+	})
+	var protect bool
+	switch {
+	case protectedSet:
+		protect = *protected
+	case action == "updated":
+		protect = existingGrant.Protected
+	default: // new grant, flag unset → inherit from integration
+		protect = integ.Protected
+	}
+	owner := existingGrant.Owner
 	if owner == "" {
-		owner = existingGrant.Owner
+		owner = integ.Owner
+	}
+	// Distinguish two "new lock" shapes:
+	//   - Inheriting from a protected parent integration on create:
+	//     owner is already proven at integration-level, no new passphrase.
+	//   - Operator explicitly flipped grant to protected (--protected on
+	//     an unprotected-integration grant, or on an existing grant with
+	//     no prior lock): prompt passphrase + stamp current admin as owner.
+	isNewLock := protect && !existingGrant.Protected
+	inherited := isNewLock && integ.Protected && !protectedSet
+	if isNewLock && !inherited {
+		if err := promptProtectionPassphrase(paths, "approval passphrase (protect grant "+*id+"): ", *passphraseStdin); err != nil {
+			fmt.Fprintf(os.Stderr, "dop grant add: %v\n", err)
+			return 1
+		}
+		st, err := client.Status()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop grant add: session: %v\n", err)
+			return 1
+		}
+		owner = st.AdminPubkey
+	}
+	// Explicit unlock: clear owner so no stale pointer survives the flip.
+	// enforceProtectedOnSave upstream still gates on ownership for the
+	// save itself, so non-owners can't reach this path.
+	if !protect && existingGrant.Protected {
+		owner = ""
 	}
 	v.Grants[*id] = vault.Grant{
 		Integration: *integration,
@@ -1214,12 +1263,27 @@ func runGrantAdd(args []string) int {
 		EnvPrefix:   normalizedPrefix,
 		Projects:    projects,
 		Tags:        tags,
-		Protected:   protected,
+		Protected:   protect,
 		Owner:       owner,
 	}
 	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
 		fmt.Fprintf(os.Stderr, "dop grant add: %v\n", err)
 		return 1
+	}
+	// v1.14.0-rc3 — audit grant protection transitions symmetrically
+	// with integration (contract 15, mirrors runIntegrationAdd).
+	if protect && !existingGrant.Protected {
+		logProtectedCreate(paths, "grant", *id, owner)
+	}
+	if !protect && existingGrant.Protected {
+		audit.Append(paths, audit.Event{
+			Kind:    audit.EventProtectedUnlock,
+			Subject: *id,
+			Extra: map[string]string{
+				"kind":        "grant",
+				"prior_owner": existingGrant.Owner,
+			},
+		})
 	}
 	// Preview what the child env will actually look like.
 	effective := v.Grants[*id].EffectivePrefix()
