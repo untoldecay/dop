@@ -479,11 +479,15 @@ func (v *integrationListView) View() string {
 		// style doesn't shrink the visible column (ANSI escapes don't
 		// count toward Width()).
 		// v1.13.0-rc12 — prepend a muted lock glyph on protected rows.
-		// It sits inside the padded column so alignment stays stable.
-		lock := "  "
+		// v1.14.0-rc3 — glyph slot pinned to a fixed cell width via
+		// lipgloss.Width to defeat the "emoji is 2 cells, empty is 2
+		// spaces, with-space is 3" misalignment. Row-to-row columns
+		// now line up regardless of terminal emoji rendering.
+		lockGlyph := ""
 		if it.Protected {
-			lock = mutedSt.Render("🔒 ")
+			lockGlyph = mutedSt.Render("🔒")
 		}
+		lock := lipgloss.NewStyle().Width(3).Render(lockGlyph)
 		desc := it.Description
 		if desc == "" {
 			desc = "-"
@@ -970,10 +974,14 @@ func (v *integrationRemoveView) View() string {
 				prefix = "  " + cursorSt.Render("➤ ")
 				disp = cursorSt.Render(n)
 			}
-			lock := "  "
+			// v1.14.0-rc3 — Width(3)-pinned slot, same as the integration
+			// list render above. Keeps rows aligned across terminal emoji
+			// widths.
+			lockGlyph := ""
 			if it.Protected {
-				lock = mutedSt.Render("🔒 ")
+				lockGlyph = mutedSt.Render("🔒")
 			}
+			lock := lipgloss.NewStyle().Width(3).Render(lockGlyph)
 			desc := it.Description
 			if desc == "" {
 				desc = "-"

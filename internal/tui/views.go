@@ -1803,31 +1803,32 @@ func (v *listView) View() string {
 			subj = cursorSt.Render(subj)
 		}
 		// v1.14.0-rc3 — ownership glyph is gated on OWNER-EXCLUSIVITY,
-		// not merely on IssuedBy. Showing an icon on every token the
-		// viewer issued reads as "locked to me" for plain tokens, which
-		// are mutable by any admin and have no such lock. The glyph
-		// only appears when a lock relationship actually exists: today
-		// that's portable (bearer stash wrapped to one admin's age
-		// recipient); after the Phase 2 protection migration lands,
-		// also when any grant on this capability is protected.
-		// 👤 = owner-locked to this viewer; 🔒 = owner-locked to another
-		// admin. Column always reserved so rows stay aligned.
-		ownerGlyph := "  "
+		// not merely on IssuedBy. The glyph only appears when a lock
+		// relationship actually exists: today that's portable (bearer
+		// stash wrapped to one admin's age recipient); after Phase 3
+		// protection migration lands, also when any grant on this
+		// capability is protected. 👤 = owner-locked to this viewer;
+		// 🔒 = owner-locked to another admin. Slot is pinned to a
+		// fixed cell width via lipgloss.Width so terminals that render
+		// emoji at 1 cell don't shift the following columns.
+		ownerRaw := ""
 		ownerExclusive := c.PortableWrapped != ""
 		if ownerExclusive && c.IssuedBy != "" && v.viewerPubkey != "" {
 			if c.IssuedBy == v.viewerPubkey {
-				ownerGlyph = "👤"
+				ownerRaw = "👤"
 			} else {
-				ownerGlyph = "🔒"
+				ownerRaw = "🔒"
 			}
 		}
+		ownerGlyph := lipgloss.NewStyle().Width(3).Render(ownerRaw)
 		// v1.14.0-rc2 — portable prefix. `p.` on the name column when
 		// the capability carries an admin-use stash. Dim style so it's
-		// noticeable but not loud. Column always reserved for parity.
-		portPrefix := "   "
+		// noticeable but not loud. Width-pinned at 3 cells.
+		portRaw := ""
 		if c.PortableWrapped != "" {
-			portPrefix = mutedSt.Render("p. ")
+			portRaw = mutedSt.Render("p.")
 		}
+		portPrefix := lipgloss.NewStyle().Width(3).Render(portRaw)
 		// v1.13 — surface the cap-id prefix in every row so two
 		// tokens sharing a subject are visibly distinct. Without
 		// this they looked identical in the TUI and only the first
@@ -1844,7 +1845,7 @@ func (v *listView) View() string {
 		// v1.13.0-rc20 — row trimmed to subj + capId + status. gen +
 		// expires moved to the status bar.
 		subjPad := lipgloss.NewStyle().Width(labelWidth).Render(subj)
-		b.WriteString(prefix + ownerGlyph + " " + portPrefix + subjPad + "  " +
+		b.WriteString(prefix + ownerGlyph + portPrefix + subjPad + "  " +
 			mutedSt.Render(capShort) + "  " +
 			statusStyle.Render(c.Status) + "\n")
 	}
