@@ -106,10 +106,32 @@ func Guard(req Request) error {
 	// has no auth role in Option A — it's a no-op. Callers can leave it
 	// unset or pass legacy --print-* flags for one release before we
 	// retire the flags entirely.
-	_ = isTerminal(req.Out) // retained for potential future hints; no gating role
+	isTTY := isTerminal(req.Out)
 
 	if os.Getenv("DOP_FROM_TUI") == "1" {
 		return nil
+	}
+	// v1.14.0-rc6 — shell-trust fast path. On the eval/pipe pattern
+	// (stdout = non-tty) for the read surfaces (dop use, dop env),
+	// check whether this shell PID + subject tuple is already trusted
+	// after a prior approval in the same shell session. If yes, skip
+	// the popup.
+	//
+	// Only applies when:
+	//   - stdout is non-tty (visible-print case still prompts always)
+	//   - surface is `use` or `env` (mutations still prompt per-invocation)
+	//   - daemon client is reachable (otherwise fall through to the
+	//     normal flow which handles that case)
+	evalPatternSurface := req.Kind == KindUse || req.Kind == KindEnv
+	if !isTTY && evalPatternSurface && req.Client != nil {
+		if trusted, _ := req.Client.ShellTrustCheck(os.Getppid(), req.Subject); trusted {
+			audit.Append(req.Paths, audit.Event{
+				Kind:    audit.EventPrintApprovalGranted,
+				Subject: req.Subject,
+				Extra:   map[string]string{"surface": string(req.Kind), "channel": "shell_trust"},
+			})
+			return nil
+		}
 	}
 	// Env escape hatch (DOP_APPROVAL_PASSPHRASE): same auth strength
 	// as typing into the popup — still verifies the real passphrase.
@@ -224,6 +246,12 @@ func Guard(req Request) error {
 				Subject: req.Subject,
 				Extra:   map[string]string{"surface": string(req.Kind), "channel": "phone"},
 			})
+			// rc6 — mark this shell trusted so subsequent same-shell
+			// eval invocations skip the popup. Phone approval still
+			// counts as the "first" approval for the trust-cache.
+			if !isTTY && evalPatternSurface && req.Client != nil {
+				_ = req.Client.ShellTrustMark(os.Getppid(), req.Subject)
+			}
 			return nil
 		case printapproval.DecisionRejected:
 			fmt.Fprintf(os.Stderr, "dop %s: approval denied via phone.\n", req.Kind)
@@ -250,6 +278,11 @@ func Guard(req Request) error {
 			Subject: req.Subject,
 			Extra:   map[string]string{"surface": string(req.Kind), "channel": "local"},
 		})
+		// rc6 — mark this shell trusted so subsequent same-shell eval
+		// invocations skip the popup until the shell dies.
+		if !isTTY && evalPatternSurface && req.Client != nil {
+			_ = req.Client.ShellTrustMark(os.Getppid(), req.Subject)
+		}
 		return nil
 	case "denied":
 		fmt.Fprintf(os.Stderr, "dop %s: approval denied.\n", req.Kind)

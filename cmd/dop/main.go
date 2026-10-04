@@ -26,6 +26,7 @@ usage:
   dop                                            interactive TUI (default when on a TTY)
   dop version | -v | --version                   print version + commit + build date
   dop uninstall [--force]                        wipe DOP from this machine (alias for admin reset)
+  dop skill install [--force]                    install the Claude Code DOP skill at ~/.claude/skills/dop/SKILL.md
   dop help                                       this message
 
   # Admin plane
@@ -161,6 +162,11 @@ func main() {
 		// this machine" action is discoverable without knowing about
 		// the admin subcommand tree.
 		os.Exit(runAdminReset(os.Args[2:]))
+	case "skill":
+		// v1.14.0-rc6 — install the DOP Claude Code skill into
+		// ~/.claude/skills/dop/SKILL.md so LLM agents on this machine
+		// use the safe eval pattern + know about the approval popup.
+		os.Exit(runSkill(os.Args[2:]))
 	case "version", "-v", "--version":
 		fmt.Println(versionString())
 		return
