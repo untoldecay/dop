@@ -6,16 +6,16 @@ func TestNormalizeIntegrationName(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		// Fizz's actual bug: spaces → hyphens, lowercased.
-		{"Boiler Pensieve", "boiler-pensieve"},
-		// Cam's actual bug: case-folded so "Notion" and "notion"
-		// collapse to the same key.
-		{"Notion", "notion"},
+		// rc6c: case is preserved. Cam wants "SvcRename" to stay "SvcRename".
+		// Spaces still collapse to hyphens, non-alnum still collapses.
+		{"Boiler Pensieve", "Boiler-Pensieve"},
+		{"Notion", "Notion"},
 		{"notion", "notion"},
+		{"SvcRename", "SvcRename"},
 		// Hyphens and dots preserved for display legibility.
 		{"my-service.v2", "my-service.v2"},
-		// Collapsing runs of non-alnum.
-		{"  Weird  / Name  ", "weird-name"},
+		// Collapsing runs of non-alnum, case preserved.
+		{"  Weird  / Name  ", "Weird-Name"},
 		// Leading / trailing non-alnum trimmed.
 		{"--foo--", "foo"},
 		// All-non-alnum → empty (caller validates).
@@ -60,13 +60,13 @@ func TestFindIntegrationKey(t *testing.T) {
 	if k, ok := v.FindIntegrationKey("Notion"); !ok || k != "notion" {
 		t.Errorf("Notion → notion failed: %q %v", k, ok)
 	}
-	// Not found → returns normalized form for creation.
+	// Not found → returns normalized form (case preserved) for creation.
 	k, ok := v.FindIntegrationKey("GitHub Enterprise")
 	if ok {
 		t.Errorf("expected not found, got %q", k)
 	}
-	if k != "github-enterprise" {
-		t.Errorf("missing-key fallback = %q, want \"github-enterprise\"", k)
+	if k != "GitHub-Enterprise" {
+		t.Errorf("missing-key fallback = %q, want \"GitHub-Enterprise\"", k)
 	}
 }
 

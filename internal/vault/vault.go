@@ -159,12 +159,16 @@ func ValidIntegrationKind(s string) bool {
 // "Notion" added twice overwrote itself (same key, data lost) AND
 // "Notion" vs "notion" were two distinct entries. From rc4 onwards:
 //   - whitespace trimmed
-//   - lowercased (so "Notion" == "notion" at the key level)
 //   - non-alphanumeric (except '-' and '.') rewritten to '-'
 //   - repeated '-' collapsed, leading/trailing '-' trimmed
 //
-// Example: "Boiler Pensieve" → "boiler-pensieve"
-// Example: "Notion / Fray" → "notion-fray"
+// rc6c (Option A from rc3-smoke-retakes [S6]): the operator's case is a
+// legitimate signal — "SvcRename" stays "SvcRename", not "svcrename".
+// Lookup remains case-insensitive via FindIntegrationKey, so pre-rc6c
+// stored keys continue to resolve from any-case input.
+//
+// Example: "Boiler Pensieve" → "Boiler-Pensieve"
+// Example: "Notion / Fray" → "Notion-Fray"
 // Keeps '-' and '.' legible for display; everything else sanitized.
 func NormalizeIntegrationName(s string) string {
 	s = strings.TrimSpace(s)
@@ -172,9 +176,7 @@ func NormalizeIntegrationName(s string) string {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case c >= 'A' && c <= 'Z':
-			out = append(out, c+32)
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '.':
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '.':
 			out = append(out, c)
 		default:
 			out = append(out, '-')
@@ -207,7 +209,9 @@ func NormalizeIntegrationName(s string) string {
 // the storage key for a new entry.
 //
 // Lookup order: literal match (handles legacy data) → normalized
-// match → case/separator-insensitive scan.
+// match → case/separator-insensitive scan. The final step uses case-
+// folded comparison so a pre-rc6c lowercase stored key still resolves
+// from "Notion" (post-rc6c operators preserve their typed case).
 func (v *Vault) FindIntegrationKey(name string) (string, bool) {
 	if name == "" {
 		return "", false
@@ -219,8 +223,9 @@ func (v *Vault) FindIntegrationKey(name string) (string, bool) {
 	if _, ok := v.Integrations[norm]; ok {
 		return norm, true
 	}
+	normLower := strings.ToLower(norm)
 	for k := range v.Integrations {
-		if NormalizeIntegrationName(k) == norm {
+		if strings.ToLower(NormalizeIntegrationName(k)) == normLower {
 			return k, true
 		}
 	}

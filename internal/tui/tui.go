@@ -690,6 +690,12 @@ func (m *rootModel) doLogout() (tea.Model, tea.Cmd) {
 	_ = m.adminClient.Logout()
 	m.flashMessage = "logout: session ended"
 	m.refreshState()
+	// rc6c — the daemon exits ~50ms after returning the logout RPC, so
+	// refreshState() running immediately above sees SessionActive() still
+	// true and leaves state as sessionUnlocked. Force it so the next
+	// menu rebuild lands on the login/attach menu. See rc3-smoke-retakes
+	// [S5] (logout doesn't kick out of admin menu).
+	m.session = sessionLocked
 	m.rebuildMenu()
 	return m, nil
 }

@@ -1975,6 +1975,11 @@ type grantListView struct {
 	items  map[string]vault.Grant
 	done   bool
 
+	// rc6c — viewer pubkey primed at load so row renderer can draw
+	// perspective-sensitive owner glyphs (👤 mine / 🔒 another admin's)
+	// on protected grants. See rc3-smoke-retakes [S1].
+	viewerPubkey string
+
 	mode         int
 	cursor       int
 	actionCursor int
@@ -2000,8 +2005,9 @@ func (v *grantListView) Done() bool    { return v.done }
 func (v *grantListView) Flash() string { return v.flash }
 
 type grantListLoadedMsg struct {
-	items map[string]vault.Grant
-	err   string
+	items        map[string]vault.Grant
+	viewerPubkey string
+	err          string
 }
 
 type grantActionMsg struct {
@@ -2020,7 +2026,14 @@ func (v *grantListView) load() tea.Msg {
 		}
 		return grantListLoadedMsg{err: err.Error()}
 	}
-	return grantListLoadedMsg{items: vlt.Grants}
+	// rc6c — viewer pubkey for perspective-sensitive owner glyphs on
+	// protected grant rows. Best-effort — missing status just renders
+	// without the icon instead of crashing.
+	viewerPubkey := ""
+	if st, serr := v.client.Status(); serr == nil {
+		viewerPubkey = st.AdminPubkey
+	}
+	return grantListLoadedMsg{items: vlt.Grants, viewerPubkey: viewerPubkey}
 }
 
 func (v *grantListView) selectedID() string {
@@ -2054,6 +2067,7 @@ func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.loaded = true
 		v.err = mm.err
 		v.items = mm.items
+		v.viewerPubkey = mm.viewerPubkey
 		v.ids = v.ids[:0]
 		for id := range v.items {
 			v.ids = append(v.ids, id)
@@ -2447,10 +2461,23 @@ func (v *grantListView) View() string {
 			prefix = "  " + cursorSt.Render("➤ ")
 			disp = cursorSt.Render(id)
 		}
+		// rc6c — perspective-sensitive owner glyph. Protected grants
+		// show 👤 (yours) when g.Owner matches the viewer's admin
+		// pubkey, 🔒 (another admin's) otherwise. Unprotected grants
+		// get a blank slot. Width-pinned via lipgloss per contract 14.
+		ownerRaw := ""
+		if g.Protected {
+			if g.Owner != "" && v.viewerPubkey != "" && g.Owner == v.viewerPubkey {
+				ownerRaw = "👤"
+			} else {
+				ownerRaw = mutedSt.Render("🔒")
+			}
+		}
+		ownerGlyph := lipgloss.NewStyle().Width(3).Render(ownerRaw)
 		// v1.13.0-rc20 — row shows id + target only. Projects moved to
 		// the status bar so the row stays clean.
 		dispPad := lipgloss.NewStyle().Width(labelWidth).Render(disp)
-		b.WriteString(prefix + dispPad +
+		b.WriteString(prefix + ownerGlyph + dispPad +
 			fmt.Sprintf("  → %s.%s\n", g.Integration, g.Token))
 	}
 
@@ -2482,7 +2509,8 @@ func (v *grantListView) View() string {
 	if v.mode == grantModeAction {
 		b.WriteString("\n" + v.renderActionMenu())
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move | enter actions | esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter actions | esc back") +
+			"\n" + helpSt.Render("👤 yours · 🔒 another admin's"))
 	}
 	if v.flash != "" {
 		b.WriteString("\n" + okSt.Render(v.flash))
