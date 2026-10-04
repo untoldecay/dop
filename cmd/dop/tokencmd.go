@@ -912,6 +912,49 @@ func requireAdminSession(paths *config.Paths) (*admin.Client, error) {
 	return client, nil
 }
 
+// requireAdminSessionOrUnlock is the operator-friendly variant used
+// by surfaces like `dop use` that are triggered from a shell eval. If
+// no session is active it pops a native passphrase dialog (osascript
+// on macOS) and runs the login dance in-process, so the operator never
+// has to switch to a terminal just to re-enter their passphrase.
+//
+// On platforms / environments where the native dialog isn't available
+// (non-darwin, SSH session with no $DISPLAY-equivalent, osascript
+// disabled by MDM) the function falls back to the standard
+// requireAdminSession behavior — the operator gets the normal error
+// and can run `dop admin login` themselves.
+//
+// titleHint shows up in the dialog title (e.g. "DOP · use notion") so
+// operators juggling multiple vaults know which install is asking.
+func requireAdminSessionOrUnlock(paths *config.Paths, titleHint string) (*admin.Client, error) {
+	client := admin.NewClient(admin.SockPath(paths))
+	if client.SessionActive() {
+		return client, nil
+	}
+	// Opt-out: DOP_NO_AUTO_UNLOCK=1 keeps the old behavior for scripts.
+	if os.Getenv("DOP_NO_AUTO_UNLOCK") != "" {
+		return nil, fmt.Errorf("no active admin session — run `dop admin login` first")
+	}
+	// Opt-out: when invoked from inside the TUI (DOP_FROM_TUI=1) we must
+	// NOT race the TUI by stealing focus with a passphrase dialog — the
+	// TUI has its own login flow.
+	if os.Getenv("DOP_FROM_TUI") != "" {
+		return nil, fmt.Errorf("no active admin session — run `dop admin login` first")
+	}
+	title := "DOP admin unlock"
+	if titleHint != "" {
+		title = "DOP · " + titleHint
+	}
+	c, err := autoUnlockPrompt(paths, title, "Enter admin passphrase to unlock the session.")
+	if err != nil {
+		if errors.Is(err, ErrAutoUnlockUnsupported) || errors.Is(err, ErrAutoUnlockCanceled) {
+			return nil, fmt.Errorf("no active admin session — run `dop admin login` first")
+		}
+		return nil, err
+	}
+	return c, nil
+}
+
 // vaultFilePath returns the vault.yaml path, bootstrapping empty if missing.
 func vaultFilePath(paths *config.Paths) string {
 	return filepath.Join(paths.Vault, "vault.yaml")

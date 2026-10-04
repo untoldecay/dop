@@ -76,18 +76,18 @@ type integrationListView struct {
 	// v1.14.0-rc3 Phase 5 — field 0 is Name (rename), Phase 4 added
 	// Projects/Tags; see intEditField* constants below.
 	intEditField         int
-	intEditNameBuf       strings.Builder
+	intEditNameBuf       textField
 	intEditNameWas       string // snapshot at open time, so rename detection is cheap at save
 	intEditKindCursor    int
 	intEditKindChoice    string
-	intEditDescBuf       strings.Builder
-	intEditKindSlotBuf   strings.Builder
-	intEditProjectsBuf   strings.Builder
-	intEditTagsBuf       strings.Builder
+	intEditDescBuf       textField
+	intEditKindSlotBuf   textField
+	intEditProjectsBuf   textField
+	intEditTagsBuf       textField
 	intEditProtectCursor int
 	intEditProtectChoice bool // mirrors protectionPresets[cursor].value
 	intEditProtectWas    bool // snapshot at enter time, used to decide if passphrase step is needed
-	intEditPassBuf       strings.Builder
+	intEditPassBuf       textField
 }
 
 // Integration edit field constants.
@@ -301,8 +301,7 @@ func (v *integrationListView) enterIntEdit() *integrationListView {
 	// v1.14.0-rc3 Phase 5 — Name field (rename support). Snapshot the
 	// current key so doIntEdit can detect "operator typed a different
 	// name" without re-reading the vault.
-	v.intEditNameBuf.Reset()
-	v.intEditNameBuf.WriteString(name)
+	v.intEditNameBuf.SetString(name)
 	v.intEditNameWas = name
 	v.intEditKindChoice = vault.IntegrationKindOf(it)
 	// Pre-position the kind cursor on the current kind.
@@ -312,26 +311,22 @@ func (v *integrationListView) enterIntEdit() *integrationListView {
 			break
 		}
 	}
-	v.intEditDescBuf.Reset()
-	v.intEditDescBuf.WriteString(it.Description)
-	v.intEditKindSlotBuf.Reset()
+	v.intEditDescBuf.SetString(it.Description)
 	switch vault.IntegrationKindOf(it) {
 	case vault.IntegrationKindCLI:
-		v.intEditKindSlotBuf.WriteString(it.Metadata["cli_cmd"])
+		v.intEditKindSlotBuf.SetString(it.Metadata["cli_cmd"])
 	case vault.IntegrationKindMCP:
 		if it.Metadata["mcp_url"] != "" {
-			v.intEditKindSlotBuf.WriteString(it.Metadata["mcp_url"])
+			v.intEditKindSlotBuf.SetString(it.Metadata["mcp_url"])
 		} else {
-			v.intEditKindSlotBuf.WriteString(it.Metadata["mcp_cmd"])
+			v.intEditKindSlotBuf.SetString(it.Metadata["mcp_cmd"])
 		}
 	default: // api, other
-		v.intEditKindSlotBuf.WriteString(it.Metadata["base_url"])
+		v.intEditKindSlotBuf.SetString(it.Metadata["base_url"])
 	}
 	// v1.14.0-rc3 — prime projects/tags buffers (Phase 4).
-	v.intEditProjectsBuf.Reset()
-	v.intEditProjectsBuf.WriteString(strings.Join(it.Projects, ","))
-	v.intEditTagsBuf.Reset()
-	v.intEditTagsBuf.WriteString(strings.Join(it.Tags, ","))
+	v.intEditProjectsBuf.SetString(strings.Join(it.Projects, ","))
+	v.intEditTagsBuf.SetString(strings.Join(it.Tags, ","))
 	// v1.14.0-rc3 — prime protection state + reset passphrase buffer.
 	v.intEditProtectChoice = it.Protected
 	v.intEditProtectWas = it.Protected
@@ -1420,8 +1415,28 @@ func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) 
 		return v, nil
 	}
 	// Text input fields: Name (0), Desc (2), KindSlot (3), Projects (4),
-	// Tags (5), Passphrase (7).
-	switch mm.String() {
+	// Tags (5), Passphrase (7). rc6f — the current field's textField
+	// gets first dibs on caret keys (left/right/home/end/delete/backspace
+	// and rune insert) so operators can edit the pre-filled content in
+	// place. Only navigation keys (tab/enter/esc/up/down/shift+tab) fall
+	// through to the view's own switch.
+	key := mm.String()
+	if buf := v.intEditCurBuf(); buf != nil {
+		switch key {
+		case "left", "right", "home", "end", "ctrl+a", "ctrl+e", "backspace", "delete", "ctrl+d":
+			buf.handleKey(key, mm.Runes)
+			return v, nil
+		default:
+			// Rune insert — tea delivers the typed runes in mm.Runes
+			// alongside a key string like "a" or "@". Only consume if
+			// there are actual runes (filters out named navigation keys).
+			if len(mm.Runes) > 0 && key != "enter" && key != "tab" && key != "shift+tab" && key != "up" && key != "down" && key != "esc" {
+				buf.InsertRunes(mm.Runes)
+				return v, nil
+			}
+		}
+	}
+	switch key {
 	case "esc":
 		v.mode = integModeList
 	case "enter":
@@ -1463,28 +1478,12 @@ func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) 
 				v.intEditField--
 			}
 		}
-	case "backspace":
-		buf := v.intEditCurBuf()
-		if buf == nil {
-			return v, nil
-		}
-		s := buf.String()
-		if len(s) > 0 {
-			buf.Reset()
-			buf.WriteString(s[:len(s)-1])
-		}
-	default:
-		if len(mm.Runes) > 0 {
-			if buf := v.intEditCurBuf(); buf != nil {
-				buf.WriteString(string(mm.Runes))
-			}
-		}
 	}
 	_ = needsPass
 	return v, nil
 }
 
-func (v *integrationListView) intEditCurBuf() *strings.Builder {
+func (v *integrationListView) intEditCurBuf() *textField {
 	switch v.intEditField {
 	case intEditFieldName:
 		return &v.intEditNameBuf
@@ -1817,9 +1816,11 @@ func (v *integrationListView) viewIntEdit() string {
 	} else {
 		nameLbl = mutedSt.Render(nameLbl)
 	}
-	b.WriteString(nameLbl + ": " + v.intEditNameBuf.String())
 	if v.intEditField == intEditFieldName {
-		b.WriteString(cursorSt.Render("▎"))
+		before, after := v.intEditNameBuf.Split()
+		b.WriteString(nameLbl + ": " + before + cursorSt.Render("▎") + after)
+	} else {
+		b.WriteString(nameLbl + ": " + v.intEditNameBuf.String())
 	}
 	b.WriteString("\n")
 	if v.intEditField == intEditFieldName {
@@ -1852,9 +1853,11 @@ func (v *integrationListView) viewIntEdit() string {
 	if v.intEditField == 1 {
 		descLbl = cursorSt.Render("What it's for")
 	}
-	b.WriteString(descLbl + ": " + v.intEditDescBuf.String())
 	if v.intEditField == 1 {
-		b.WriteString(cursorSt.Render("▎"))
+		before, after := v.intEditDescBuf.Split()
+		b.WriteString(descLbl + ": " + before + cursorSt.Render("▎") + after)
+	} else {
+		b.WriteString(descLbl + ": " + v.intEditDescBuf.String())
 	}
 	b.WriteString("\n")
 
@@ -1864,9 +1867,11 @@ func (v *integrationListView) viewIntEdit() string {
 	if v.intEditField == intEditFieldKindSlot {
 		st = cursorSt
 	}
-	b.WriteString(st.Render(slotLbl) + ": " + v.intEditKindSlotBuf.String())
 	if v.intEditField == intEditFieldKindSlot {
-		b.WriteString(cursorSt.Render("▎"))
+		before, after := v.intEditKindSlotBuf.Split()
+		b.WriteString(st.Render(slotLbl) + ": " + before + cursorSt.Render("▎") + after)
+	} else {
+		b.WriteString(st.Render(slotLbl) + ": " + v.intEditKindSlotBuf.String())
 	}
 	b.WriteString("\n")
 	if v.intEditField == intEditFieldKindSlot {
@@ -1879,18 +1884,22 @@ func (v *integrationListView) viewIntEdit() string {
 	if v.intEditField == intEditFieldProjects {
 		projLbl = cursorSt.Render("Projects (comma-separated)")
 	}
-	b.WriteString(projLbl + ": " + v.intEditProjectsBuf.String())
 	if v.intEditField == intEditFieldProjects {
-		b.WriteString(cursorSt.Render("▎"))
+		before, after := v.intEditProjectsBuf.Split()
+		b.WriteString(projLbl + ": " + before + cursorSt.Render("▎") + after)
+	} else {
+		b.WriteString(projLbl + ": " + v.intEditProjectsBuf.String())
 	}
 	b.WriteString("\n")
 	tagsLbl := mutedSt.Render("Tags (comma-separated)")
 	if v.intEditField == intEditFieldTags {
 		tagsLbl = cursorSt.Render("Tags (comma-separated)")
 	}
-	b.WriteString(tagsLbl + ": " + v.intEditTagsBuf.String())
 	if v.intEditField == intEditFieldTags {
-		b.WriteString(cursorSt.Render("▎"))
+		before, after := v.intEditTagsBuf.Split()
+		b.WriteString(tagsLbl + ": " + before + cursorSt.Render("▎") + after)
+	} else {
+		b.WriteString(tagsLbl + ": " + v.intEditTagsBuf.String())
 	}
 	b.WriteString("\n")
 
@@ -1928,15 +1937,16 @@ func (v *integrationListView) viewIntEdit() string {
 		if v.intEditField == intEditFieldPassphrase {
 			passLbl = cursorSt.Render("Approval passphrase")
 		}
-		masked := strings.Repeat("•", v.intEditPassBuf.Len())
-		b.WriteString(passLbl + ": " + masked)
 		if v.intEditField == intEditFieldPassphrase {
-			b.WriteString(cursorSt.Render("▎"))
+			before, after := v.intEditPassBuf.SplitMasked("•")
+			b.WriteString(passLbl + ": " + before + cursorSt.Render("▎") + after)
+		} else {
+			b.WriteString(passLbl + ": " + strings.Repeat("•", v.intEditPassBuf.Len()))
 		}
 		b.WriteString("\n")
 	}
 
-	b.WriteString("\n" + helpSt.Render("enter next/save · tab/↑↓ jump · esc cancel"))
+	b.WriteString("\n" + helpSt.Render("enter next/save · tab/↑↓ jump field · ←→ move caret · home/end jump · esc cancel"))
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
 	}

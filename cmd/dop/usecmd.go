@@ -69,7 +69,11 @@ func runUse(args []string) int {
 	subject := rest[0]
 
 	paths, _ := config.Resolve()
-	client, err := requireAdminSession(paths)
+	// rc6f — operator-friendly unlock: if the admin session is locked
+	// AND we're not inside the TUI, pop a native passphrase dialog
+	// instead of erroring out. Headless / scripted environments fall
+	// back to the normal "run dop admin login" error.
+	client, err := requireAdminSessionOrUnlock(paths, "use "+subject)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop use: %v\n", err)
 		return 1
