@@ -6,11 +6,13 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/userprefs"
 )
 
 type settingsView struct {
@@ -45,10 +47,23 @@ func (v *settingsView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		if v.prefs.AllowFileKeys {
-			v.flash = "allow-file-keys ON — new tokens issued from TUI will recommend --key-type p256"
+			v.flash = "allow-file-keys ON — new TUI tokens will recommend --key-type p256"
 		} else {
-			v.flash = "allow-file-keys OFF — new tokens use the default (SE on macOS with codesign, else ed25519)"
+			v.flash = "allow-file-keys OFF — new tokens use the default (SE on signed macOS, else ed25519)"
 		}
+	case "t":
+		// Cycle the approval-popup timeout through the supported choices.
+		current := v.prefs.ApprovalPopupTimeoutSeconds
+		if current == 0 {
+			current = userprefs.ApprovalTimeoutDefaultSeconds
+		}
+		next := userprefs.CycleApprovalTimeout(current)
+		v.prefs.ApprovalPopupTimeoutSeconds = next
+		if err := SavePrefs(v.paths, v.prefs); err != nil {
+			v.err = err.Error()
+			return v, nil
+		}
+		v.flash = fmt.Sprintf("approval popup timeout → %ds", next)
 	}
 	return v, nil
 }
@@ -74,12 +89,27 @@ func (v *settingsView) View() string {
 			"    macOS builds, or Linux. The key file is readable by any process\n"+
 			"    running as this user — only turn ON if you accept that trade.") + "\n")
 
+	// rc5b — approval popup timeout cycler.
+	timeoutSecs := v.prefs.ApprovalPopupTimeoutSeconds
+	if timeoutSecs == 0 {
+		timeoutSecs = userprefs.ApprovalTimeoutDefaultSeconds
+	}
+	b.WriteString("\n")
+	b.WriteString("  " + lipgloss.NewStyle().Bold(true).Render("Approval popup timeout") + "  ")
+	b.WriteString(okSt.Render(fmt.Sprintf("[%ds]", timeoutSecs)) + "  ")
+	b.WriteString(helpSt.Render("press t to cycle (15 → 30 → 60)") + "\n")
+	b.WriteString(mutedSt.Render(
+		"    How long the native popup waits for your approval passphrase\n"+
+			"    before the flow upgrades to tunnel+phone fallback. Shorter is\n"+
+			"    faster-to-escalate for remote admins; longer gives you more\n"+
+			"    room when you're at the mac.") + "\n")
+
 	if v.flash != "" {
 		b.WriteString("\n" + okSt.Render(v.flash) + "\n")
 	}
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("f toggle | esc back"))
+	b.WriteString("\n" + helpSt.Render("f file-keys · t timeout · esc back"))
 	return b.String()
 }

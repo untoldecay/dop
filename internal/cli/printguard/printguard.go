@@ -28,7 +28,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"golang.org/x/term"
 
@@ -36,6 +35,7 @@ import (
 	"github.com/fray/dop/internal/approval"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/userprefs"
 )
 
 // Kind tags the audit event + the dialog title. Short, operator-facing.
@@ -160,11 +160,15 @@ func Guard(req Request) error {
 	})
 	prompt := fmt.Sprintf("A dop process is about to print %q to stdout.\n\nSurface: %s\nSubject: %s\n\nType your approval passphrase to allow this one invocation.",
 		req.Subject, req.Kind, req.Subject)
+	// rc5b — timeout is operator-configurable (15/30/60s) via the TUI
+	// settings view, stored in userprefs. Falls back to the 60s default
+	// when prefs are absent or carry an invalid value.
+	timeout := userprefs.Load(req.Paths).ApprovalTimeout()
 	decision, reason, err := req.Client.ApprovalPopup(
 		string(req.Kind),
 		req.Subject,
 		prompt,
-		60*time.Second,
+		timeout,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop %s: approval RPC failed: %v\n", req.Kind, err)
