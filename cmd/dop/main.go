@@ -89,15 +89,21 @@ usage:
   dop doctor [--security]                        health check
   dop watch [--since D] [--filter K,K] [--all]   live-tail the audit log
   dop credential-helper map|list|remove          manage host→grant map for dop-credential-git
+  dop trust list                                 list active TrustContext grants (session approvals cached in the daemon)
+  dop trust revoke [--all] [KIND VALUE SUBJECT]  drop a cached approval (or every one with --all)
 
 env:
-  DOP_TOKEN          bearer for exec/whoami/env
-  DOP_TOKEN_FILE     path to a file containing a bearer (alternative to env)
-  DOP_VAULT          override vault path
-  DOP_NO_TUI         disable TUI on 'dop' alone (agents/cron)
-  DOP_ADMIN_TTL      admin session idle timeout (default 15m)
-  DOP_ADMIN_MAX_TTL  admin session absolute timeout (default 60m)
-  DOP_AUTO_PULL      max staleness before dop exec auto-pulls (default 5m)
+  DOP_TOKEN                     bearer for exec/whoami/env
+  DOP_TOKEN_FILE                path to a file containing a bearer (alternative to env)
+  DOP_VAULT                     override vault path
+  DOP_NO_TUI                    disable TUI on 'dop' alone (agents/cron)
+  DOP_ADMIN_TTL                 admin session idle timeout (default 15m)
+  DOP_ADMIN_MAX_TTL             admin session absolute timeout (default 60m)
+  DOP_AUTO_PULL                 max staleness before dop exec auto-pulls (default 5m)
+  DOP_SESSION_ID                v1.14.0-rc6i: explicit trust-context identifier so burst dop use/env calls in the same
+                                conversation / terminal / shell session share one approval (keep opaque, >=128 bits)
+  DOP_INFER_HARNESS_SESSION=1   v1.14.0-rc6i: opt in to using CLAUDE_CODE_SESSION_ID as the trust-context identifier
+                                when DOP_SESSION_ID is unset
 `
 
 func main() {
@@ -169,6 +175,12 @@ func main() {
 		// ~/.claude/skills/dop/SKILL.md so LLM agents on this machine
 		// use the safe eval pattern + know about the approval popup.
 		os.Exit(runSkill(os.Args[2:]))
+	case "trust":
+		// v1.14.0-rc6i — operator observability for the TrustContext
+		// grant cache. `dop trust list` / `dop trust revoke` show +
+		// manage the per-(context, subject) approvals cached in the
+		// admin daemon.
+		os.Exit(runTrust(os.Args[2:]))
 	case "version", "-v", "--version":
 		fmt.Println(versionString())
 		return

@@ -45,6 +45,7 @@ import (
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/printapproval"
+	"github.com/fray/dop/internal/sessiontrust"
 	"github.com/fray/dop/internal/userprefs"
 )
 
@@ -108,24 +109,31 @@ func Guard(req Request) error {
 	if os.Getenv("DOP_FROM_TUI") == "1" {
 		return nil
 	}
-	// v1.14.0-rc6 — shell-trust fast path. On the eval/pipe pattern
-	// (stdout = non-tty) for the read surfaces (dop use, dop env),
-	// check whether this shell PID + subject tuple is already trusted
-	// after a prior approval in the same shell session. If yes, skip
-	// the popup.
+	// v1.14.0-rc6i — TrustContext cache. Replaces the rc6 shell-trust
+	// cache. The CLI-side resolver (internal/sessiontrust) walks a
+	// precedence stack (DOP_SESSION_ID → recognized harness adapter →
+	// tty → getsid() → ppid) to produce a stable identifier for the
+	// current execution context. The daemon stores grants keyed by
+	// (ContextKind, ContextValue, Subject) with idle TTL.
 	//
-	// Only applies when:
-	//   - stdout is non-tty (visible-print case still prompts always)
-	//   - surface is `use` or `env` (mutations still prompt per-invocation)
-	//   - daemon client is reachable (otherwise fall through to the
-	//     normal flow which handles that case)
+	// Gates (unchanged from rc6):
+	//   - non-tty only — a visible-print surface in a real terminal
+	//     always prompts (defense against drive-by `! dop use` from
+	//     an LLM in the operator's own tty)
+	//   - KindUse / KindEnv only — mutations stay per-invocation
+	//   - daemon reachable
 	evalPatternSurface := req.Kind == KindUse || req.Kind == KindEnv
+	tctx := sessiontrust.Resolve()
 	if !isTTY && evalPatternSurface && req.Client != nil {
-		if trusted, _ := req.Client.ShellTrustCheck(os.Getppid(), req.Subject); trusted {
+		if trusted, _ := req.Client.TrustContextCheck(string(tctx.Kind), tctx.Value, req.Subject); trusted {
 			audit.Append(req.Paths, audit.Event{
 				Kind:    audit.EventPrintApprovalGranted,
 				Subject: req.Subject,
-				Extra:   map[string]string{"surface": string(req.Kind), "channel": "shell_trust"},
+				Extra: map[string]string{
+					"surface":      string(req.Kind),
+					"channel":      "trust_context",
+					"context_kind": string(tctx.Kind),
+				},
 			})
 			return nil
 		}
@@ -243,11 +251,11 @@ func Guard(req Request) error {
 				Subject: req.Subject,
 				Extra:   map[string]string{"surface": string(req.Kind), "channel": "phone"},
 			})
-			// rc6 — mark this shell trusted so subsequent same-shell
-			// eval invocations skip the popup. Phone approval still
-			// counts as the "first" approval for the trust-cache.
+			// rc6i — mark this trust context so subsequent invocations
+			// from the same session context skip the popup. Phone
+			// approval counts as the "first" approval.
 			if !isTTY && evalPatternSurface && req.Client != nil {
-				_ = req.Client.ShellTrustMark(os.Getppid(), req.Subject)
+				_ = req.Client.TrustContextMark(string(tctx.Kind), tctx.Value, req.Subject)
 			}
 			return nil
 		case printapproval.DecisionRejected:
@@ -275,10 +283,10 @@ func Guard(req Request) error {
 			Subject: req.Subject,
 			Extra:   map[string]string{"surface": string(req.Kind), "channel": "local"},
 		})
-		// rc6 — mark this shell trusted so subsequent same-shell eval
-		// invocations skip the popup until the shell dies.
+		// rc6i — mark this trust context so subsequent invocations from
+		// the same session context skip the popup within the idle TTL.
 		if !isTTY && evalPatternSurface && req.Client != nil {
-			_ = req.Client.ShellTrustMark(os.Getppid(), req.Subject)
+			_ = req.Client.TrustContextMark(string(tctx.Kind), tctx.Value, req.Subject)
 		}
 		return nil
 	case "denied":

@@ -45,13 +45,19 @@ const (
 	// as the LOCAL fast-path; they fall back to the tunnel+phone flow
 	// when the daemon isn't reachable or the popup times out.
 	OpApprovalPopup = "approval_popup"
-	// v1.14.0-rc6 — shell-trust cache for the eval/pipe pattern. Lets
-	// a shell session skip repeat approvals for the same subject after
-	// the first approval. Scoped to the eval case (stdout non-tty) on
-	// read surfaces (dop use, dop env). The daemon holds the map in
-	// memory keyed by "<pid>:<subject>"; shell death leaves stale
-	// entries that cost nothing. Logout clears the whole set.
+	// v1.14.0-rc6 — shell-trust cache for the eval/pipe pattern. rc6i
+	// supersedes this with OpTrustContext (richer context + metadata +
+	// idle TTL). OpShellTrust retained for one release cycle so an
+	// older daemon upgraded alongside a newer CLI (or vice-versa)
+	// doesn't fail hard.
 	OpShellTrust = "shell_trust"
+	// v1.14.0-rc6i — trust-context cache. Replaces the rc6 shell-trust
+	// cache. Keyed by `<ContextKind>:<ContextValue>:<Subject>`; the CLI
+	// builds the context via internal/sessiontrust (DOP_SESSION_ID →
+	// recognized harness adapter → tty → getsid() → ppid). The daemon
+	// stores grants with CreatedAt + LastUsedAt metadata; grants expire
+	// after idle TTL (default 30m). Logout clears everything.
+	OpTrustContext = "trust_context"
 )
 
 // StatusResp is the payload of an `OpStatus` response.
@@ -124,12 +130,9 @@ type ApprovalPopupReq struct {
 	TimeoutMs int `json:"timeout_ms,omitempty"`
 }
 
-// ShellTrustReq — v1.14.0-rc6. Mode is "check" (returns whether the
-// shell PID is already trusted for this subject) or "mark" (adds the
-// (PID, subject) tuple to the trusted set). The caller supplies its
-// own `os.Getppid()` so the daemon doesn't need a side-channel for
-// peer PID (unix socket peer-cred provides the uid but not a stable
-// shell PID).
+// ShellTrustReq — v1.14.0-rc6. Legacy shape; retained for one release
+// cycle so a daemon upgraded ahead of (or behind) its CLI doesn't fail
+// hard. New callers use TrustContextReq.
 type ShellTrustReq struct {
 	PID     int    `json:"pid"`
 	Subject string `json:"subject"`
@@ -137,9 +140,49 @@ type ShellTrustReq struct {
 }
 
 // ShellTrustResp — Trusted=true means the (PID, subject) is in the
-// cache. For "mark" mode this is always true after a successful call.
+// cache. Legacy; see TrustContextResp.
 type ShellTrustResp struct {
 	Trusted bool `json:"trusted"`
+}
+
+// TrustContextReq — v1.14.0-rc6i. Replaces ShellTrustReq.
+//
+// ContextKind + ContextValue identify the operator-approved execution
+// context (built by the CLI via internal/sessiontrust.Resolve()).
+// Subject is the vault subject the approval was granted for. Mode is
+// "check" (returns Trusted + metadata), "mark" (records a grant),
+// "list" (returns ALL active grants — ignores Subject), or "revoke"
+// (removes one or all grants).
+type TrustContextReq struct {
+	ContextKind  string `json:"context_kind"`
+	ContextValue string `json:"context_value"`
+	Subject      string `json:"subject"`
+	Mode         string `json:"mode"` // "check" | "mark" | "list" | "revoke"
+	// RevokeAll — when Mode=="revoke" and this is true, drop every
+	// grant in the cache. Mutually exclusive with ContextKind+Subject
+	// (which revoke a single matching entry).
+	RevokeAll bool `json:"revoke_all,omitempty"`
+}
+
+// TrustGrantInfo — one row returned by the "list" mode.
+type TrustGrantInfo struct {
+	ContextKind  string `json:"context_kind"`
+	ContextValue string `json:"context_value"`
+	Subject      string `json:"subject"`
+	CreatedUnix  int64  `json:"created_unix"`
+	LastUsedUnix int64  `json:"last_used_unix"`
+	// Source names the surface that originally granted the trust
+	// (e.g. "print_use/local", "print_env/phone") — purely for
+	// operator-facing observability via `dop trust list`.
+	Source string `json:"source,omitempty"`
+}
+
+// TrustContextResp — unified response. Trusted is set for "check".
+// Grants is set for "list". Revoked is a count for "revoke".
+type TrustContextResp struct {
+	Trusted bool             `json:"trusted,omitempty"`
+	Grants  []TrustGrantInfo `json:"grants,omitempty"`
+	Revoked int              `json:"revoked,omitempty"`
 }
 
 // ApprovalPopupResp — the daemon's verdict.
