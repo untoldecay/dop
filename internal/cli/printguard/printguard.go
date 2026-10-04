@@ -84,33 +84,31 @@ var ErrRefused = errors.New("printguard: print refused")
 //   - Emits one audit event per approval request/decision.
 //   - Does NOT write to req.Out itself; caller does the actual print.
 func Guard(req Request) error {
-	isTTY := isTerminal(req.Out)
-	// At a tty: no leak path, no approval needed. Caller prints.
-	if isTTY {
-		return nil
-	}
-	// v1.14.0-rc4b — TUI subprocess bypass. The TUI shells out to this
-	// CLI binary with stdout piped back to the TUI render path. From the
-	// child's perspective, stdout is a pipe (not a tty) — Tier 1 would
-	// refuse and the TUI's handoff screen would be empty. But the TUI
-	// IS the interactive operator surface; there's no LLM-capture leak
-	// path when the human is literally driving the TUI. The TUI sets
-	// DOP_FROM_TUI=1 on every shell-out, which we treat as tty-equivalent.
+	// v1.14.0-rc5 — Option A. Approval is required for every print
+	// invocation regardless of tty/non-tty state. The old tty bypass
+	// was removed because an LLM running `! dop use X` in the operator's
+	// own terminal has a tty from DOP's point of view AND leaks the
+	// output into the chat transcript. One rule everywhere.
 	//
-	// Threat model: a shell operator could forge DOP_FROM_TUI=1 to bypass
-	// the gate, but that's explicitly choosing to disable the protection
-	// — same category as setting DOP_APPROVAL_PASSPHRASE in env.
+	// Two bypasses remain:
+	//   1. DOP_FROM_TUI=1 — the TUI shells out to this CLI; the TUI is
+	//      the operator's interactive surface, output goes back to the
+	//      TUI render path, no LLM-capture risk.
+	//   2. DOP_APPROVAL_PASSPHRASE — scripted/CI pre-approval via env
+	//      (same auth strength as the popup).
+	//
+	// The PrintFlag field on req is retained for backward-compat but
+	// has no auth role in Option A — it's a no-op. Callers can leave it
+	// unset or pass legacy --print-* flags for one release before we
+	// retire the flags entirely.
+	_ = isTerminal(req.Out) // retained for potential future hints; no gating role
+
 	if os.Getenv("DOP_FROM_TUI") == "1" {
 		return nil
 	}
-	// Env escape hatch (DOP_APPROVAL_PASSPHRASE): set in env means
-	// "I pre-approve this print; verify my passphrase and proceed."
-	// Bypasses both Tier 1 (print-flag check) AND Tier 3 (interactive
-	// popup) in one go. Threat model: an attacker who can read env
-	// already has DOP_TOKEN, so putting the approval passphrase in
-	// env doesn't widen the surface — it just makes the same auth
-	// invocation-silent. Used by E2E + scripted operator flows.
-	// Not advertised in --help; purely an escape.
+	// Env escape hatch (DOP_APPROVAL_PASSPHRASE): same auth strength
+	// as typing into the popup — still verifies the real passphrase.
+	// Not advertised in --help; purely a scripted-approval escape.
 	if envPass := os.Getenv("DOP_APPROVAL_PASSPHRASE"); envPass != "" {
 		audit.Append(req.Paths, audit.Event{
 			Kind:    audit.EventPrintApprovalRequested,
@@ -143,22 +141,9 @@ func Guard(req Request) error {
 		})
 		return nil
 	}
-	// Non-tty + no flag → Tier 1 refusal.
-	if !req.PrintFlag {
-		fmt.Fprintln(os.Stderr, "dop "+string(req.Kind)+": refusing to print secret to a non-tty.")
-		fmt.Fprintln(os.Stderr, "  Why: stdout is captured by the caller, which (for LLM-driven shells)")
-		fmt.Fprintln(os.Stderr, "       means the secret value lands in a transcript on disk.")
-		fmt.Fprintln(os.Stderr, "  Fix (safe at a tty): use eval, e.g.")
-		fmt.Fprintln(os.Stderr, "        eval \"$(dop "+shortCmd(req.Kind)+")\"")
-		fmt.Fprintln(os.Stderr, "       $() captures stdout silently; eval consumes it; nothing prints.")
-		fmt.Fprintln(os.Stderr, "  Fix (opt-in): pass --print-export (or --print-bearer on `token issue`)")
-		fmt.Fprintln(os.Stderr, "       to force printing. You'll be asked to approve via the DOP popup.")
-		return ErrRefused
-	}
-	// Non-tty + flag → Tier 3 approval via daemon local-popup RPC.
-	// (The env-escape path above already handled the "scripted-approval"
-	// case before reaching here.)
-	// 60s dialog timeout.
+	// Approval via admin daemon's local popup. 60s dialog timeout.
+	// Future (rc5b): on timeout OR unsupported-platform, upgrade to
+	// tunnel+phone fallback instead of refusing outright.
 	if req.Client == nil {
 		fmt.Fprintln(os.Stderr, "dop "+string(req.Kind)+": approval required but no admin session reachable.")
 		fmt.Fprintln(os.Stderr, "  Run `dop admin login`, then retry.")
