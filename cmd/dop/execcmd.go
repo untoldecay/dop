@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/agentkey"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
@@ -70,9 +71,10 @@ func runExec(args []string) int {
 	// the Secure Enclave).
 	bearer, source, bearerErr := readBearerWithSource(*tokenFile)
 	var (
-		env map[string]string
-		res resolveResult
-		err error
+		env                 map[string]string
+		res                 resolveResult
+		err                 error
+		portableOwnerBypass bool // v1.14.0-rc3 Phase 7 — see below.
 	)
 	if bearer != "" {
 		env, res, err = resolveBearerAutoRotate(&bearer, source)
@@ -80,9 +82,20 @@ func runExec(args []string) int {
 			fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
 			return 1
 		}
-		if err := verifyBinding(bearer, res); err != nil {
-			fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
-			return 1
+		// v1.14.0-rc3 Phase 7 — portable bearer owner bypass.
+		// When an admin session is active AND the current admin matches
+		// the capability's IssuedBy AND the capability carries a portable
+		// stash, skip the binding gate. The portable stash's age-wrap
+		// recipient already proves "the owning admin is retrieving their
+		// own bearer in their own shell" — the agent-plane PIN+SE binding
+		// isn't the relevant protection here. Signature + generation +
+		// expiry + scope checks all still apply (they run inside resolveBearer).
+		portableOwnerBypass = skipBindingAsPortableOwner(res)
+		if !portableOwnerBypass {
+			if err := verifyBinding(bearer, res); err != nil {
+				fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
+				return 1
+			}
 		}
 	} else {
 		env, res, err = resolveViaAgentKey(*agentName)
@@ -95,16 +108,20 @@ func runExec(args []string) int {
 		}
 	}
 	paths, _ := config.Resolve()
+	extra := map[string]string{
+		"agent_name": *agentName,
+		"generation": fmt.Sprintf("%d", res.generation),
+		"env_keys":   fmt.Sprintf("%d", len(env)),
+		"child":      filepath.Base(child[0]),
+	}
+	if portableOwnerBypass {
+		extra["portable_owner"] = "yes"
+	}
 	audit.Append(paths, audit.Event{
 		Kind:     audit.EventExec,
 		Subject:  res.subject,
 		LookupID: res.lookupID,
-		Extra: map[string]string{
-			"agent_name":  *agentName,
-			"generation":  fmt.Sprintf("%d", res.generation),
-			"env_keys":    fmt.Sprintf("%d", len(env)),
-			"child":       filepath.Base(child[0]),
-		},
+		Extra:    extra,
 	})
 	fmt.Fprintf(os.Stderr, "dop exec: agent=%q subject=%q gen=%d env_keys=%d\n",
 		*agentName, res.subject, res.generation, len(env))
@@ -947,6 +964,57 @@ func lookPath(bin string) (string, error) {
 }
 
 // bearerFingerprint returns a short opaque tag for display / audit.
+// skipBindingAsPortableOwner — v1.14.0-rc3 Phase 7. Returns true when
+// the current admin session owns a portable capability and is executing
+// it in their own shell. Used by runExec to bypass the agent-plane
+// binding check: portable bearers are admin-held, so the SE/PIN binding
+// (which protects agent-held bearers against theft) is the wrong model.
+//
+// The three preconditions:
+//   1. An admin session is active (socket exists + Status succeeds).
+//   2. The vault's capability record carries a PortableWrapped stash.
+//   3. The capability's IssuedBy == current session's AdminPubkey.
+//
+// Every miss falls through to verifyBinding, so the standard agent-plane
+// path stays untouched. Signature verification, generation/expiry/status
+// checks, and scope filtering all still run inside resolveBearer; this
+// only skips the binding (claim + agent-key) step.
+//
+// Safety: IssuedBy is signature-protected (capability.Record carries the
+// vault's signature over IssuedBy + BundleHash), so a non-owner can't
+// forge the match. A non-owner holding plaintext DOP_TOKEN manually can't
+// reach this path either — the vault read returns their-not-mine for
+// IssuedBy, and the function returns false → standard binding applies.
+func skipBindingAsPortableOwner(res resolveResult) bool {
+	paths, err := config.Resolve()
+	if err != nil {
+		return false
+	}
+	client := admin.NewClient(admin.SockPath(paths))
+	if !client.SessionActive() {
+		return false
+	}
+	st, err := client.Status()
+	if err != nil || st.AdminPubkey == "" {
+		return false
+	}
+	v, _, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		return false
+	}
+	cap, ok := v.Capabilities[res.capID]
+	if !ok {
+		return false
+	}
+	if cap.PortableWrapped == "" {
+		return false
+	}
+	if cap.IssuedBy == "" || cap.IssuedBy != st.AdminPubkey {
+		return false
+	}
+	return true
+}
+
 func bearerFingerprint(bearer string) string {
 	if len(bearer) > 12 {
 		return bearer[:12] + "…"
