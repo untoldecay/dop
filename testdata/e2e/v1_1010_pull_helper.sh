@@ -22,7 +22,7 @@ export DOP_NO_TUI=1
 export DOP_NO_NOTIFY=1
 
 PASS="pass-word-long-enough"
-
+export DOP_APPROVAL_PASSPHRASE="$PASS-approve"
 setup_home() {
     local home="$1"
     HOME="$home" printf "%s\n%s\n" "$PASS" "$PASS-approve" | HOME="$home" "$DOP" admin init --passphrase-stdin >/dev/null

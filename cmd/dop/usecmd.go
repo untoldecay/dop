@@ -28,11 +28,10 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/term"
-
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
+	"github.com/fray/dop/internal/cli/printguard"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/vault"
 )
@@ -138,21 +137,20 @@ func runUse(args []string) int {
 		fmt.Fprintf(os.Stderr, "  Point the agent at it: export DOP_TOKEN_FILE=%s\n", *tokenFile)
 		disk = true
 	} else {
-		// v1.14.0-rc3 Phase 6 — refuse to print to a non-tty unless
-		// --print-export is set. Prevents an LLM running `! dop use X`
-		// from capturing the bearer into the chat transcript.
-		isTTY := term.IsTerminal(int(os.Stdout.Fd()))
-		if !isTTY && !*printExport {
-			fmt.Fprintln(os.Stderr, "dop use: refusing to print bearer to a non-tty.")
-			fmt.Fprintln(os.Stderr, "  Why: stdout is captured by the caller, which (for LLM-driven shells)")
-			fmt.Fprintln(os.Stderr, "       means the bearer value lands in a transcript on disk.")
-			fmt.Fprintln(os.Stderr, "  Fix (safe): run the eval form from your shell:")
-			fmt.Fprintln(os.Stderr, `        eval "$(dop use `+subject+`)"`)
-			fmt.Fprintln(os.Stderr, "       $() captures stdout silently; eval consumes it; nothing prints.")
-			fmt.Fprintln(os.Stderr, "  Fix (opt-in): pass --print-export if you really want the export line on stdout.")
+		// v1.14.0-rc4 — delegated to printguard. Tier 1 refusal on
+		// non-tty when --print-export is unset, Tier 2 opt-in via the
+		// flag, Tier 3 approval via the admin daemon's local popup
+		// when the flag is set on non-tty.
+		if err := printguard.Guard(printguard.Request{
+			Kind:      printguard.KindUse,
+			Subject:   subject,
+			PrintFlag: *printExport,
+			Out:       os.Stdout,
+			Paths:     paths,
+			Client:    client,
+		}); err != nil {
 			return 1
 		}
-		// Operator pattern: eval "$(dop use subject)".
 		fmt.Printf("export DOP_TOKEN=%s\n", bearer)
 	}
 

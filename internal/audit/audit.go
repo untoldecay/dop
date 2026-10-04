@@ -67,6 +67,18 @@ const (
 	// old_name + new_name + referrers (count of grants rewritten).
 	// Fires once per rename; the rename itself is atomic at save time.
 	EventIntegrationRenamed = "integration_renamed"
+	// v1.14.0-rc4 — Tier 3 approval events for secret-print surfaces.
+	// Emitted by `internal/cli/printguard` around the approval dialog.
+	// Requested fires before the dialog opens so a hung dialog still
+	// leaves a trail. Granted / Denied fires after the decision; the
+	// Extra["channel"] field is "local" (osascript popup) or "phone"
+	// (tunnel fallback) once the fallback ships. Extra["surface"] is
+	// the printguard.Kind ("print_use" / "print_issue" / "print_env" /
+	// "print_claim"). Extra["reason"] carries "wrong_passphrase",
+	// "timeout", "rpc_error", "unsupported:…" when denied.
+	EventPrintApprovalRequested = "print_approval_requested"
+	EventPrintApprovalGranted   = "print_approval_granted"
+	EventPrintApprovalDenied    = "print_approval_denied"
 )
 
 // Event is one line in the log.

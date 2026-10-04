@@ -24,6 +24,8 @@ export DOP_ALLOW_FILE_KEYS=1
 PASS="pass-word-long-enough"
 APPROVE="$PASS-approve"
 AUDIT="$HOME/Library/Application Support/dop/logs/audit.jsonl"
+# v1.14.0-rc4 — bypass the Tier 3 approval dialog for non-tty testing.
+export DOP_APPROVAL_PASSPHRASE="$APPROVE"
 
 echo "=== [1] setup: admin + integration + grant"
 printf '%s\n%s\n' "$PASS" "$APPROVE" | "$DOP" admin init --passphrase-stdin >/dev/null
@@ -38,6 +40,7 @@ echo "=== [2] issue a portable bearer + exec without claim"
 # --no-bind makes the bearer unclaimed (binding kind: pin, no pubkey).
 "$DOP" token issue --grants svc.api --name camShell --no-bind --portable >/dev/null 2>&1 \
     || fail "token issue --portable failed"
+# v1.14.0-rc4 — issue didn't print; dop use reaches the stashed bearer.
 # Fetch the bearer via dop use (the real-world path).
 EVAL=$("$DOP" use --print-export camShell 2>&1) || fail "dop use failed: $EVAL"
 eval "$EVAL"
@@ -55,7 +58,7 @@ echo "=== [3] standard bearer (no --portable, pin-bound) still refuses without c
 # unclaimed PIN-bound bearer must fail verifyBinding — that path is
 # unchanged for non-portable capabilities.
 unset DOP_TOKEN
-STD_OUT=$("$DOP" token issue --grants svc.api --name standardAgent 2>&1) \
+STD_OUT=$("$DOP" token issue --grants svc.api --name standardAgent --print-bearer 2>&1) \
     || fail "non-portable issue failed"
 STD_BEARER=$(echo "$STD_OUT" | grep -oE 'tok_[a-f0-9]+' | head -1)
 [[ -n "$STD_BEARER" ]] || fail "no bearer in: $STD_OUT"

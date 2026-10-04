@@ -140,6 +140,36 @@ func (c *Client) UnwrapPortable(ciphertextB64 string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(r.PlaintextB64)
 }
 
+// ApprovalPopup — v1.14.0-rc4. Asks the daemon to show a native approval
+// dialog and verify the typed passphrase. Blocking: waits up to the
+// server-side timeout (default 60s) for a human response. Returns the
+// decision ("approved", "denied", "timeout", "unsupported") plus an
+// optional reason string. Callers get "unsupported" when the daemon
+// can't show a native dialog on this platform; standard fallback is
+// the tunnel+phone flow.
+//
+// Kind is a short tag the daemon uses to format the dialog title +
+// audit the decision. Subject names the thing being approved.
+// PromptText (optional) is the human-readable body; the daemon
+// synthesizes a default when empty.
+func (c *Client) ApprovalPopup(kind, subject, promptText string, timeout time.Duration) (string, string, error) {
+	req, _ := json.Marshal(ApprovalPopupReq{
+		Kind:       kind,
+		Subject:    subject,
+		PromptText: promptText,
+		TimeoutMs:  int(timeout.Milliseconds()),
+	})
+	resp, err := c.call(Request{Op: OpApprovalPopup, Data: req})
+	if err != nil {
+		return "", "", err
+	}
+	var r ApprovalPopupResp
+	if err := json.Unmarshal(resp.Data, &r); err != nil {
+		return "", "", err
+	}
+	return r.Decision, r.Reason, nil
+}
+
 // SockPath returns the socket path this client is talking to.
 func (c *Client) SockPath() string { return c.sockPath }
 

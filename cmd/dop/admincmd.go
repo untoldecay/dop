@@ -400,8 +400,12 @@ func runAdminSessionDaemon(args []string) int {
 	// TTLs from env, with defaults.
 	idle := envDuration("DOP_ADMIN_TTL", admin.DefaultIdleTTL)
 	abs := envDuration("DOP_ADMIN_MAX_TTL", admin.DefaultAbsTTL)
+	// v1.14.0-rc4 — Paths needed for the approval-popup RPC (daemon
+	// reads approval.hash to verify the typed passphrase).
+	paths, _ := config.Resolve()
 	s, err := admin.StartSession(admin.SessionOpts{
 		Keys:     keys,
+		Paths:    paths,
 		SockPath: *sockPath,
 		IdleTTL:  idle,
 		AbsTTL:   abs,

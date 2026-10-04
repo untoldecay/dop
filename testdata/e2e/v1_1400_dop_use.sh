@@ -28,6 +28,11 @@ export DOP_ALLOW_FILE_KEYS=1
 PASS="pass-word-long-enough"
 APPROVE="$PASS-approve"
 AUDIT="$HOME/Library/Application Support/dop/logs/audit.jsonl"
+# v1.14.0-rc4 — Tier 3 approval gate on --print-export surfaces. The
+# env escape hatch lets E2E drive the approval flow without a human
+# clicking the native dialog. Same auth strength as the dialog —
+# still verifies the real passphrase.
+export DOP_APPROVAL_PASSPHRASE="$APPROVE"
 
 echo "=== [1] admin init + login + base integration/grant"
 printf '%s\n%s\n' "$PASS" "$APPROVE" | "$DOP" admin init --passphrase-stdin >/dev/null
@@ -38,7 +43,7 @@ echo -n "$PASS" | "$DOP" admin login --passphrase-stdin >/dev/null
 pass "fixture ready"
 
 echo "=== [2] bearer WITHOUT --portable → dop use refuses"
-OUT2=$("$DOP" token issue --grants svc.api --name without-stash --no-bind 2>&1)
+OUT2=$("$DOP" token issue --grants svc.api --name without-stash --no-bind --print-bearer 2>&1)
 B2=$(echo "$OUT2" | grep -E '^tok_1' | head -1)
 [[ -n "$B2" ]] || fail "no bearer emitted on without-stash: $OUT2"
 OUT=$("$DOP" use without-stash 2>&1 || true)
@@ -56,7 +61,7 @@ echo "=== [4] eval'd token works for dop env"
 # Extract token from the export line and verify dop env renders the grant.
 TOKEN=$(echo "$OUT_USE" | grep -oE 'tok_[a-f0-9]+' | head -1)
 [[ -n "$TOKEN" ]] || fail "could not extract token from export line"
-ENV_OUT=$(DOP_TOKEN="$TOKEN" "$DOP" env 2>&1)
+ENV_OUT=$(DOP_TOKEN="$TOKEN" "$DOP" env --print-export 2>&1)
 echo "$ENV_OUT" | grep -q "SVC_API_TOKEN='secret_val'" || fail "dop env didn't resolve the grant: $ENV_OUT"
 pass "token works for dop env"
 
@@ -92,20 +97,21 @@ OUT7=$("$DOP" use --print-export CamAdmin 2>&1 || true)
 echo "$OUT7" | grep -qi "admin" || fail "expected admin-session hint, got: $OUT7"
 pass "locked session refused"
 
-echo "=== [8b] non-tty refusal without --print-export (Phase 6)"
+echo "=== [8b] non-tty refusal without --print-export (Phase 6/rc4)"
 # Re-login (step 7 logged out).
 echo -n "$PASS" | "$DOP" admin login --passphrase-stdin >/dev/null
-# Capturing stdout → non-tty. Expect refusal + hint.
-REFUSAL=$("$DOP" use CamAdmin 2>&1 || true)
-echo "$REFUSAL" | grep -q "refusing to print bearer to a non-tty" \
+# For this specific test we need the env escape OFF so the Tier 1
+# refusal path actually runs. Rest of the suite restores it.
+REFUSAL=$(DOP_APPROVAL_PASSPHRASE="" "$DOP" use CamAdmin 2>&1 || true)
+echo "$REFUSAL" | grep -q "refusing to print secret to a non-tty" \
     || fail "expected non-tty refusal, got: $REFUSAL"
-echo "$REFUSAL" | grep -q 'eval "\$(dop use CamAdmin)"' \
+echo "$REFUSAL" | grep -q 'eval "\$(dop use' \
     || fail "refusal missing eval hint, got: $REFUSAL"
-# With --print-export it should succeed.
+# With DOP_APPROVAL_PASSPHRASE set (env-escape), stdout print proceeds.
 OK8B=$("$DOP" use --print-export CamAdmin 2>&1 || true)
 echo "$OK8B" | grep -q "^export DOP_TOKEN=" \
-    || fail "--print-export should emit export line, got: $OK8B"
-pass "non-tty refusal honored; --print-export opts in"
+    || fail "env-escape should emit export line, got: $OK8B"
+pass "non-tty refusal honored; env-escape opts in"
 
 echo "=== [8] audit event use_attached recorded, bearer NOT in log"
 grep -q '"event":"use_attached"' "$AUDIT" || fail "no use_attached event in audit log"

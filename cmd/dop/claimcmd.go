@@ -48,10 +48,12 @@ import (
 	"github.com/mdp/qrterminal/v3"
 	"rsc.io/qr"
 
+	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/agentkey"
 	"github.com/fray/dop/internal/approvalserver"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
+	"github.com/fray/dop/internal/cli/printguard"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/pendingclaim"
 	"github.com/fray/dop/internal/remoteclaim"
@@ -63,6 +65,10 @@ func runClaim(args []string) int {
 	fs := flag.NewFlagSet("claim", flag.ExitOnError)
 	tokenFile := fs.String("token-file", "", "read bearer from file (alternative to $DOP_TOKEN)")
 	shell := fs.Bool("shell", false, "after claim, print `eval $(dop env-shell ...)`-style exports")
+	// v1.14.0-rc4 — same Tier 2 opt-in as other print surfaces. When
+	// --shell AND the environment is non-tty, require --print-export
+	// (and trigger Tier 3 approval popup) before emitting the export.
+	printExport := fs.Bool("print-export", false, "when --shell is set on a non-tty, opts in to printing the export line (triggers an approval popup). Default (unset): refuse on non-tty.")
 	skipApproval := fs.Bool("skip-approval", false, "finalize immediately without out-of-band approval (unsafe for chat handoff)")
 	noTunnel := fs.Bool("no-tunnel", false, "serve the approval page on LAN only (no Cloudflare tunnel)")
 	bindAddr := fs.String("bind", "", "interface to bind the approval server (default: 127.0.0.1 with tunnel, 0.0.0.0 with --no-tunnel)")
@@ -359,6 +365,24 @@ func runClaim(args []string) int {
 		fmt.Fprintf(os.Stderr, "  run: dop exec --agent-name %s -- <cmd>\n", env.Subject)
 	}
 	if *shell {
+		// v1.14.0-rc4 — Tier 1/2/3 gate. Claim itself already went
+		// through approval (that's its whole point); this gate is only
+		// to prevent the POST-CLAIM export-line print from leaking
+		// into a non-tty transcript. The claim mutation is intact
+		// regardless — only the extra export print is gated.
+		pathsClaim, _ := config.Resolve()
+		clientClaim := admin.NewClient(admin.SockPath(pathsClaim))
+		if err := printguard.Guard(printguard.Request{
+			Kind:      printguard.KindClaim,
+			Subject:   env.Subject,
+			PrintFlag: *printExport,
+			Out:       os.Stdout,
+			Paths:     pathsClaim,
+			Client:    clientClaim,
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "  (claim succeeded; export line NOT printed. Set DOP_TOKEN from your bearer env, or re-run with --print-export to approve the stdout print.)")
+			return 0
+		}
 		fmt.Printf("export DOP_TOKEN=%s\n", bearer)
 	}
 	return 0

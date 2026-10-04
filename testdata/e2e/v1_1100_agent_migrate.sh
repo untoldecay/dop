@@ -22,6 +22,7 @@ export DOP_NO_KEYCHAIN=1
 export DOP_ALLOW_FILE_KEYS=1
 
 PASS="pass-word-long-enough"
+export DOP_APPROVAL_PASSPHRASE="$PASS-approve"
 CFG_ROOT="$HOME/Library/Application Support/dop"
 
 echo "=== [1] setup + issue a bearer + claim it (starts as ed25519)"

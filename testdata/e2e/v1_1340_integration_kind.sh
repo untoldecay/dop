@@ -26,6 +26,7 @@ export DOP_ALLOW_FILE_KEYS=1
 
 PASS="pass-word-long-enough"
 APPROVE="$PASS-approve"
+export DOP_APPROVAL_PASSPHRASE="$APPROVE"
 VAULT_DIR="$HOME/Library/Application Support/dop/vault"
 
 echo "=== [1] admin init + login"

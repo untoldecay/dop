@@ -14,6 +14,7 @@ export HOME="$WORKROOT/home"
 mkdir -p "$HOME"
 export DOP_NO_TUI=1
 PASS="the-passphrase-15chars"
+export DOP_APPROVAL_PASSPHRASE="$PASS-approve"
 
 echo "=== [1] setup"
 printf "%s\n%s\n" "$PASS" "$PASS-approve" | "$DOP" admin init --passphrase-stdin >/dev/null
