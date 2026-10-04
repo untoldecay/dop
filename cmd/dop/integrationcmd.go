@@ -472,6 +472,10 @@ func runIntegrationAdd(args []string) int {
 	fs.Var(&tokens, "token", "upstream token in the form NAME=VALUE:SCOPE_NOTE (repeatable)")
 	var metadata stringSliceFlag
 	fs.Var(&metadata, "metadata", "extra metadata KEY=VALUE (repeatable)")
+	// v1.14.0-rc3 — grouping metadata (symmetric with Grant). No
+	// inheritance to grants; purely cosmetic for the integration list.
+	projectsCSV := fs.String("projects", "", "comma-separated project tags on the integration (grouping only, no inheritance)")
+	tagsCSV := fs.String("tags", "", "comma-separated free-form tags on the integration (grouping only, no inheritance)")
 	// v1.13.0-rc12 — protected credentials. Admin passphrase required
 	// at save when set. Owner locked to current admin pubkey.
 	protected := fs.Bool("protected", false, "mark this integration as owner-locked — only the current admin can modify it (requires approval passphrase)")
@@ -704,6 +708,19 @@ func runIntegrationAdd(args []string) int {
 	if *probeEndpoints {
 		runProbe(paths, &meta, effectiveKind, key)
 	}
+	// v1.14.0-rc3 — projects/tags: pass-through means "unset flag keeps
+	// existing"; empty-string flag means "clear"; nonempty means "replace".
+	// Mirrors how metadata handles updates.
+	integProjects := existing.Projects
+	integTags := existing.Tags
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "projects":
+			integProjects = splitCSV(*projectsCSV)
+		case "tags":
+			integTags = splitCSV(*tagsCSV)
+		}
+	})
 	v.Integrations[key] = vault.Integration{
 		Description: *desc,
 		Metadata:    meta,
@@ -711,6 +728,8 @@ func runIntegrationAdd(args []string) int {
 		Protected:   protect,
 		Owner:       owner,
 		Kind:        effectiveKind,
+		Projects:    integProjects,
+		Tags:        integTags,
 	}
 
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {

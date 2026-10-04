@@ -107,6 +107,10 @@ type Integration struct {
 	// as IntegrationKindAPI for backward-compat (every pre-rc13
 	// integration had a base_url and was API-style).
 	Kind string `yaml:"kind,omitempty"` // IntegrationKind* constants below
+	// v1.14.0-rc3 — symmetric with Grant.Projects/Tags. Grouping
+	// metadata only, no inheritance to grants (per rc3-plan.md Phase 4).
+	Projects []string `yaml:"projects,omitempty"`
+	Tags     []string `yaml:"tags,omitempty"`
 }
 
 // Integration kinds. Drive the shape of the env bundle delivered to
