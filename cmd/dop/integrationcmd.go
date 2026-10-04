@@ -23,7 +23,7 @@ import (
 // runIntegration is the subcommand dispatcher.
 func runIntegration(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop integration <add|list|remove|remove-token|set-token>")
+		fmt.Fprintln(os.Stderr, "usage: dop integration <add|list|remove|remove-token|set-token|rename>")
 		return 2
 	}
 	switch args[0] {
@@ -37,10 +37,105 @@ func runIntegration(args []string) int {
 		return runIntegrationRemoveToken(args[1:])
 	case "set-token":
 		return runIntegrationSetToken(args[1:])
+	case "rename":
+		return runIntegrationRename(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop integration: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+// runIntegrationRename — v1.14.0-rc3 Phase 5. Renames the map key for
+// an integration and rewrites every grant that references it. Must be
+// atomic from the operator's perspective: either both the integration
+// map AND every referring grant get the new name, or nothing changes.
+//
+// Caveat (documented, intentional): already-issued capability bundles
+// carry the old integration name baked into their bundle hash. The
+// bundle is cryptographically signed, so we can't rewrite it. Existing
+// bearers keep working (resolveBearer doesn't look up the integration
+// by name), but a `dop token show` on an old bearer will surface the
+// old reference. Operator can reissue to refresh.
+func runIntegrationRename(args []string) int {
+	fs := flag.NewFlagSet("integration rename", flag.ExitOnError)
+	from := fs.String("from", "", "current integration name (required)")
+	to := fs.String("to", "", "new integration name (required)")
+	_ = fs.Parse(args)
+	if *from == "" || *to == "" {
+		fmt.Fprintln(os.Stderr, "usage: dop integration rename --from <old> --to <new>")
+		return 2
+	}
+
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration rename: %v\n", err)
+		return 1
+	}
+	v, vp, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration rename: %v\n", err)
+		return 1
+	}
+
+	// Resolve the current key via the same slug normalizer that
+	// `integration add` uses so operators can call this with any surface
+	// form of the old name.
+	oldKey, ok := v.FindIntegrationKey(*from)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "dop integration rename: unknown integration %q\n", *from)
+		return 1
+	}
+	newKey := vault.NormalizeIntegrationName(*to)
+	if newKey == "" {
+		fmt.Fprintf(os.Stderr, "dop integration rename: --to normalizes to empty, pick a different name\n")
+		return 1
+	}
+	if newKey == oldKey {
+		fmt.Fprintf(os.Stderr, "dop integration rename: %q and %q normalize to the same key %q — nothing to do\n", *from, *to, oldKey)
+		return 0
+	}
+	if _, exists := v.Integrations[newKey]; exists {
+		fmt.Fprintf(os.Stderr, "dop integration rename: target name %q (normalized: %q) already exists — remove or pick a different name first\n", *to, newKey)
+		return 1
+	}
+	existing := v.Integrations[oldKey]
+	// Protection check: only the owner can rename a protected integration.
+	if err := requireProtectionOwner(client, "integration "+oldKey, existing.Protected, existing.Owner); err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration rename: %v\n", err)
+		return 1
+	}
+
+	// Rewrite the integration map.
+	v.Integrations[newKey] = existing
+	delete(v.Integrations, oldKey)
+
+	// Rewrite every grant that references the old name.
+	referrers := 0
+	for id, g := range v.Grants {
+		if g.Integration == oldKey {
+			g.Integration = newKey
+			v.Grants[id] = g
+			referrers++
+		}
+	}
+
+	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration rename: %v\n", err)
+		return 1
+	}
+	audit.Append(paths, audit.Event{
+		Kind:    audit.EventIntegrationRenamed,
+		Subject: newKey,
+		Extra: map[string]string{
+			"old_name":  oldKey,
+			"new_name":  newKey,
+			"referrers": fmt.Sprintf("%d", referrers),
+		},
+	})
+	fmt.Fprintf(os.Stderr, "dop integration rename: %q → %q (updated %d grant reference(s))\n", oldKey, newKey, referrers)
+	fmt.Fprintln(os.Stderr, "  note: existing bearers keep the old integration name in their bundle. Reissue to refresh.")
+	return 0
 }
 
 func runIntegrationList(args []string) int {
