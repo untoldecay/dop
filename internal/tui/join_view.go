@@ -214,7 +214,7 @@ func (v *joinView) launch() tea.Cmd {
 			strings.TrimSpace(v.urlBuf.String()),
 			strings.TrimSpace(v.pinBuf.String()),
 		)
-		v.cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		v.cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		stdin, err := v.cmd.StdinPipe()
 		if err != nil {
 			return inviteDone{rc: 1, err: err.Error()}

@@ -210,7 +210,7 @@ func (v *loginView) login(passphrase string) tea.Cmd {
 			return loginResultMsg{err: err.Error()}
 		}
 		cmd := exec.Command(self, "admin", "login", "--passphrase-stdin")
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		cmd.Stdin = strings.NewReader(passphrase)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -677,7 +677,7 @@ func (v *issueView) watchForClaimAndReseal() tea.Cmd {
 			// Claim completed. Run reseal.
 			self, _ := os.Executable()
 			cmd := exec.Command(self, "token", "reseal", c.LookupID[:12])
-			cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+			cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout = &stdout
 			cmd.Stderr = &stderr
@@ -710,7 +710,7 @@ func (v *issueView) issue() tea.Cmd {
 			args = append(args, "--portable")
 		}
 		cmd := exec.Command(self, args...)
-		cmdEnv := append(os.Environ(), "DOP_NO_TUI=1")
+		cmdEnv := append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		// v1.13 — when the prefs toggle is on, flow DOP_ALLOW_FILE_KEYS
 		// through so the agent's claim can land a P-256 file-backed
 		// key (prereq for `token reseal` + direct availability).
@@ -1469,7 +1469,7 @@ func (v *listView) doGrantMutation() tea.Cmd {
 		applied := []string{}
 		for _, gid := range picked {
 			cmd := exec.Command(self, "token", op+"-grant", target, gid)
-			cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+			cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 			var stderr bytes.Buffer
 			cmd.Stderr = &stderr
 			if err := cmd.Run(); err != nil {
@@ -1501,7 +1501,7 @@ func (v *listView) doReseal() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "token", "reseal", target)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
@@ -1644,7 +1644,7 @@ func (v *listView) doRepin() tea.Cmd {
 			"--subject", subject,
 			"--token-file", tmp.Name(),
 			"--pin-ttl", ttl)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
@@ -1727,7 +1727,7 @@ func (v *listView) doRevoke() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "token", "revoke", target)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {

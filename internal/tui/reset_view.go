@@ -95,7 +95,7 @@ func (v *resetView) launch() tea.Cmd {
 			return resetDone{rc: 1, err: err.Error()}
 		}
 		cmd := exec.Command(self, "admin", "reset", "--force")
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err = cmd.Run()

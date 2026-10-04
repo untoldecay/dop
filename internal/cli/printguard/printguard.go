@@ -89,6 +89,20 @@ func Guard(req Request) error {
 	if isTTY {
 		return nil
 	}
+	// v1.14.0-rc4b — TUI subprocess bypass. The TUI shells out to this
+	// CLI binary with stdout piped back to the TUI render path. From the
+	// child's perspective, stdout is a pipe (not a tty) — Tier 1 would
+	// refuse and the TUI's handoff screen would be empty. But the TUI
+	// IS the interactive operator surface; there's no LLM-capture leak
+	// path when the human is literally driving the TUI. The TUI sets
+	// DOP_FROM_TUI=1 on every shell-out, which we treat as tty-equivalent.
+	//
+	// Threat model: a shell operator could forge DOP_FROM_TUI=1 to bypass
+	// the gate, but that's explicitly choosing to disable the protection
+	// — same category as setting DOP_APPROVAL_PASSPHRASE in env.
+	if os.Getenv("DOP_FROM_TUI") == "1" {
+		return nil
+	}
 	// Env escape hatch (DOP_APPROVAL_PASSPHRASE): set in env means
 	// "I pre-approve this print; verify my passphrase and proceed."
 	// Bypasses both Tier 1 (print-flag check) AND Tier 3 (interactive

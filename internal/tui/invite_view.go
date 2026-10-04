@@ -195,7 +195,7 @@ func (v *inviteView) launch() tea.Cmd {
 			args = append(args, "--share-identity")
 		}
 		v.cmd = exec.Command(self, args...)
-		v.cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		v.cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		stdin, err := v.cmd.StdinPipe()
 		if err != nil {
 			return inviteDone{rc: 1, err: err.Error()}
