@@ -112,12 +112,12 @@ type addIntegrationView struct {
 	paths  *config.Paths
 
 	step       int
-	nameBuf    strings.Builder
-	descBuf    strings.Builder
-	urlBuf     strings.Builder
-	credBuf    strings.Builder
-	valueBuf   strings.Builder
-	scopeBuf   strings.Builder
+	nameBuf    textField
+	descBuf    textField
+	urlBuf     textField
+	credBuf    textField
+	valueBuf   textField
+	scopeBuf   textField
 	credEdited bool // true once the operator changed the prefill
 
 	// v1.13.0-rc6 — service picker at step 0. existingServices lists
@@ -145,7 +145,7 @@ type addIntegrationView struct {
 	// protectedChoice is true.
 	protectPickCursor int
 	protectedChoice   bool
-	passphraseBuf     strings.Builder
+	passphraseBuf     textField
 
 	// v1.13.0-rc13 — Kind preset picker (step 1). The kind drives the
 	// label + behavior of the KindSlot step (step 3). urlBuf is reused
@@ -172,7 +172,7 @@ type addIntegrationView struct {
 	advancedPickCursor int
 	advancedChoice     bool  // false = skip, true = open the sub-form
 	advFieldIdx        int   // which applicable sub-field is active
-	advBufs            [6]strings.Builder
+	advBufs            [6]textField
 
 	err   string
 	flash string
@@ -377,8 +377,7 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					v.scopeBuf.Reset()
 					return v, nil
 				}
-				v.scopeBuf.Reset()
-				v.scopeBuf.WriteString(sel.value)
+				v.scopeBuf.SetString(sel.value)
 				v.step = integAddStepProtect
 				return v, nil
 			}
@@ -504,7 +503,14 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			bufIdx := advFieldSpecs[fields[v.advFieldIdx]].bufIdx
 			buf := &v.advBufs[bufIdx]
-			switch mm.String() {
+			key := mm.String()
+			// rc6f — caret/edit keys consumed by the field first.
+			switch key {
+			case "left", "right", "home", "end", "ctrl+a", "ctrl+e", "delete", "ctrl+d", "backspace":
+				buf.handleKey(key, mm.Runes)
+				return v, nil
+			}
+			switch key {
 			case "esc":
 				v.step = integAddStepAdvanced
 				return v, nil
@@ -527,15 +533,9 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					v.step = integAddStepSave
 				}
-			case "backspace":
-				s := buf.String()
-				if len(s) > 0 {
-					buf.Reset()
-					buf.WriteString(s[:len(s)-1])
-				}
 			default:
 				if len(mm.Runes) > 0 {
-					buf.WriteString(string(mm.Runes))
+					buf.InsertRunes(mm.Runes)
 				}
 			}
 			// v1.13.0-rc17 fix: any content in a sub-form field flips
@@ -555,7 +555,11 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// only visited when protection = protected. Enter advances to
 		// Save; empty passphrase is refused.
 		if v.step == integAddStepPassphrase {
-			switch mm.String() {
+			key := mm.String()
+			switch key {
+			case "left", "right", "home", "end", "ctrl+a", "ctrl+e", "delete", "ctrl+d":
+				v.passphraseBuf.handleKey(key, mm.Runes)
+				return v, nil
 			case "enter":
 				if v.passphraseBuf.Len() == 0 {
 					v.err = "passphrase required for protected integrations"
@@ -566,10 +570,8 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				v.step = integAddStepAdvanced
 				return v, nil
 			case "backspace":
-				s := v.passphraseBuf.String()
-				if len(s) > 0 {
-					v.passphraseBuf.Reset()
-					v.passphraseBuf.WriteString(s[:len(s)-1])
+				if v.passphraseBuf.Len() > 0 {
+					v.passphraseBuf.Backspace()
 				} else {
 					// Empty + backspace → return to protection picker.
 					v.step = integAddStepProtect
@@ -577,7 +579,7 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return v, nil
 			default:
 				if len(mm.Runes) > 0 {
-					v.passphraseBuf.WriteString(string(mm.Runes))
+					v.passphraseBuf.InsertRunes(mm.Runes)
 				}
 			}
 			return v, nil
@@ -607,8 +609,7 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// so the Kind step isn't re-prompted when just adding a
 				// new credential to a service we already know about.
 				svc := v.existingServices[v.servicePickCursor-1]
-				v.nameBuf.Reset()
-				v.nameBuf.WriteString(svc)
+				v.nameBuf.SetString(svc)
 				if vlt, _, err := loadVaultForListing(v.client, v.paths); err == nil && vlt != nil {
 					if integ, ok := vlt.Integrations[svc]; ok {
 						v.kindChoice = vault.IntegrationKindOf(integ)
@@ -620,7 +621,18 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return v, nil
 		}
-		switch mm.String() {
+		key := mm.String()
+		// rc6f — in-field caret keys get consumed by the active text field
+		// before step navigation. Only applies to the free-text steps
+		// (Name/Desc/KindSlot/Cred/Value/Scope).
+		if v.step >= integAddStepName && v.step <= integAddStepScope {
+			switch key {
+			case "left", "right", "home", "end", "ctrl+a", "ctrl+e", "delete", "ctrl+d":
+				v.curBuf().handleKey(key, mm.Runes)
+				return v, nil
+			}
+		}
+		switch key {
 		case "enter":
 			return v.advance()
 		case "tab", "down":
@@ -634,10 +646,8 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "backspace":
 			buf := v.curBuf()
-			s := buf.String()
-			if len(s) > 0 {
-				buf.Reset()
-				buf.WriteString(s[:len(s)-1])
+			if buf.Len() > 0 {
+				buf.Backspace()
 			} else if v.step == integAddStepName && !v.serviceMode {
 				// Empty name + backspace returns to the service picker.
 				v.serviceMode = true
@@ -650,7 +660,7 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		default:
 			if len(mm.Runes) > 0 && v.step >= integAddStepName && v.step <= integAddStepScope {
-				v.curBuf().WriteString(string(mm.Runes))
+				v.curBuf().InsertRunes(mm.Runes)
 				if v.step == integAddStepCred {
 					v.credEdited = true
 				}
@@ -660,7 +670,7 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return v, nil
 }
 
-func (v *addIntegrationView) curBuf() *strings.Builder {
+func (v *addIntegrationView) curBuf() *textField {
 	switch v.step {
 	case integAddStepName:
 		return &v.nameBuf
@@ -675,7 +685,7 @@ func (v *addIntegrationView) curBuf() *strings.Builder {
 	case integAddStepScope:
 		return &v.scopeBuf
 	}
-	var scratch strings.Builder
+	var scratch textField
 	return &scratch
 }
 
@@ -685,7 +695,7 @@ func (v *addIntegrationView) curBuf() *strings.Builder {
 // need, and it makes the redundancy ("why two names?") obvious.
 func (v *addIntegrationView) prefillIfNeeded() {
 	if v.step == integAddStepCred && v.credBuf.Len() == 0 && !v.credEdited {
-		v.credBuf.WriteString(strings.TrimSpace(v.nameBuf.String()))
+		v.credBuf.SetString(strings.TrimSpace(v.nameBuf.String()))
 	}
 }
 
@@ -1022,15 +1032,28 @@ func (v *addIntegrationView) View() string {
 			style = cursorSt
 		}
 		b.WriteString(style.Render(r.label) + ": ")
-		display := r.value
-		if r.mask && !(i == v.step) {
-			display = strings.Repeat("•", len(r.value))
-		} else if r.mask && i == v.step {
-			display = strings.Repeat("•", len(r.value))
-		}
-		b.WriteString(display)
+		// rc6f — on the active text-field row, split the buffer at the
+		// cursor so the caret glyph renders in place. Non-text rows
+		// (pickers, status) still use the pre-rendered r.value.
 		if i == v.step {
-			b.WriteString(cursorSt.Render("▎"))
+			if buf := v.curBuf(); buf != nil && i >= integAddStepName && i <= integAddStepScope {
+				before, after := buf.Split()
+				if r.mask {
+					before, after = buf.SplitMasked("•")
+				}
+				b.WriteString(before + cursorSt.Render("▎") + after)
+			} else if i == integAddStepPassphrase {
+				before, after := v.passphraseBuf.SplitMasked("•")
+				b.WriteString(before + cursorSt.Render("▎") + after)
+			} else {
+				b.WriteString(r.value + cursorSt.Render("▎"))
+			}
+		} else {
+			if r.mask {
+				b.WriteString(strings.Repeat("•", len(r.value)))
+			} else {
+				b.WriteString(r.value)
+			}
 		}
 		b.WriteString("\n")
 		if i == v.step && r.hint != "" {
@@ -1098,9 +1121,11 @@ func (v *addIntegrationView) View() string {
 			if i == v.advFieldIdx {
 				style = cursorSt
 			}
-			b.WriteString(style.Render(spec.label) + ": " + buf.String())
 			if i == v.advFieldIdx {
-				b.WriteString(cursorSt.Render("▎"))
+				before, after := buf.Split()
+				b.WriteString(style.Render(spec.label) + ": " + before + cursorSt.Render("▎") + after)
+			} else {
+				b.WriteString(style.Render(spec.label) + ": " + buf.String())
 			}
 			b.WriteString("\n")
 			if i == v.advFieldIdx {

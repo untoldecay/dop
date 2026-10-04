@@ -1122,6 +1122,14 @@ type listView struct {
 	grantPickCursor   int
 	grantPickSelected map[string]bool
 	pendingGrantOp    string
+	// rc6f — passphrase sub-step for add-grant / remove-grant when the
+	// picker's selection includes a protected grant. Mirrors the issue
+	// path's protectedPassBuf (rc6c [S2] fix). grantPickProtectedMap
+	// tells the picker which grant IDs are protected without re-reading
+	// the vault; populated at prepareGrantPicker time.
+	grantPickProtectedMap map[string]bool
+	grantPickPassBuf      textField
+	grantPickPassPhase    bool // true once protected picks required a passphrase screen
 
 	// v1.13.0-rc9 — repin form state. Two fields: bearer paste +
 	// PIN TTL (preset picker). pinResult is set once the CLI returns.
@@ -1479,15 +1487,28 @@ func (v *listView) prepareGrantPicker(op string) bool {
 	v.grantPickCursor = 0
 	v.grantPickList = nil
 	v.grantPickSelected = map[string]bool{}
+	// rc6f — reset passphrase state so a prior session doesn't bleed in.
+	v.grantPickProtectedMap = map[string]bool{}
+	v.grantPickPassBuf.Reset()
+	v.grantPickPassPhase = false
 
+	// Vault lookup serves two purposes: enumerate add-candidates (op=add)
+	// AND seed the protected-flag map for both ops.
+	vlt, _, verr := loadVaultForListing(v.client, v.paths)
+	if verr == nil && vlt != nil {
+		for gid, g := range vlt.Grants {
+			if g.Protected {
+				v.grantPickProtectedMap[gid] = true
+			}
+		}
+	}
 	if op == "remove" {
 		v.grantPickList = append(v.grantPickList, cap.Grants...)
 		sort.Strings(v.grantPickList)
 		return len(v.grantPickList) > 0
 	}
 	// op == "add": vault grants NOT already on this token.
-	vlt, _, err := loadVaultForListing(v.client, v.paths)
-	if err != nil || vlt == nil {
+	if verr != nil || vlt == nil {
 		return false
 	}
 	have := map[string]bool{}
@@ -1501,6 +1522,19 @@ func (v *listView) prepareGrantPicker(op string) bool {
 	}
 	sort.Strings(v.grantPickList)
 	return len(v.grantPickList) > 0
+}
+
+// grantPickProtectedCount returns the number of currently-selected
+// grants that carry Protected=true. Non-zero on enter means the
+// picker drops into the passphrase sub-step before shelling out.
+func (v *listView) grantPickProtectedCount() int {
+	n := 0
+	for gid, sel := range v.grantPickSelected {
+		if sel && v.grantPickProtectedMap[gid] {
+			n++
+		}
+	}
+	return n
 }
 
 // doGrantMutation shells out to `dop token add-grant` or `remove-grant`
@@ -1520,12 +1554,30 @@ func (v *listView) doGrantMutation() tea.Cmd {
 			picked = append(picked, gid)
 		}
 	}
+	// rc6f — pipe passphrase per-call when the picked set includes a
+	// protected grant (shadow of [S2]: CLI's promptProtectionPassphrase
+	// reads from the terminal; TUI subprocesses have no tty on stdin).
+	protectedSet := map[string]bool{}
+	for _, gid := range picked {
+		if v.grantPickProtectedMap[gid] {
+			protectedSet[gid] = true
+		}
+	}
+	passphrase := v.grantPickPassBuf.String()
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		applied := []string{}
 		for _, gid := range picked {
-			cmd := exec.Command(self, "token", op+"-grant", target, gid)
+			args := []string{"token", op + "-grant"}
+			if protectedSet[gid] {
+				args = append(args, "--passphrase-stdin")
+			}
+			args = append(args, target, gid)
+			cmd := exec.Command(self, args...)
 			cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+			if protectedSet[gid] {
+				cmd.Stdin = strings.NewReader(passphrase + "\n")
+			}
 			var stderr bytes.Buffer
 			cmd.Stderr = &stderr
 			if err := cmd.Run(); err != nil {
@@ -1572,6 +1624,43 @@ func (v *listView) doReseal() tea.Cmd {
 // v1.13.0-rc5: multi-select — ↑↓ to move, space to toggle, enter to
 // apply the whole selection, esc to cancel.
 func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// rc6f — passphrase sub-step: entered when the picker's selection
+	// contains at least one protected grant. All other keys are routed
+	// through the field for in-line caret editing.
+	if v.grantPickPassPhase {
+		key := mm.String()
+		switch key {
+		case "left", "right", "home", "end", "ctrl+a", "ctrl+e", "delete", "ctrl+d":
+			v.grantPickPassBuf.handleKey(key, mm.Runes)
+			return v, nil
+		case "enter":
+			if v.grantPickPassBuf.Len() == 0 {
+				v.err = "approval passphrase required for the protected grant(s)"
+				return v, nil
+			}
+			v.err = ""
+			v.mode = listModeRun
+			return v, v.doGrantMutation()
+		case "backspace":
+			if v.grantPickPassBuf.Len() > 0 {
+				v.grantPickPassBuf.Backspace()
+			} else {
+				// Empty + backspace → return to picker.
+				v.grantPickPassPhase = false
+			}
+			return v, nil
+		case "esc":
+			// Back to the multi-select picker; keep selection + buffer.
+			v.grantPickPassPhase = false
+			v.err = ""
+			return v, nil
+		default:
+			if len(mm.Runes) > 0 {
+				v.grantPickPassBuf.InsertRunes(mm.Runes)
+			}
+			return v, nil
+		}
+	}
 	switch mm.String() {
 	case "up", "k":
 		if v.grantPickCursor > 0 {
@@ -1605,6 +1694,13 @@ func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		v.err = ""
+		// rc6f — if any protected grants are in the selection, require
+		// the admin's approval passphrase before shelling out.
+		if v.grantPickProtectedCount() > 0 {
+			v.grantPickPassPhase = true
+			v.grantPickPassBuf.Reset()
+			return v, nil
+		}
 		v.mode = listModeRun
 		return v, v.doGrantMutation()
 	case "esc", "q":
@@ -1612,6 +1708,9 @@ func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		v.grantPickList = nil
 		v.grantPickSelected = nil
 		v.pendingGrantOp = ""
+		v.grantPickProtectedMap = nil
+		v.grantPickPassBuf.Reset()
+		v.grantPickPassPhase = false
 		v.err = ""
 	}
 	return v, nil
@@ -2144,9 +2243,27 @@ func (v *listView) viewGrantPick() string {
 			prefix = "  " + cursorSt.Render("➤ ")
 			label = cursorSt.Render(gid)
 		}
-		b.WriteString(prefix + marker + "  " + label + "\n")
+		// rc6f — flag protected grants with 🔒 so operators know a
+		// passphrase will be requested when they commit the selection.
+		lockMark := ""
+		if v.grantPickProtectedMap[gid] {
+			lockMark = "  " + mutedSt.Render("🔒")
+		}
+		b.WriteString(prefix + marker + "  " + label + lockMark + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move | space toggle | a all | n none | enter apply | esc back"))
+	// rc6f — passphrase sub-step. Rendered under the picker once the
+	// operator has pressed enter AND the selection includes a protected
+	// grant. Mirrors the issueView passphrase row.
+	if v.grantPickPassPhase {
+		b.WriteString("\n")
+		n := v.grantPickProtectedCount()
+		passLbl := cursorSt.Render(fmt.Sprintf("Approval passphrase (%d protected grant(s))", n))
+		before, after := v.grantPickPassBuf.SplitMasked("•")
+		b.WriteString(passLbl + ": " + before + cursorSt.Render("▎") + after + "\n")
+		b.WriteString("\n" + helpSt.Render("enter apply | ←→ move caret | backspace delete | esc back to picker"))
+	} else {
+		b.WriteString("\n" + helpSt.Render("↑↓ move | space toggle | a all | n none | enter apply | esc back"))
+	}
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
 	}
