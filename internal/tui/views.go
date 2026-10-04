@@ -288,6 +288,12 @@ type issueView struct {
 	// capability record for later `dop use <subject>` recall.
 	portableChoice     bool
 	portablePickCursor int
+
+	// rc6c — passphrase step for protected grants (rc3-smoke-retakes [S2]).
+	// Shown as field 4 ONLY when at least one selected grant is protected.
+	// Otherwise step 3 (portable) commits directly to issue(). The typed
+	// value is piped to the subprocess via --passphrase-stdin.
+	protectedPassBuf strings.Builder
 }
 
 type grantRow struct {
@@ -305,6 +311,12 @@ type tuiGrantInfo struct {
 	Prefix      string   // resolved via EffectivePrefix()
 	Tags        []string
 	Projects    []string
+	// rc6c — carried so the issue flow can detect protected grants and
+	// insert a passphrase step before shelling out. CLI's issue path
+	// uses promptProtectionPassphrase which reads from a tty; without
+	// --passphrase-stdin + a piped passphrase, it errors on the TUI's
+	// non-tty subprocess stdin. See rc3-smoke-retakes [S2].
+	Protected bool
 }
 
 func newIssueView(c *admin.Client, p *config.Paths) *issueView {
@@ -427,6 +439,21 @@ func (v *issueView) collidingPrefixes() map[string][]string {
 		}
 	}
 	return out
+}
+
+// rc6c — count protected grants in the current selection. Non-zero
+// → inject a passphrase step before issue (rc3-smoke-retakes [S2]).
+func (v *issueView) protectedSelectedCount() int {
+	n := 0
+	for id, sel := range v.grantSelected {
+		if !sel {
+			continue
+		}
+		if info, ok := v.grantByID[id]; ok && info.Protected {
+			n++
+		}
+	}
+	return n
 }
 
 func (v *issueView) selectedGrantCount() int {
@@ -607,6 +634,8 @@ func (v *issueView) currentBuf() *strings.Builder {
 		return &v.grantsBuf
 	case 2:
 		return &v.expiryBuf
+	case 4:
+		return &v.protectedPassBuf
 	}
 	return &strings.Builder{}
 }
@@ -616,11 +645,19 @@ func (v *issueView) advance() (tea.Model, tea.Cmd) {
 	// Step 0/1 require a buffer value; step 2 is the expiry picker and
 	// step 3 is the portable picker — both commit via Update's picker
 	// path, so the buffer check doesn't apply.
+	// rc6c — step 4 is the protected-grant passphrase, required when
+	// any selected grant is protected (rc3-smoke-retakes [S2]). Text
+	// input, must be non-empty.
 	if val == "" && v.step != 2 && v.step != 3 {
 		return v, nil
 	}
 	v.step++
-	if v.step == 4 {
+	// After portable step: if any selected grant is protected, insert
+	// the passphrase step; else go straight to issue.
+	if v.step == 4 && v.protectedSelectedCount() == 0 {
+		return v, v.issue()
+	}
+	if v.step == 5 {
 		return v, v.issue()
 	}
 	return v, nil
@@ -700,6 +737,10 @@ func (v *issueView) issue() tea.Cmd {
 	v.subject = name
 	prefs := v.prefs
 	portable := v.portableChoice
+	// rc6c — pipe protected-grant passphrase when any grant is protected.
+	// Non-empty only after the step 4 passphrase field was shown.
+	protectedPass := v.protectedPassBuf.String()
+	needsPass := v.protectedSelectedCount() > 0
 	return func() tea.Msg {
 		self, err := os.Executable()
 		if err != nil {
@@ -708,6 +749,9 @@ func (v *issueView) issue() tea.Cmd {
 		args := []string{"token", "issue", "--grants", grants, "--name", name, "--expires", expires}
 		if portable {
 			args = append(args, "--portable")
+		}
+		if needsPass {
+			args = append(args, "--passphrase-stdin")
 		}
 		cmd := exec.Command(self, args...)
 		cmdEnv := append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
@@ -718,6 +762,9 @@ func (v *issueView) issue() tea.Cmd {
 			cmdEnv = append(cmdEnv, "DOP_ALLOW_FILE_KEYS=1")
 		}
 		cmd.Env = cmdEnv
+		if needsPass {
+			cmd.Stdin = strings.NewReader(protectedPass + "\n")
+		}
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
@@ -938,6 +985,14 @@ func (v *issueView) View() string {
 		}
 	}
 
+	// rc6c — step 4: approval passphrase for protected grants.
+	if v.step == 4 && v.protectedSelectedCount() > 0 {
+		masked := strings.Repeat("•", v.protectedPassBuf.Len())
+		hint := fmt.Sprintf("approval passphrase (issue bearer containing %d protected grant(s))", v.protectedSelectedCount())
+		b.WriteString("\n" + cursorSt.Render("Approval passphrase") + "  " + mutedSt.Render("· "+hint) + "\n")
+		b.WriteString("    " + masked + cursorSt.Render("▎") + "\n")
+	}
+
 	if pickerAtStep1 {
 		b.WriteString("\n" + helpSt.Render("↑↓ move | space toggle | a section | A all | n none | enter next | esc cancel"))
 	} else if pickerAtStep2 {
@@ -985,6 +1040,7 @@ func loadGrantsForList(client *admin.Client, paths *config.Paths) ([]string, []g
 			Prefix:      g.EffectivePrefix(),
 			Tags:        append([]string(nil), g.Tags...),
 			Projects:    append([]string(nil), g.Projects...),
+			Protected:   g.Protected,
 		}
 	}
 	sort.Strings(ids)
