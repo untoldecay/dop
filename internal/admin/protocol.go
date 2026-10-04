@@ -31,13 +31,20 @@ type Response struct {
 // Phase 2 has no backwards-compat concerns because there are no other
 // callers yet.
 const (
-	OpStatus          = "status"
-	OpKeepAlive       = "keep_alive"
-	OpLogout          = "logout"
-	OpSign            = "sign"
-	OpDecryptVault    = "decrypt_vault" // Phase 3
-	OpEncryptVault    = "encrypt_vault" // Phase 3
-	OpUnwrapPortable  = "unwrap_portable" // v1.14.0-rc1 — `dop use`
+	OpStatus         = "status"
+	OpKeepAlive      = "keep_alive"
+	OpLogout         = "logout"
+	OpSign           = "sign"
+	OpDecryptVault   = "decrypt_vault"   // Phase 3
+	OpEncryptVault   = "encrypt_vault"   // Phase 3
+	OpUnwrapPortable = "unwrap_portable" // v1.14.0-rc1 — `dop use`
+	// v1.14.0-rc4 — local approval popup. Daemon runs osascript
+	// in-process, verifies the typed passphrase against approval.hash,
+	// returns decision synchronously. The passphrase never leaves the
+	// daemon process. Callers (print surfaces + claim flow) use this
+	// as the LOCAL fast-path; they fall back to the tunnel+phone flow
+	// when the daemon isn't reachable or the popup times out.
+	OpApprovalPopup = "approval_popup"
 )
 
 // StatusResp is the payload of an `OpStatus` response.
@@ -91,6 +98,36 @@ type UnwrapPortableReq struct {
 // opaque enough that base64 is the clean carrier).
 type UnwrapPortableResp struct {
 	PlaintextB64 string `json:"plaintext_b64"`
+}
+
+// ApprovalPopupReq — v1.14.0-rc4. Caller supplies the human-readable
+// prompt text that will appear in the OS dialog. The daemon decides
+// which platform-specific dialog to render.
+//
+// `Kind` is a short tag (`claim`, `print_use`, `print_issue`, `print_env`)
+// that lets the daemon customize the dialog title AND audit the
+// decision with the right event. `Subject` is the specific thing being
+// approved (bearer subject, grant id, etc.) — surfaces in both the
+// dialog and the audit event.
+type ApprovalPopupReq struct {
+	Kind       string `json:"kind"`
+	Subject    string `json:"subject"`
+	PromptText string `json:"prompt_text"`
+	// TimeoutMs bounds the dialog's wait. 0 → daemon default (60s).
+	TimeoutMs int `json:"timeout_ms,omitempty"`
+}
+
+// ApprovalPopupResp — the daemon's verdict.
+//
+// Approved = passphrase typed and verified.
+// Denied   = operator clicked Deny.
+// Timeout  = dialog didn't close within TimeoutMs.
+// Unsupported = running on a platform without a native dialog (Linux,
+//               headless container, DOP_NO_POPUP=1). Caller MUST fall
+//               back to the tunnel+phone flow.
+type ApprovalPopupResp struct {
+	Decision string `json:"decision"` // "approved" | "denied" | "timeout" | "unsupported"
+	Reason   string `json:"reason,omitempty"`
 }
 
 // --- Wire helpers ---

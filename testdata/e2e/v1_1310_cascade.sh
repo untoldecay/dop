@@ -22,6 +22,7 @@ export DOP_NO_KEYCHAIN=1
 export DOP_ALLOW_FILE_KEYS=1
 
 PASS="pass-word-long-enough"
+export DOP_APPROVAL_PASSPHRASE="$PASS-approve"
 VAULT_DIR="$HOME/Library/Application Support/dop/vault"
 
 echo "=== [1] setup — admin + 2 integrations, 3 grants"

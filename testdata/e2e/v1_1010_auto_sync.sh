@@ -20,7 +20,7 @@ export DOP_NO_TUI=1
 export DOP_NO_NOTIFY=1
 
 PASS="pass-word-long-enough"
-
+export DOP_APPROVAL_PASSPHRASE="$PASS-approve"
 echo "=== [1] M1 seeded + shared-identity M2 attached"
 printf "%s\n%s\n" "$PASS" "$PASS-approve" | HOME="$HOME_A" "$DOP" admin init --passphrase-stdin >/dev/null
 HOME="$HOME_A" "$DOP" init --vault "$BARE" >/dev/null 2>&1

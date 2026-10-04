@@ -22,6 +22,7 @@ export DOP_NO_TUI=1
 export DOP_NO_KEYCHAIN=1
 
 PASS="pass-word-long-enough"
+export DOP_APPROVAL_PASSPHRASE="$PASS-approve"
 CFG_ROOT="$HOME/Library/Application Support/dop"
 VAULT_DIR="$CFG_ROOT/vault"
 KEYS_DIR="$CFG_ROOT/agent-keys"

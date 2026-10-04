@@ -29,6 +29,9 @@ PASS="pass-word-long-enough"
 APPROVE="$PASS-approve"
 VAULT_DIR="$HOME/Library/Application Support/dop/vault"
 AUDIT="$HOME/Library/Application Support/dop/logs/audit.jsonl"
+# v1.14.0-rc4 — Tier 3 approval bypass for E2E (same strength as the
+# dialog — still verifies the actual passphrase).
+export DOP_APPROVAL_PASSPHRASE="$APPROVE"
 
 echo "=== [1] admin init + login"
 printf "%s\n%s\n" "$PASS" "$APPROVE" | "$DOP" admin init --passphrase-stdin >/dev/null
@@ -74,7 +77,7 @@ fi
 # With correct passphrase: should succeed.
 ISSUE_OUT=$(echo -n "$APPROVE" | "$DOP" token issue \
     --grants secret-svc.api --name secret-token \
-    --passphrase-stdin 2>&1) || fail "token issue (correct pass) failed: $ISSUE_OUT"
+    --passphrase-stdin --print-bearer 2>&1) || fail "token issue (correct pass) failed: $ISSUE_OUT"
 echo "$ISSUE_OUT" | grep -qE '^tok_1' || fail "no bearer emitted"
 pass "token issue gated by passphrase"
 

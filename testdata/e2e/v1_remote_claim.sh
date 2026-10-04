@@ -22,6 +22,7 @@ MACHINE_A="$WORKROOT/a"
 MACHINE_B="$WORKROOT/b"
 mkdir -p "$MACHINE_A" "$MACHINE_B"
 PASS="pass-word-long-enough"
+export DOP_APPROVAL_PASSPHRASE="$PASS-approve"
 
 echo "=== [A1] admin init + vault + seed"
 HOME="$MACHINE_A" printf "%s\n%s\n" "$PASS" "$PASS-approve" | HOME="$MACHINE_A" "$DOP" admin init --passphrase-stdin >/dev/null

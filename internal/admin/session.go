@@ -25,6 +25,10 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/fray/dop/internal/approval"
+	"github.com/fray/dop/internal/approvalprompt"
+	"github.com/fray/dop/internal/config"
 )
 
 // Default TTLs. Overridable at Session creation.
@@ -39,6 +43,10 @@ type Session struct {
 	keys     *Keys
 	sockPath string
 	listener net.Listener
+	// v1.14.0-rc4 — Paths let the daemon reach the approval.hash
+	// without a round-trip through the client. Needed for the
+	// local-popup approval RPC.
+	paths *config.Paths
 
 	idleTTL time.Duration
 	absTTL  time.Duration
@@ -56,6 +64,7 @@ type Session struct {
 // SessionOpts configures StartSession.
 type SessionOpts struct {
 	Keys     *Keys
+	Paths    *config.Paths // v1.14.0-rc4 — enables local approval popup
 	SockPath string        // path to unix socket to create
 	IdleTTL  time.Duration // default 15min
 	AbsTTL   time.Duration // default 60min
@@ -101,6 +110,7 @@ func StartSession(opts SessionOpts) (*Session, error) {
 	}
 	s := &Session{
 		keys:         opts.Keys,
+		paths:        opts.Paths,
 		sockPath:     opts.SockPath,
 		listener:     lst,
 		idleTTL:      opts.IdleTTL,
@@ -228,6 +238,8 @@ func (s *Session) dispatch(req Request) Response {
 		return s.opEncryptVault(req.Data)
 	case OpUnwrapPortable:
 		return s.opUnwrapPortable(req.Data)
+	case OpApprovalPopup:
+		return s.opApprovalPopup(req.Data)
 	default:
 		return Response{Error: "unknown op: " + req.Op}
 	}
@@ -399,6 +411,78 @@ func (s *Session) opUnwrapPortable(payload []byte) Response {
 
 func okResp(data []byte) Response {
 	return Response{OK: true, Data: data}
+}
+
+// opApprovalPopup — v1.14.0-rc4. Daemon-side handler for the local
+// approval fast-path. Opens a native OS dialog (osascript on darwin),
+// collects the typed passphrase, verifies against approval.hash, and
+// returns the decision. Supports:
+//   - approved: Approve clicked + passphrase verified
+//   - denied: Deny / Cancel clicked
+//   - timeout: dialog closed by its "giving up after" clause
+//   - unsupported: platform without a native dialog OR
+//     DOP_NO_POPUP=1 — caller falls back to tunnel+phone
+//
+// The typed passphrase lives only inside this handler's stack frame
+// for the ~1 ms it takes to run Verify + zero it. Never written to disk,
+// never passed through the socket to the caller.
+func (s *Session) opApprovalPopup(payload []byte) Response {
+	var req ApprovalPopupReq
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return Response{Error: "approval_popup: bad payload"}
+	}
+	s.mu.Lock()
+	if s.keys == nil {
+		s.mu.Unlock()
+		return Response{Error: "approval_popup: session locked"}
+	}
+	paths := s.paths
+	s.mu.Unlock()
+	// DOP_NO_POPUP escape hatch for headless CI running on macOS where
+	// osascript would still succeed but there's no human to click.
+	if os.Getenv("DOP_NO_POPUP") == "1" {
+		body, _ := json.Marshal(ApprovalPopupResp{Decision: "unsupported", Reason: "DOP_NO_POPUP=1"})
+		return okResp(body)
+	}
+	title := "DOP — " + req.Kind
+	body := req.PromptText
+	if body == "" {
+		body = fmt.Sprintf("Approve %s for %q?", req.Kind, req.Subject)
+	}
+	timeout := time.Duration(req.TimeoutMs) * time.Millisecond
+	res, err := approvalprompt.Ask(title, body, timeout)
+	if err != nil {
+		if errors.Is(err, approvalprompt.ErrUnsupported) {
+			out, _ := json.Marshal(ApprovalPopupResp{Decision: "unsupported", Reason: err.Error()})
+			return okResp(out)
+		}
+		return Response{Error: "approval_popup: " + err.Error()}
+	}
+	switch {
+	case res.Timeout:
+		out, _ := json.Marshal(ApprovalPopupResp{Decision: "timeout"})
+		return okResp(out)
+	case res.Denied:
+		out, _ := json.Marshal(ApprovalPopupResp{Decision: "denied"})
+		return okResp(out)
+	case res.Approved:
+		ok, verr := approval.Verify(paths, res.Passphrase)
+		// Zero the passphrase as soon as Verify returns.
+		res.Passphrase = ""
+		if verr != nil {
+			return Response{Error: "approval_popup: verify: " + verr.Error()}
+		}
+		if !ok {
+			out, _ := json.Marshal(ApprovalPopupResp{Decision: "denied", Reason: "wrong_passphrase"})
+			return okResp(out)
+		}
+		s.bumpActivity()
+		out, _ := json.Marshal(ApprovalPopupResp{Decision: "approved"})
+		return okResp(out)
+	default:
+		out, _ := json.Marshal(ApprovalPopupResp{Decision: "denied", Reason: "no_button"})
+		return okResp(out)
+	}
 }
 
 // --- context-cancellation helper for shutdown-on-context ---

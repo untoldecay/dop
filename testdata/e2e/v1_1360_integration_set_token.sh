@@ -20,6 +20,7 @@ export DOP_ALLOW_FILE_KEYS=1
 
 PASS="pass-word-long-enough"
 APPROVE="$PASS-approve"
+export DOP_APPROVAL_PASSPHRASE="$APPROVE"
 AUDIT="$HOME/Library/Application Support/dop/logs/audit.jsonl"
 
 echo "=== [1] admin init + login + base integration"

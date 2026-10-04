@@ -23,6 +23,7 @@ import (
 	"github.com/fray/dop/internal/agentkey"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
+	"github.com/fray/dop/internal/cli/printguard"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/envseal"
 	"github.com/fray/dop/internal/trust"
@@ -248,6 +249,13 @@ func runWhoami(args []string) int {
 }
 
 func runEnv(args []string) int {
+	// v1.14.0-rc4 — parse --print-export opt-in for Tier 2 (non-tty
+	// print). Default (unset) → refuse printing to non-tty, same
+	// pattern as `dop use` and `dop token issue`.
+	fs := flag.NewFlagSet("env", flag.ExitOnError)
+	printExport := fs.Bool("print-export", false, "force printing `export KEY=VAL` lines to stdout even when stdout is NOT a tty. Scripts that pipe or capture `dop env` must set this. Default (unset): refuse to print on non-tty. Setting this on non-tty triggers an approval popup.")
+	_ = fs.Parse(args)
+
 	// v1.13.0-rc7 — same silent auto-pull as exec. `dop env` is often
 	// the first thing an agent script runs (`$(dop env)` style), so
 	// seeing fresh grants here matters just as much. --no-pull would
@@ -310,6 +318,20 @@ func runEnv(args []string) int {
 			"env_keys":   fmt.Sprintf("%d", len(env)),
 		},
 	})
+	// v1.14.0-rc4 — Tier 1/2/3 gate before printing. The scoped env
+	// values are often MORE sensitive than the bearer itself; leaking
+	// them into an LLM transcript is exactly the attack this closes.
+	client := admin.NewClient(admin.SockPath(paths))
+	if err := printguard.Guard(printguard.Request{
+		Kind:      printguard.KindEnv,
+		Subject:   res.subject,
+		PrintFlag: *printExport,
+		Out:       os.Stdout,
+		Paths:     paths,
+		Client:    client,
+	}); err != nil {
+		return 1
+	}
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
