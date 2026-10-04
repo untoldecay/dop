@@ -40,19 +40,30 @@ func runSkill(args []string) int {
 
 func runSkillInstall(args []string) int {
 	fs := flag.NewFlagSet("skill install", flag.ExitOnError)
-	force := fs.Bool("force", false, "overwrite an existing SKILL.md on this machine (default: refuse if content differs)")
+	force := fs.Bool("force", false, "overwrite an existing SKILL.md at the target (default: refuse if content differs)")
+	// v1.14.0-rc6b — custom target path for non-Claude agents (Cursor,
+	// Zed, custom harnesses, etc.). When unset, defaults to the Claude
+	// Code location. Other agents can also just `dop skill show`
+	// and handle install themselves.
+	customPath := fs.String("path", "", "install path. Default: ~/.claude/skills/dop/SKILL.md. Pass a specific path for Cursor / Zed / other agents.")
 	_ = fs.Parse(args)
 
-	dir, err := skillDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop skill install: %v\n", err)
+	var target string
+	if *customPath != "" {
+		target = *customPath
+	} else {
+		dir, err := skillDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop skill install: %v\n", err)
+			return 1
+		}
+		target = filepath.Join(dir, "SKILL.md")
+	}
+	parent := filepath.Dir(target)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "dop skill install: mkdir %s: %v\n", parent, err)
 		return 1
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		fmt.Fprintf(os.Stderr, "dop skill install: mkdir: %v\n", err)
-		return 1
-	}
-	target := filepath.Join(dir, "SKILL.md")
 	// If the file already exists AND content matches, no-op silently.
 	// If it exists AND content differs, refuse unless --force.
 	if existing, rerr := os.ReadFile(target); rerr == nil {
@@ -71,8 +82,12 @@ func runSkillInstall(args []string) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "dop skill install: wrote %s\n", target)
-	fmt.Fprintln(os.Stderr, "  LLM agents on this machine will now follow the DOP safety protocol.")
+	if *customPath == "" {
+		fmt.Fprintln(os.Stderr, "  LLM agents on this machine will now follow the DOP safety protocol.")
+	}
 	fmt.Fprintln(os.Stderr, "  Re-run `dop skill install` after upgrading dop to pick up any skill changes.")
+	fmt.Fprintln(os.Stderr, "  For non-Claude agents: pass `--path <where-your-agent-reads-skills>` OR")
+	fmt.Fprintln(os.Stderr, "  invoke `dop skill show` and let the agent handle install itself.")
 	return 0
 }
 
