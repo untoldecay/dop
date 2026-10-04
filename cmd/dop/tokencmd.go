@@ -1982,27 +1982,38 @@ func runTokenGrantMutation(args []string, mode string) int {
 	}
 	match := v.Capabilities[matchID]
 
-	// Direct-availability requires a P-256 SE key on the agent's side —
-	// nothing to encrypt the fresh env to on ed25519 bearers. Error
-	// clearly so operators know their options.
-	if match.Binding == nil || match.Binding.Pubkey == "" {
+	// rc6d — three refresh paths depending on how the bearer surfaces env:
+	//   a) bound P-256 → reseal EnvWrapped (direct-availability)
+	//   b) unbound + portable stash → unwrap bearer, rewrite bundle in place
+	//   c) unbound + no stash → cannot refresh env; direct operator to claim
+	//      or revoke+reissue.
+	// Ed25519 bound bearers still fall out as "migrate first" since they
+	// can't do ECDH to seal EnvWrapped.
+	isUnbound := match.Binding == nil || match.Binding.Pubkey == ""
+	hasPortableStash := match.PortableWrapped != ""
+	if isUnbound && !hasPortableStash {
 		fmt.Fprintf(os.Stderr,
-			"dop token %s-grant: this bearer is not yet claimed (no bound pubkey) — reserve grant edits until after `dop claim`\n",
-			mode)
-		return 1
-	}
-	kt := match.Binding.KeyType
-	if kt == "" {
-		kt = vault.KeyTypeEd25519
-	}
-	if kt != vault.KeyTypeP256 {
-		fmt.Fprintf(os.Stderr,
-			"dop token %s-grant: bearer is bound to %s key — direct grant edits require P-256\n"+
+			"dop token %s-grant: this bearer has no bound pubkey and no portable stash — bundle env can't be refreshed in place.\n"+
 				"  Options:\n"+
-				"    1) run `dop agent migrate %s` on the agent's machine (upgrades to P-256, keeps bearer)\n"+
-				"    2) revoke this bearer and issue a fresh one with the wider/narrower grant set\n",
-			mode, kt, match.LookupID)
+				"    1) run `dop claim` on the agent to bind a pubkey, then re-run this command\n"+
+				"    2) revoke this bearer and issue a fresh one (`dop token revoke %s` + `dop token issue --name %s --grants ...`)\n",
+			mode, match.Subject, match.Subject)
 		return 1
+	}
+	if !isUnbound {
+		kt := match.Binding.KeyType
+		if kt == "" {
+			kt = vault.KeyTypeEd25519
+		}
+		if kt != vault.KeyTypeP256 {
+			fmt.Fprintf(os.Stderr,
+				"dop token %s-grant: bearer is bound to %s key — direct grant edits require P-256\n"+
+					"  Options:\n"+
+					"    1) run `dop agent migrate %s` on the agent's machine (upgrades to P-256, keeps bearer)\n"+
+					"    2) revoke this bearer and issue a fresh one with the wider/narrower grant set\n",
+				mode, kt, match.LookupID)
+			return 1
+		}
 	}
 
 	// Validate the grant argument.
@@ -2069,16 +2080,68 @@ func runTokenGrantMutation(args []string, mode string) int {
 	// mutation state).
 	match.Generation = v.BumpGeneration(match.Subject)
 
-	// Reseal EnvWrapped to reflect the new grants (env resolved fresh
-	// from the current vault → bearer's env changes take effect on the
-	// agent's next dop exec, no re-claim required).
+	// Refresh the env the agent will see.
+	//   Bound P-256   → reseal EnvWrapped (bundle untouched; agent decrypts
+	//                   via ECDH on next `dop exec`).
+	//   Portable stash → unwrap bearer, rewrite the bundle at the same lookup
+	//                   id with the new env sealed to the (recovered) bearer
+	//                   at the bumped generation; EnvWrapped stays nil.
 	rec := vaultCapability2Record(match, matchID)
-	wrapped, err := sealEnvWrapped(v, &rec)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop token %s-grant: reseal: %v\n", mode, err)
-		return 1
+	if isUnbound {
+		bearerBytes, uerr := client.UnwrapPortable(match.PortableWrapped)
+		if uerr != nil {
+			fmt.Fprintf(os.Stderr, "dop token %s-grant: unwrap portable stash: %v\n", mode, uerr)
+			return 1
+		}
+		bearer := string(bearerBytes)
+		if bearer == "" {
+			fmt.Fprintln(os.Stderr, "dop token "+mode+"-grant: unwrap returned empty bearer — stash may be corrupted")
+			return 1
+		}
+		capIDBytes, derr := hex.DecodeString(rec.CapabilityID)
+		if derr != nil || len(capIDBytes) != capability.CapabilityIDBytes {
+			fmt.Fprintf(os.Stderr, "dop token %s-grant: bad capability id on record: %v\n", mode, derr)
+			return 1
+		}
+		var capIDArr [capability.CapabilityIDBytes]byte
+		copy(capIDArr[:], capIDBytes)
+		envBundle := resolveGrantsToEnv(v, rec.Grants)
+		if len(envBundle) == 0 {
+			fmt.Fprintln(os.Stderr, "dop token "+mode+"-grant: resolved env bundle is empty after mutation — grants may not be wired to integrations")
+			return 1
+		}
+		bundlePath := filepath.Join(paths.Vault, "capabilities", rec.LookupID+".bundle")
+		f, cerr := os.Create(bundlePath)
+		if cerr != nil {
+			fmt.Fprintf(os.Stderr, "dop token %s-grant: rewrite bundle: %v\n", mode, cerr)
+			return 1
+		}
+		bundleBytes, werr := capability.Write(f, capability.WriteOpts{
+			CapabilityID: capIDArr,
+			Bearer:       bearer,
+			Generation:   rec.Generation,
+			ExpiresAt:    rec.ExpiresAt,
+			Subject:      rec.Subject,
+			Env:          envBundle,
+			Binding: &capability.EnvelopeBinding{
+				Kind: vault.BindingKindNone,
+			},
+		})
+		f.Close()
+		if werr != nil {
+			fmt.Fprintf(os.Stderr, "dop token %s-grant: write bundle: %v\n", mode, werr)
+			return 1
+		}
+		rec.BundleHash = capability.HashBundle(bundleBytes)
+		rec.EnvWrapped = nil
+	} else {
+		wrapped, err := sealEnvWrapped(v, &rec)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop token %s-grant: reseal: %v\n", mode, err)
+			return 1
+		}
+		rec.EnvWrapped = wrapped
 	}
-	rec.EnvWrapped = wrapped
 
 	if err := signRecordViaDaemon(client, &rec); err != nil {
 		fmt.Fprintf(os.Stderr, "dop token %s-grant: sign: %v\n", mode, err)
@@ -2100,9 +2163,13 @@ func runTokenGrantMutation(args []string, mode string) int {
 		verb = "removed"
 		prep = "from"
 	}
+	refreshNote := "env resealed — agent's next `dop exec` picks it up"
+	if isUnbound {
+		refreshNote = "bundle rewritten — next `dop use` surfaces the fresh env"
+	}
 	fmt.Fprintf(os.Stderr,
-		"dop token %s-grant: %s %s %s %s (gen bumped to %d, env resealed — agent's next `dop exec` picks it up)\n",
-		mode, verb, grantID, prep, match.Subject, rec.Generation)
+		"dop token %s-grant: %s %s %s %s (gen bumped to %d, %s)\n",
+		mode, verb, grantID, prep, match.Subject, rec.Generation, refreshNote)
 	return 0
 }
 
