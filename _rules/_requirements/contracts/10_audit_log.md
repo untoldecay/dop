@@ -21,6 +21,9 @@
   - v1.11: `agent_migrated` (ed25519 → P-256 re-enrollment).
   - v1.13.0-rc12: `protected_create`, `protected_token_issue`, `protected_bypass_attempt` (see contract 15).
   - v1.14.0-rc1: `use_attached` (`dop use` attached a bearer to a shell; see contract 19). Carries `subject`, `lookup_id`, `actor`, `extra.capability_id`, `extra.disk`. NEVER the bearer value.
+  - v1.14.0-rc3: `protected_unlock` (owner-initiated unlock of a protected integration or grant; mirrors `protected_create`). Carries `subject`, `extra.kind` (`"integration"` or `"grant"`), `extra.prior_owner`.
+  - v1.14.0-rc3: `integration_renamed` (`dop integration rename` rewrote an integration map key and every referring grant). Carries `subject` (new name), `extra.old_name`, `extra.new_name`, `extra.referrers` (count of grants rewritten, as string).
+  - v1.14.0-rc3: `exec` events gain `extra.portable_owner = "yes"` when the owner-held portable bypass skipped the binding check. Same event kind, extra field.
 - MUST include reason strings on denial: `pin_mismatch`, `pin_expired`, `rejected`, `approval_timeout`, `admin_removed`.
 - MUST fire `audit.Notify` on Darwin for `claim_pending`, `claim`, `claim_denied`, `revoke`.
 - MUST honor `DOP_NO_NOTIFY=1` (used by tests + headless CI).

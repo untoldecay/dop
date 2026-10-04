@@ -22,6 +22,7 @@
 - MUST refuse (exit 1) when the session is locked, pointing operator at `dop admin login`.
 - MUST refuse (exit 1) when any grant carried by the bearer is protected and the current admin pubkey isn't the owner (rc12 gate reused).
 - Default output: `export DOP_TOKEN=<bearer>\n` to stdout. Nothing else to stdout. Operator pattern: `eval "$(dop use <subject>)"`.
+- v1.14.0-rc3 — MUST refuse to print to a non-tty unless `--print-export` is passed. LLM-driven shells running `! dop use X` capture stdout into transcripts on disk; this refusal keeps the bearer out of those captures. Refusal MUST include the safe eval incantation in the error text and point at `--print-export` for scripts that genuinely want stdout.
 - With `--token-file FILE`: writes a JSON envelope `{token, subject, issued_at, expires_at}` to FILE with mode 0600, prints a short confirmation to stderr, nothing to stdout.
 - The `--token-file` TTL (default 24h) is embedded in the file's `expires_at`. Readers (future `dop exec` extensions, etc.) MAY refuse an expired file.
 - MUST emit `EventUseAttached` on success. Fields: `Subject`, `LookupID`, `Actor` (short admin pubkey), `Extra.capability_id`, `Extra.disk` (bool-as-string).
@@ -50,7 +51,7 @@
 - MUST NOT wrap the bearer to any recipient other than the ISSUING admin's own age recipient.
 
 ## Interfaces
-- Inputs: `--portable` boolean flag on `dop token issue`; `--token-file FILE` + `--passphrase-stdin` (reserved) flags on `dop use`; `<subject>` positional on `dop use`.
+- Inputs: `--portable` boolean flag on `dop token issue`; `--token-file FILE` + `--print-export` + `--passphrase-stdin` (reserved) flags on `dop use`; `<subject>` positional on `dop use`.
 - Outputs: stdout `export DOP_TOKEN=…` line OR a token-file JSON envelope; stderr informational text; audit event.
 - Events: `EventUseAttached` with the fields enumerated above.
 - Dependencies: `internal/admin.Client.UnwrapPortable` + `.Status`, `internal/admin.WrapToRecipient` + `.UnwrapWithIdentity`, `internal/vault.Capability.PortableWrapped`, `internal/audit.Append`, `cmd/dop/protected.go` for the owner gate pattern.
@@ -84,6 +85,13 @@
 - Should token-file readers verify `expires_at` server-side (via a daemon RPC)? Currently client-side only; good enough.
 - Should the token-file auto-reap on `dop admin logout` (same mechanism as pending-claim reaper)? Deferred.
 - Should the stash be removed when the bearer is revoked? Currently stays on the revoked capability record (harmless; the bearer no longer works). Could clean up during cascade.
+
+## Exec plane interaction (v1.14.0-rc3)
+
+- When the owning admin invokes `dop exec` with a portable bearer in `DOP_TOKEN`, exec MUST skip the agent-plane binding check. The three preconditions ALL hold: admin session active + vault capability has `PortableWrapped != ""` + capability `IssuedBy == session.AdminPubkey`. Any precondition miss falls through to standard `verifyBinding`.
+- Signature verification, generation / expiry / status, and scope filtering all continue to apply. Only the binding (claim + agent-key) step is skipped.
+- Exec audit event MUST carry `Extra["portable_owner"] = "yes"` when the bypass fires. Same event kind (`exec`), extra field — the trail stays self-describing without introducing `exec_portable`.
+- A non-owner holding plaintext `DOP_TOKEN` manually cannot reach the bypass: vault lookup returns their-not-mine for `IssuedBy`, helper returns false, standard binding gate applies.
 
 ## Related contracts
 - **03 (Vault Schema)** — adds `PortableWrapped` to the Capability shape.
