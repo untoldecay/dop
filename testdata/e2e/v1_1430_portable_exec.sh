@@ -39,7 +39,7 @@ echo "=== [2] issue a portable bearer + exec without claim"
 "$DOP" token issue --grants svc.api --name camShell --no-bind --portable >/dev/null 2>&1 \
     || fail "token issue --portable failed"
 # Fetch the bearer via dop use (the real-world path).
-EVAL=$("$DOP" use camShell 2>&1) || fail "dop use failed: $EVAL"
+EVAL=$("$DOP" use --print-export camShell 2>&1) || fail "dop use failed: $EVAL"
 eval "$EVAL"
 [[ -n "${DOP_TOKEN:-}" ]] || fail "dop use didn't export DOP_TOKEN"
 

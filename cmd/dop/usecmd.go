@@ -28,6 +28,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
@@ -43,6 +45,13 @@ const defaultTokenFileTTL = 24 * time.Hour
 func runUse(args []string) int {
 	fs := flag.NewFlagSet("use", flag.ExitOnError)
 	tokenFile := fs.String("token-file", "", "write the bearer to this file (JSON {token, subject, expires_at}) with mode 0600, instead of printing to stdout. Operator sets DOP_TOKEN_FILE=<path>.")
+	// v1.14.0-rc3 Phase 6 — safety: refuse to print the bearer to a
+	// non-tty by default. LLM-driven shells capture stdout into a
+	// transcript, which leaks the bearer. The safe pattern is
+	// `eval "$(dop use <subject>)"` because $() captures stdout before
+	// anything prints — but that only works at a tty. For scripts that
+	// genuinely want the export line redirected, --print-export opts in.
+	printExport := fs.Bool("print-export", false, "force printing `export DOP_TOKEN=…` to stdout even when stdout is NOT a tty. Scripts that redirect dop use into eval must set this. Default (unset): refuse to print to a non-tty.")
 	// --passphrase-stdin reserved for future use (phase 2 might add
 	// an approval-passphrase gate; today the admin session unlock is
 	// the gate). Parsed but ignored so scripts can predeclare it.
@@ -129,6 +138,20 @@ func runUse(args []string) int {
 		fmt.Fprintf(os.Stderr, "  Point the agent at it: export DOP_TOKEN_FILE=%s\n", *tokenFile)
 		disk = true
 	} else {
+		// v1.14.0-rc3 Phase 6 — refuse to print to a non-tty unless
+		// --print-export is set. Prevents an LLM running `! dop use X`
+		// from capturing the bearer into the chat transcript.
+		isTTY := term.IsTerminal(int(os.Stdout.Fd()))
+		if !isTTY && !*printExport {
+			fmt.Fprintln(os.Stderr, "dop use: refusing to print bearer to a non-tty.")
+			fmt.Fprintln(os.Stderr, "  Why: stdout is captured by the caller, which (for LLM-driven shells)")
+			fmt.Fprintln(os.Stderr, "       means the bearer value lands in a transcript on disk.")
+			fmt.Fprintln(os.Stderr, "  Fix (safe): run the eval form from your shell:")
+			fmt.Fprintln(os.Stderr, `        eval "$(dop use `+subject+`)"`)
+			fmt.Fprintln(os.Stderr, "       $() captures stdout silently; eval consumes it; nothing prints.")
+			fmt.Fprintln(os.Stderr, "  Fix (opt-in): pass --print-export if you really want the export line on stdout.")
+			return 1
+		}
 		// Operator pattern: eval "$(dop use subject)".
 		fmt.Printf("export DOP_TOKEN=%s\n", bearer)
 	}

@@ -48,7 +48,7 @@ pass "refused without stash + hint shown"
 echo "=== [3] bearer WITH --portable → dop use emits export line"
 "$DOP" token issue --grants svc.api --name CamAdmin --no-bind --portable >/dev/null 2>&1 \
     || fail "token issue --portable failed"
-OUT_USE=$("$DOP" use CamAdmin 2>&1)
+OUT_USE=$("$DOP" use --print-export CamAdmin 2>&1)
 echo "$OUT_USE" | grep -qE "^export DOP_TOKEN=tok_1" || fail "no export line: $OUT_USE"
 pass "dop use emitted eval line"
 
@@ -83,14 +83,29 @@ echo "=== [7] admin-session-locked path refused with pointer"
 # daemon exits ~50ms after returning the OK; poll briefly so the next
 # command sees SessionActive=false.
 for i in 1 2 3 4 5; do
-    if ! "$DOP" use CamAdmin 2>&1 | grep -q "export DOP_TOKEN"; then
+    if ! "$DOP" use --print-export CamAdmin 2>&1 | grep -q "export DOP_TOKEN"; then
         break
     fi
     sleep 0.2
 done
-OUT7=$("$DOP" use CamAdmin 2>&1 || true)
+OUT7=$("$DOP" use --print-export CamAdmin 2>&1 || true)
 echo "$OUT7" | grep -qi "admin" || fail "expected admin-session hint, got: $OUT7"
 pass "locked session refused"
+
+echo "=== [8b] non-tty refusal without --print-export (Phase 6)"
+# Re-login (step 7 logged out).
+echo -n "$PASS" | "$DOP" admin login --passphrase-stdin >/dev/null
+# Capturing stdout → non-tty. Expect refusal + hint.
+REFUSAL=$("$DOP" use CamAdmin 2>&1 || true)
+echo "$REFUSAL" | grep -q "refusing to print bearer to a non-tty" \
+    || fail "expected non-tty refusal, got: $REFUSAL"
+echo "$REFUSAL" | grep -q 'eval "\$(dop use CamAdmin)"' \
+    || fail "refusal missing eval hint, got: $REFUSAL"
+# With --print-export it should succeed.
+OK8B=$("$DOP" use --print-export CamAdmin 2>&1 || true)
+echo "$OK8B" | grep -q "^export DOP_TOKEN=" \
+    || fail "--print-export should emit export line, got: $OK8B"
+pass "non-tty refusal honored; --print-export opts in"
 
 echo "=== [8] audit event use_attached recorded, bearer NOT in log"
 grep -q '"event":"use_attached"' "$AUDIT" || fail "no use_attached event in audit log"
