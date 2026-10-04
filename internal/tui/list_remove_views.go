@@ -73,11 +73,11 @@ type integrationListView struct {
 	tokenScopePickCursor int
 
 	// Integration-level edit form state (integModeIntEdit).
-	// v1.14.0-rc3 — field layout:
-	//   0 kind | 1 desc | 2 kindslot | 3 projects | 4 tags
-	//   5 protection | 6 passphrase (conditional on unprotected→protected)
-	//   enter commits from the last visible field.
+	// v1.14.0-rc3 Phase 5 — field 0 is Name (rename), Phase 4 added
+	// Projects/Tags; see intEditField* constants below.
 	intEditField         int
+	intEditNameBuf       strings.Builder
+	intEditNameWas       string // snapshot at open time, so rename detection is cheap at save
 	intEditKindCursor    int
 	intEditKindChoice    string
 	intEditDescBuf       strings.Builder
@@ -90,16 +90,18 @@ type integrationListView struct {
 	intEditPassBuf       strings.Builder
 }
 
-// Integration edit field constants (v1.14.0-rc3 — made explicit so the
-// Phase 4 Projects/Tags rows fit cleanly in the switch logic).
+// Integration edit field constants.
+// v1.14.0-rc3 Phase 4 added Projects/Tags; Phase 5 adds Name (rename).
+// Name is field 0 so a rename is the first thing an operator sees.
 const (
-	intEditFieldKind       = 0
-	intEditFieldDesc       = 1
-	intEditFieldKindSlot   = 2
-	intEditFieldProjects   = 3
-	intEditFieldTags       = 4
-	intEditFieldProtection = 5
-	intEditFieldPassphrase = 6
+	intEditFieldName       = 0
+	intEditFieldKind       = 1
+	intEditFieldDesc       = 2
+	intEditFieldKindSlot   = 3
+	intEditFieldProjects   = 4
+	intEditFieldTags       = 5
+	intEditFieldProtection = 6
+	intEditFieldPassphrase = 7
 )
 
 func newIntegrationListView(c *admin.Client, p *config.Paths) *integrationListView {
@@ -295,7 +297,13 @@ func (v *integrationListView) enterIntEdit() *integrationListView {
 		return v
 	}
 	it := v.items[name]
-	v.intEditField = 0
+	v.intEditField = intEditFieldName
+	// v1.14.0-rc3 Phase 5 — Name field (rename support). Snapshot the
+	// current key so doIntEdit can detect "operator typed a different
+	// name" without re-reading the vault.
+	v.intEditNameBuf.Reset()
+	v.intEditNameBuf.WriteString(name)
+	v.intEditNameWas = name
 	v.intEditKindChoice = vault.IntegrationKindOf(it)
 	// Pre-position the kind cursor on the current kind.
 	for i, p := range kindPresets {
@@ -1351,7 +1359,7 @@ func (v *integrationListView) doTokenRemove() tea.Cmd {
 func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	needsPass := v.intEditProtectChoice && !v.intEditProtectWas
 
-	// Field 0 — Kind picker.
+	// Field 1 — Kind picker (previously 0, shifted by Name).
 	if v.intEditField == intEditFieldKind {
 		switch mm.String() {
 		case "esc":
@@ -1367,6 +1375,8 @@ func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) 
 		case "enter":
 			v.intEditKindChoice = kindPresets[v.intEditKindCursor].value
 			v.intEditField = intEditFieldDesc
+		case "shift+tab":
+			v.intEditField = intEditFieldName
 		}
 		return v, nil
 	}
@@ -1401,13 +1411,15 @@ func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) 
 		}
 		return v, nil
 	}
-	// Text input fields: Desc (1), KindSlot (2), Projects (3), Tags (4),
-	// Passphrase (6).
+	// Text input fields: Name (0), Desc (2), KindSlot (3), Projects (4),
+	// Tags (5), Passphrase (7).
 	switch mm.String() {
 	case "esc":
 		v.mode = integModeList
 	case "enter":
 		switch v.intEditField {
+		case intEditFieldName:
+			v.intEditField = intEditFieldKind
 		case intEditFieldDesc, intEditFieldKindSlot, intEditFieldProjects:
 			v.intEditField++
 		case intEditFieldTags:
@@ -1423,6 +1435,8 @@ func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) 
 		}
 	case "tab", "down":
 		switch v.intEditField {
+		case intEditFieldName:
+			v.intEditField = intEditFieldKind
 		case intEditFieldDesc, intEditFieldKindSlot, intEditFieldProjects:
 			v.intEditField++
 		case intEditFieldTags:
@@ -1434,8 +1448,10 @@ func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) 
 			v.intEditField = intEditFieldProtection
 		case intEditFieldDesc:
 			v.intEditField = intEditFieldKind
+		case intEditFieldName:
+			// top; no-op
 		default:
-			if v.intEditField > intEditFieldKind {
+			if v.intEditField > intEditFieldName {
 				v.intEditField--
 			}
 		}
@@ -1462,6 +1478,8 @@ func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) 
 
 func (v *integrationListView) intEditCurBuf() *strings.Builder {
 	switch v.intEditField {
+	case intEditFieldName:
+		return &v.intEditNameBuf
 	case intEditFieldDesc:
 		return &v.intEditDescBuf
 	case intEditFieldKindSlot:
@@ -1477,7 +1495,16 @@ func (v *integrationListView) intEditCurBuf() *strings.Builder {
 }
 
 func (v *integrationListView) doIntEdit() tea.Cmd {
-	name := v.selectedName()
+	nameWas := v.intEditNameWas
+	nameNew := strings.TrimSpace(v.intEditNameBuf.String())
+	// v1.14.0-rc3 Phase 5 — if the operator typed a different name,
+	// rename FIRST, then update the renamed integration with every
+	// other field. Rename runs through its own CLI subcommand with its
+	// own audit event and coordinated grant rewrite.
+	name := nameWas
+	if nameNew != "" && nameNew != nameWas {
+		name = nameNew
+	}
 	kind := v.intEditKindChoice
 	desc := v.intEditDescBuf.String()
 	slot := v.intEditKindSlotBuf.String()
@@ -1488,6 +1515,15 @@ func (v *integrationListView) doIntEdit() tea.Cmd {
 	passphrase := v.intEditPassBuf.String()
 	return func() tea.Msg {
 		self, _ := os.Executable()
+		if nameNew != "" && nameNew != nameWas {
+			rename := exec.Command(self, "integration", "rename", "--from", nameWas, "--to", nameNew)
+			rename.Env = append(os.Environ(), "DOP_NO_TUI=1")
+			var rstderr bytes.Buffer
+			rename.Stderr = &rstderr
+			if err := rename.Run(); err != nil {
+				return integActionMsg{err: "rename: " + strings.TrimSpace(rstderr.String())}
+			}
+		}
 		args := []string{"integration", "add", "--name", name, "--kind", kind}
 		if desc != "" {
 			args = append(args, "--description", desc)
@@ -1765,7 +1801,24 @@ func (v *integrationListView) viewIntEdit() string {
 	var b strings.Builder
 	b.WriteString(titleSt.Render("Edit integration: "+name) + "\n\n")
 
-	// Kind picker (field 0).
+	// v1.14.0-rc3 Phase 5 — Name field (rename). Changing it triggers
+	// `dop integration rename` at save time (coordinated grant rewrite).
+	nameLbl := "Name"
+	if v.intEditField == intEditFieldName {
+		nameLbl = cursorSt.Render(nameLbl)
+	} else {
+		nameLbl = mutedSt.Render(nameLbl)
+	}
+	b.WriteString(nameLbl + ": " + v.intEditNameBuf.String())
+	if v.intEditField == intEditFieldName {
+		b.WriteString(cursorSt.Render("▎"))
+	}
+	b.WriteString("\n")
+	if v.intEditField == intEditFieldName {
+		b.WriteString("    " + mutedSt.Render("changing the name renames every referring grant") + "\n")
+	}
+
+	// Kind picker (field 1).
 	kindLbl := "Kind"
 	kindVal := v.intEditKindChoice
 	if v.intEditField == 0 {

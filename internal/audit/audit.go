@@ -63,6 +63,10 @@ const (
 	// (bool-as-string: did it write to --token-file). NEVER the
 	// bearer value.
 	EventUseAttached = "use_attached"
+	// v1.14.0-rc3 — `dop integration rename` emits a single event with
+	// old_name + new_name + referrers (count of grants rewritten).
+	// Fires once per rename; the rename itself is atomic at save time.
+	EventIntegrationRenamed = "integration_renamed"
 )
 
 // Event is one line in the log.
