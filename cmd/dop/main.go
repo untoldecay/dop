@@ -26,8 +26,9 @@ usage:
   dop                                            interactive TUI (default when on a TTY)
   dop version | -v | --version                   print version + commit + build date
   dop uninstall [--force]                        wipe DOP from this machine (alias for admin reset)
-  dop skill install [--force] [--path FILE]      install the DOP agent skill (default: ~/.claude/skills/dop/SKILL.md; --path for Cursor/Zed/other)
+  dop skill install [--force] [--path FILE]      install the DOP agent skill AND /dop-use slash command (default: ~/.claude/skills/dop/SKILL.md + ~/.claude/commands/dop-use.md; --path installs only the skill at that path)
   dop skill show                                 print the embedded skill content to stdout (agent-agnostic install)
+  dop skill show-command                         print the /dop-use slash command content to stdout
   dop help                                       this message
 
   # Admin plane
