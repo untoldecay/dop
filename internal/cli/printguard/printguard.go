@@ -1,33 +1,37 @@
-// Package printguard enforces the three-tier policy for secret-print
+// Package printguard enforces the approval-always policy for secret-print
 // surfaces (`dop use`, `dop token issue`, `dop env`, `dop claim` export).
 //
 // Threat model: an LLM-driven shell running `! dop <secret-print-cmd>`
-// captures stdout into a chat transcript on disk. The three tiers:
+// captures stdout into a chat transcript on disk — even when stdout
+// looks like a tty from the operator's perspective.
 //
-//  1. Tier 1 — refuse to print to a non-tty by default (the common
-//     case for `!`-prefix captures).
-//  2. Tier 2 — explicit `--print-*` flag opts into non-tty printing
-//     (for genuine CI / script workflows that pipe stdout).
-//  3. Tier 3 — when Tier 2 is set, additionally require operator
-//     approval via the admin daemon's local popup (osascript on
-//     darwin) OR the tunnel+phone fallback. Decision per-invocation,
-//     no session window.
+// Rc5 Option A: every print requires operator approval regardless of
+// tty state. Two bypasses:
 //
-// At a tty, Tier 1 passes transparently; Tier 2 flag is ignored (user
-// already sees the output); Tier 3 is skipped (no transcript leak path).
+//   - DOP_FROM_TUI=1 — set by the TUI on every shell-out. The TUI is
+//     the interactive operator surface; its captured output goes back
+//     to the TUI render path, not to a transcript.
+//   - DOP_APPROVAL_PASSPHRASE — scripted/CI pre-approval. Same auth
+//     strength as the popup (verifies via approval.Verify).
 //
-// Non-tty + no flag  → refuse with eval hint
-// Non-tty + flag + approved → allow
-// Non-tty + flag + denied  → refuse with reason
-// Non-tty + flag + timeout → refuse with hint to retry
-// Non-tty + flag + daemon unreachable → fall back to tunnel+phone (TODO rc4b)
+// Decision flow:
+//   - Local approval: admin daemon's native dialog (osascript on darwin).
+//     Timeout configurable via userprefs (15/30/60s).
+//   - Tunnel+phone fallback (rc5b): fires on local timeout, daemon
+//     unreachable, OR platform unsupported. Prints URL + QR to stderr;
+//     admin approves on phone with the same approval passphrase.
+//
+// The PrintFlag field on Request is retained for Option-A backward-
+// compat but has no auth role — flags are no-ops.
 package printguard
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"golang.org/x/term"
 
@@ -35,6 +39,7 @@ import (
 	"github.com/fray/dop/internal/approval"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/printapproval"
 	"github.com/fray/dop/internal/userprefs"
 )
 
@@ -170,14 +175,73 @@ func Guard(req Request) error {
 		prompt,
 		timeout,
 	)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop %s: approval RPC failed: %v\n", req.Kind, err)
+	// Decide whether to fall back to tunnel+phone.
+	// - err from daemon RPC → unreachable, try fallback
+	// - decision "timeout" → local popup timed out, try fallback
+	// - decision "unsupported" → platform/env can't show dialog, try fallback
+	// - decision "denied" / "approved" → final, no fallback
+	fallback := false
+	fallbackReason := ""
+	switch {
+	case err != nil:
+		fallback = true
+		fallbackReason = "daemon_unreachable"
+	case decision == "timeout":
+		fallback = true
+		fallbackReason = "local_timeout"
+	case decision == "unsupported":
+		fallback = true
+		fallbackReason = "unsupported"
+	}
+	if fallback {
+		fmt.Fprintf(os.Stderr, "dop %s: local approval failed (%s) — falling back to tunnel+phone.\n", req.Kind, fallbackReason)
 		audit.Append(req.Paths, audit.Event{
-			Kind:    audit.EventPrintApprovalDenied,
+			Kind:    audit.EventPrintApprovalRequested,
 			Subject: req.Subject,
-			Extra:   map[string]string{"surface": string(req.Kind), "reason": "rpc_error"},
+			Extra:   map[string]string{"surface": string(req.Kind), "channel": "phone", "escalated_from": fallbackReason},
 		})
-		return ErrRefused
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		d, derr := printapproval.Run(ctx, printapproval.Request{
+			Paths:   req.Paths,
+			Kind:    string(req.Kind),
+			Subject: req.Subject,
+			TTL:     5 * time.Minute,
+		})
+		if derr != nil {
+			fmt.Fprintf(os.Stderr, "dop %s: tunnel fallback error: %v\n", req.Kind, derr)
+			audit.Append(req.Paths, audit.Event{
+				Kind:    audit.EventPrintApprovalDenied,
+				Subject: req.Subject,
+				Extra:   map[string]string{"surface": string(req.Kind), "channel": "phone", "reason": "fallback_error"},
+			})
+			return ErrRefused
+		}
+		switch d {
+		case printapproval.DecisionApproved:
+			audit.Append(req.Paths, audit.Event{
+				Kind:    audit.EventPrintApprovalGranted,
+				Subject: req.Subject,
+				Extra:   map[string]string{"surface": string(req.Kind), "channel": "phone"},
+			})
+			return nil
+		case printapproval.DecisionRejected:
+			fmt.Fprintf(os.Stderr, "dop %s: approval denied via phone.\n", req.Kind)
+			audit.Append(req.Paths, audit.Event{
+				Kind:    audit.EventPrintApprovalDenied,
+				Subject: req.Subject,
+				Extra:   map[string]string{"surface": string(req.Kind), "channel": "phone", "reason": "rejected"},
+			})
+			return ErrRefused
+		default: // expired
+			fmt.Fprintf(os.Stderr, "dop %s: phone approval expired.\n", req.Kind)
+			audit.Append(req.Paths, audit.Event{
+				Kind:    audit.EventPrintApprovalDenied,
+				Subject: req.Subject,
+				Extra:   map[string]string{"surface": string(req.Kind), "channel": "phone", "reason": "expired"},
+			})
+			return ErrRefused
+		}
 	}
 	switch decision {
 	case "approved":
@@ -196,29 +260,6 @@ func Guard(req Request) error {
 			Kind:    audit.EventPrintApprovalDenied,
 			Subject: req.Subject,
 			Extra:   map[string]string{"surface": string(req.Kind), "reason": reason},
-		})
-		return ErrRefused
-	case "timeout":
-		fmt.Fprintf(os.Stderr, "dop %s: approval dialog timed out. Retry when you're ready to approve.\n", req.Kind)
-		audit.Append(req.Paths, audit.Event{
-			Kind:    audit.EventPrintApprovalDenied,
-			Subject: req.Subject,
-			Extra:   map[string]string{"surface": string(req.Kind), "reason": "timeout"},
-		})
-		return ErrRefused
-	case "unsupported":
-		// macOS where DOP_NO_POPUP=1, or non-darwin platform.
-		// For rc4 we treat unsupported as a hard refuse — the
-		// tunnel+phone fallback is a future improvement (rc4b).
-		fmt.Fprintf(os.Stderr, "dop %s: native approval dialog is not available on this platform.\n", req.Kind)
-		if reason != "" {
-			fmt.Fprintf(os.Stderr, "  reason: %s\n", reason)
-		}
-		fmt.Fprintln(os.Stderr, "  Future: tunnel+phone fallback will unblock this path.")
-		audit.Append(req.Paths, audit.Event{
-			Kind:    audit.EventPrintApprovalDenied,
-			Subject: req.Subject,
-			Extra:   map[string]string{"surface": string(req.Kind), "reason": "unsupported:" + reason},
 		})
 		return ErrRefused
 	default:
