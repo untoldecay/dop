@@ -53,6 +53,15 @@
 - MUST use `·` as the separator (middle dot), e.g. `↑↓ move · enter select · esc back`.
 - SHOULD NOT include modifier-key hints that aren't bound.
 
+### List rows — spacing + icon columns (v1.14.0-rc3)
+- Every row-level column that CAN carry a glyph (lock, person, bullet, etc.) OR be empty across different rows in the SAME list MUST reserve a fixed cell width via `lipgloss.NewStyle().Width(N).Render(glyph)`. Direct string concatenation of `"  "` as a placeholder vs. `"🔒 "` as the icon slot is FORBIDDEN — emoji cell width is terminal-dependent (1 or 2 cells; usually 2 but no guarantee), so the two forms don't line up and the subject column shifts by 1 whenever a glyph appears.
+- Icon slot width MUST account for the trailing visual separator. Pattern: `glyphWithoutTrailingSpace := "🔒"; slot := lipgloss.NewStyle().Width(3).Render(glyphWithoutTrailingSpace)`. 3 cells = emoji (worst-case 2) + 1 separator space. Pure ASCII glyphs (`[ ]`, `○`, `●`) can use `.Width(2)` since their width is deterministic — but using Width-pinning uniformly across row types is strictly cleaner.
+- Multiple icon columns on the same row (e.g. owner glyph + portable prefix) MUST each be independently Width-pinned. Do NOT add a literal `+ " "` between Width-pinned slots — the trailing separator is already inside each slot's reserved width.
+- Subject / name column pad MUST use the same primitive: `lipgloss.NewStyle().Width(labelWidth).Render(subj)` where `labelWidth` is computed as `max(len) + 2` from the longest row name in the current list (minimum floor per view, see references).
+- When a list has ZERO rows that could carry a glyph (e.g. the grants list has no protection icon today), the icon column SHOULD NOT be reserved. Introducing a glyph later means introducing the Width-pinned slot at the same commit.
+- Row metadata that varies per-selection (`grants=N`, `tokens=N`, `expires=…`) MUST live in the status bar below the list, NOT inline on each row. Rows stay scannable; the status bar fills contextual detail for the cursor row.
+- References: `list_remove_views.go` integration list + integration-remove picker (lock column, Width 3), `views.go` bearers list (owner glyph + `p.` prefix, Width 3 each).
+
 ### Esc behavior
 - `esc` at the ROOT view returns to the main menu.
 - `esc` inside a nested picker returns to the picker's parent step, not the main menu.
@@ -65,6 +74,7 @@
 
 ## Forbidden Behaviors
 - MUST NOT render any UI element whose visible width depends on terminal width without `lipgloss.Width()` measurement.
+- MUST NOT use raw space-padding (`"  "`, `"   "`) as a reservation for a column that elsewhere in the SAME list may contain an emoji or a mixed-cell-width glyph. Pin the slot via `lipgloss.NewStyle().Width(N).Render(glyph)` so every row produces exactly N cells regardless of what the terminal does with the glyph.
 - MUST NOT bind `h` / `l` to anything (collides with vim-user expectation of horizontal cursor motion).
 - MUST NOT silently drop keystrokes — unmapped keys are no-ops but MUST NOT trigger side effects.
 - MUST NOT prompt for a passphrase or any sensitive input without `strings.Repeat("•", len(v))` masking.
@@ -87,6 +97,7 @@
 - PASS if every multi-select handles space / a / n / enter per the rules above.
 - PASS if every confirmation accepts both y/enter and n/esc as symmetric pairs.
 - PASS if `lipgloss.Width(cursorSt.Render(x))` equals `lipgloss.Width(x)` for every integration/grant/token row.
+- PASS if, for every list that has an icon column, the cell width of a row WITH the icon equals the cell width of a row WITHOUT the icon up to the first non-icon column (measured via `lipgloss.Width` applied to each row prefix slice).
 - FAIL if any help legend mentions a key that is not bound in the current view's Update.
 - FAIL if any destructive label is rendered in the default (non-failSt) style.
 
@@ -96,6 +107,7 @@
 - Verify `internal/tui/views.go::grantPickSelected` responds to space/a/n/enter.
 - Verify `internal/tui/list_remove_views.go::updateConfirm` accepts y/Y/enter and n/N/esc symmetrically.
 - Verify cursor rows in the integration list use `lipgloss.NewStyle().Width(20).Render(disp)` (rc7 fix).
+- v1.14.0-rc3 — verify every icon slot in `internal/tui/list_remove_views.go` + `internal/tui/views.go` uses `lipgloss.NewStyle().Width(N).Render(glyph)`, NOT ad-hoc `"  "` placeholders. Grep for the anti-pattern: `lock := "  "`, `ownerGlyph := "  "`, `portPrefix := "   "`.
 - Verify no TUI view writes directly to the vault file (grep for `vault.Save` / `vault.SaveEncrypted` in `internal/tui/`).
 
 ## Open Questions
