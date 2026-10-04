@@ -44,18 +44,22 @@ const defaultTokenFileTTL = 24 * time.Hour
 func runUse(args []string) int {
 	fs := flag.NewFlagSet("use", flag.ExitOnError)
 	tokenFile := fs.String("token-file", "", "write the bearer to this file (JSON {token, subject, expires_at}) with mode 0600, instead of printing to stdout. Operator sets DOP_TOKEN_FILE=<path>.")
-	// v1.14.0-rc3 Phase 6 — safety: refuse to print the bearer to a
-	// non-tty by default. LLM-driven shells capture stdout into a
-	// transcript, which leaks the bearer. The safe pattern is
-	// `eval "$(dop use <subject>)"` because $() captures stdout before
-	// anything prints — but that only works at a tty. For scripts that
-	// genuinely want the export line redirected, --print-export opts in.
-	printExport := fs.Bool("print-export", false, "force printing `export DOP_TOKEN=…` to stdout even when stdout is NOT a tty. Scripts that redirect dop use into eval must set this. Default (unset): refuse to print to a non-tty.")
+	// rc6h — --print-export retired. Pre-rc5 it was a three-tier gate
+	// (non-tty refuse / flag opt-in / approval on non-tty+flag). rc5
+	// Option A collapsed that to "approval always, no tty distinction"
+	// and the flag was retained as a documented-but-dead no-op. The
+	// stale help text misled agents into setting the flag defensively,
+	// which did nothing — remove the flag entirely to end the confusion.
+	// Legacy callers still pass it: parse silently + warn once to stderr.
+	legacyPrintExport := fs.Bool("print-export", false, "DEPRECATED (rc6h): no-op, accepted for backward-compat. The approval popup fires on every print; the flag never changed that.")
 	// --passphrase-stdin reserved for future use (phase 2 might add
 	// an approval-passphrase gate; today the admin session unlock is
 	// the gate). Parsed but ignored so scripts can predeclare it.
 	_ = fs.Bool("passphrase-stdin", false, "reserved — currently a no-op; the admin daemon unlock is the authorization gate")
 	_ = fs.Parse(args)
+	if *legacyPrintExport {
+		fmt.Fprintln(os.Stderr, "dop use: --print-export is deprecated and has no effect (removed in rc6h).")
+	}
 
 	rest := fs.Args()
 	if len(rest) != 1 {
@@ -141,17 +145,14 @@ func runUse(args []string) int {
 		fmt.Fprintf(os.Stderr, "  Point the agent at it: export DOP_TOKEN_FILE=%s\n", *tokenFile)
 		disk = true
 	} else {
-		// v1.14.0-rc4 — delegated to printguard. Tier 1 refusal on
-		// non-tty when --print-export is unset, Tier 2 opt-in via the
-		// flag, Tier 3 approval via the admin daemon's local popup
-		// when the flag is set on non-tty.
+		// rc5 Option A: every print requires operator approval regardless
+		// of tty/non-tty. printguard handles the dialog + fallbacks.
 		if err := printguard.Guard(printguard.Request{
-			Kind:      printguard.KindUse,
-			Subject:   subject,
-			PrintFlag: *printExport,
-			Out:       os.Stdout,
-			Paths:     paths,
-			Client:    client,
+			Kind:    printguard.KindUse,
+			Subject: subject,
+			Out:     os.Stdout,
+			Paths:   paths,
+			Client:  client,
 		}); err != nil {
 			return 1
 		}
