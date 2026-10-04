@@ -55,13 +55,15 @@ type Session struct {
 	startedAt    time.Time
 	lastActivity time.Time
 
-	// v1.14.0-rc6 — shell trust cache for the eval/pipe pattern. Key is
-	// "<pid>:<subject>". Set when a non-tty approval goes through on a
-	// read surface (dop use, dop env); subsequent same-shell/same-subject
-	// invocations pass without re-prompting. In-memory only; stale PIDs
-	// after a shell dies are harmless (next shell has a new PID). Full
-	// clear on admin logout (daemon exits). Protected by `mu`.
+	// v1.14.0-rc6 — shell trust cache (legacy; kept for one-release
+	// backward-compat with CLIs that still send OpShellTrust).
 	trustedShells map[string]bool
+	// v1.14.0-rc6i — trust-context grant store. Supersedes trustedShells.
+	// Key is "<ContextKind>:<ContextValue>:<Subject>" (built by the
+	// CLI-side resolver in internal/sessiontrust). Each grant carries
+	// metadata so `dop trust list` can show the operator which contexts
+	// are approved and when they'll idle-expire. Protected by `mu`.
+	trustGrants map[string]trustGrant
 
 	done chan struct{}
 
@@ -126,6 +128,7 @@ func StartSession(opts SessionOpts) (*Session, error) {
 		startedAt:     now,
 		lastActivity:  now,
 		trustedShells: map[string]bool{},
+		trustGrants:   map[string]trustGrant{},
 		done:          make(chan struct{}),
 		nowFn:         opts.NowFn,
 	}
@@ -251,6 +254,8 @@ func (s *Session) dispatch(req Request) Response {
 		return s.opApprovalPopup(req.Data)
 	case OpShellTrust:
 		return s.opShellTrust(req.Data)
+	case OpTrustContext:
+		return s.opTrustContext(req.Data)
 	default:
 		return Response{Error: "unknown op: " + req.Op}
 	}
@@ -524,6 +529,118 @@ func (s *Session) opShellTrust(payload []byte) Response {
 		return okResp(out)
 	default:
 		return Response{Error: "shell_trust: unknown mode " + req.Mode}
+	}
+}
+
+// trustGrant — v1.14.0-rc6i. One row in the TrustContext grant map.
+// Stored metadata lets `dop trust list` show operators which contexts
+// are active + when they'll idle-expire. Protected by Session.mu.
+type trustGrant struct {
+	ContextKind  string
+	ContextValue string
+	Subject      string
+	CreatedAt    time.Time
+	LastUsedAt   time.Time
+	// Source — the surface that originally granted the trust. Purely
+	// for observability; never read as a security signal. e.g.
+	// "print_use/local" or "print_env/phone".
+	Source string
+}
+
+// trustGrantIdleTTL — how long a grant stays usable without a hit.
+// Counselor-recommended 30-60min default; we go with 30m as the
+// conservative floor. The absolute-max is bounded by daemon lifetime
+// (logout + absolute session TTL both clear the grant map).
+const trustGrantIdleTTL = 30 * time.Minute
+
+// opTrustContext — v1.14.0-rc6i. Replaces opShellTrust with a richer
+// context model + metadata + idle expiry. See protocol.go
+// TrustContextReq for the mode semantics.
+func (s *Session) opTrustContext(payload []byte) Response {
+	var req TrustContextReq
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return Response{Error: "trust_context: bad payload"}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.trustGrants == nil {
+		s.trustGrants = map[string]trustGrant{}
+	}
+	now := s.now()
+	// Idle-expire pass: drop any grant whose LastUsedAt is older than
+	// the idle TTL. Done on every op so the map stays bounded without a
+	// background sweeper.
+	for k, g := range s.trustGrants {
+		if now.Sub(g.LastUsedAt) > trustGrantIdleTTL {
+			delete(s.trustGrants, k)
+		}
+	}
+	switch req.Mode {
+	case "check":
+		if req.ContextKind == "" || req.ContextValue == "" || req.Subject == "" {
+			return Response{Error: "trust_context check: kind+value+subject required"}
+		}
+		key := req.ContextKind + ":" + req.ContextValue + ":" + req.Subject
+		if g, ok := s.trustGrants[key]; ok {
+			g.LastUsedAt = now
+			s.trustGrants[key] = g
+			out, _ := json.Marshal(TrustContextResp{Trusted: true})
+			return okResp(out)
+		}
+		out, _ := json.Marshal(TrustContextResp{Trusted: false})
+		return okResp(out)
+	case "mark":
+		if req.ContextKind == "" || req.ContextValue == "" || req.Subject == "" {
+			return Response{Error: "trust_context mark: kind+value+subject required"}
+		}
+		key := req.ContextKind + ":" + req.ContextValue + ":" + req.Subject
+		g, exists := s.trustGrants[key]
+		if !exists {
+			g = trustGrant{
+				ContextKind:  req.ContextKind,
+				ContextValue: req.ContextValue,
+				Subject:      req.Subject,
+				CreatedAt:    now,
+			}
+		}
+		g.LastUsedAt = now
+		s.trustGrants[key] = g
+		out, _ := json.Marshal(TrustContextResp{Trusted: true})
+		return okResp(out)
+	case "list":
+		out := make([]TrustGrantInfo, 0, len(s.trustGrants))
+		for _, g := range s.trustGrants {
+			out = append(out, TrustGrantInfo{
+				ContextKind:  g.ContextKind,
+				ContextValue: g.ContextValue,
+				Subject:      g.Subject,
+				CreatedUnix:  g.CreatedAt.Unix(),
+				LastUsedUnix: g.LastUsedAt.Unix(),
+				Source:       g.Source,
+			})
+		}
+		b, _ := json.Marshal(TrustContextResp{Grants: out})
+		return okResp(b)
+	case "revoke":
+		if req.RevokeAll {
+			n := len(s.trustGrants)
+			s.trustGrants = map[string]trustGrant{}
+			b, _ := json.Marshal(TrustContextResp{Revoked: n})
+			return okResp(b)
+		}
+		if req.ContextKind == "" || req.ContextValue == "" || req.Subject == "" {
+			return Response{Error: "trust_context revoke: kind+value+subject required (or set revoke_all)"}
+		}
+		key := req.ContextKind + ":" + req.ContextValue + ":" + req.Subject
+		if _, ok := s.trustGrants[key]; ok {
+			delete(s.trustGrants, key)
+			b, _ := json.Marshal(TrustContextResp{Revoked: 1})
+			return okResp(b)
+		}
+		b, _ := json.Marshal(TrustContextResp{Revoked: 0})
+		return okResp(b)
+	default:
+		return Response{Error: "trust_context: unknown mode " + req.Mode}
 	}
 }
 

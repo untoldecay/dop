@@ -195,6 +195,77 @@ func (c *Client) ShellTrustMark(pid int, subject string) error {
 	return err
 }
 
+// TrustContextCheck — v1.14.0-rc6i. Replaces ShellTrustCheck.
+// kind+value identify the operator-approved execution context (built
+// by sessiontrust.Resolve); subject names the vault subject the
+// approval applies to. Non-fatal: any error returns false.
+func (c *Client) TrustContextCheck(kind, value, subject string) (bool, error) {
+	req, _ := json.Marshal(TrustContextReq{
+		ContextKind:  kind,
+		ContextValue: value,
+		Subject:      subject,
+		Mode:         "check",
+	})
+	resp, err := c.call(Request{Op: OpTrustContext, Data: req})
+	if err != nil {
+		return false, err
+	}
+	var r TrustContextResp
+	if err := json.Unmarshal(resp.Data, &r); err != nil {
+		return false, err
+	}
+	return r.Trusted, nil
+}
+
+// TrustContextMark — v1.14.0-rc6i. Replaces ShellTrustMark.
+func (c *Client) TrustContextMark(kind, value, subject string) error {
+	req, _ := json.Marshal(TrustContextReq{
+		ContextKind:  kind,
+		ContextValue: value,
+		Subject:      subject,
+		Mode:         "mark",
+	})
+	_, err := c.call(Request{Op: OpTrustContext, Data: req})
+	return err
+}
+
+// TrustContextList returns every active grant in the daemon's cache.
+// Operators use this via `dop trust list` to see what approvals are
+// in flight + when they'll idle-expire.
+func (c *Client) TrustContextList() ([]TrustGrantInfo, error) {
+	req, _ := json.Marshal(TrustContextReq{Mode: "list"})
+	resp, err := c.call(Request{Op: OpTrustContext, Data: req})
+	if err != nil {
+		return nil, err
+	}
+	var r TrustContextResp
+	if err := json.Unmarshal(resp.Data, &r); err != nil {
+		return nil, err
+	}
+	return r.Grants, nil
+}
+
+// TrustContextRevoke drops a single grant from the cache. Pass empty
+// strings + revokeAll=true to drop every grant.
+func (c *Client) TrustContextRevoke(kind, value, subject string, revokeAll bool) (int, error) {
+	req, _ := json.Marshal(TrustContextReq{
+		ContextKind:  kind,
+		ContextValue: value,
+		Subject:      subject,
+		Mode:         "revoke",
+		RevokeAll:    revokeAll,
+	})
+	resp, err := c.call(Request{Op: OpTrustContext, Data: req})
+	if err != nil {
+		return 0, err
+	}
+	var r TrustContextResp
+	if err := json.Unmarshal(resp.Data, &r); err != nil {
+		return 0, err
+	}
+	return r.Revoked, nil
+}
+
 // SockPath returns the socket path this client is talking to.
 func (c *Client) SockPath() string { return c.sockPath }
 
