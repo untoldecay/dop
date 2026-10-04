@@ -1840,12 +1840,16 @@ const (
 	grantModeEdit    = 5
 )
 
-// Edit sub-steps: field selection is by row (projects, tags, env_prefix).
+// Edit sub-steps: field selection is by row.
+// v1.14.0-rc3 adds Protection + optional Passphrase; grant-level
+// protection becomes independently settable (per rc3-plan.md Phase 3).
 const (
-	grantEditFieldProjects  = 0
-	grantEditFieldTags      = 1
-	grantEditFieldEnvPrefix = 2
-	grantEditFieldSave      = 3
+	grantEditFieldProjects   = 0
+	grantEditFieldTags       = 1
+	grantEditFieldEnvPrefix  = 2
+	grantEditFieldProtection = 3
+	grantEditFieldPassphrase = 4
+	grantEditFieldSave       = 5
 )
 
 type grantListView struct {
@@ -1867,6 +1871,11 @@ type grantListView struct {
 	editProject strings.Builder
 	editTags    strings.Builder
 	editPrefix  strings.Builder
+	// v1.14.0-rc3 — grant-level protection toggle in edit form.
+	editProtectCursor int
+	editProtectChoice bool
+	editProtectWas    bool
+	editPassBuf       strings.Builder
 }
 
 func newGrantListView(c *admin.Client, p *config.Paths) *grantListView {
@@ -2066,34 +2075,109 @@ func (v *grantListView) openEditor() {
 	v.editTags.WriteString(strings.Join(g.Tags, ","))
 	v.editPrefix.Reset()
 	v.editPrefix.WriteString(g.EnvPrefix)
+	// v1.14.0-rc3 — prime protection + reset passphrase buffer.
+	v.editProtectChoice = g.Protected
+	v.editProtectWas = g.Protected
+	for i, p := range protectionPresets {
+		if p.value == g.Protected {
+			v.editProtectCursor = i
+			break
+		}
+	}
+	v.editPassBuf.Reset()
 	v.editField = grantEditFieldProjects
 	v.mode = grantModeEdit
 	v.err = ""
 }
 
 func (v *grantListView) updateEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Passphrase field (4) is only visited when flipping unprotected →
+	// protected. Everything else skips over it.
+	needsPass := v.editProtectChoice && !v.editProtectWas
+
+	// Field 3 — Protection preset picker.
+	if v.editField == grantEditFieldProtection {
+		switch mm.String() {
+		case "esc":
+			v.mode = grantModeAction
+			return v, nil
+		case "up", "k":
+			if v.editProtectCursor > 0 {
+				v.editProtectCursor--
+			}
+		case "down", "j":
+			if v.editProtectCursor < len(protectionPresets)-1 {
+				v.editProtectCursor++
+			}
+		case "enter":
+			v.editProtectChoice = protectionPresets[v.editProtectCursor].value
+			if v.editProtectChoice && !v.editProtectWas {
+				v.editField = grantEditFieldPassphrase
+			} else {
+				v.editField = grantEditFieldSave
+			}
+		case "tab":
+			v.editProtectChoice = protectionPresets[v.editProtectCursor].value
+			if v.editProtectChoice && !v.editProtectWas {
+				v.editField = grantEditFieldPassphrase
+			} else {
+				v.editField = grantEditFieldSave
+			}
+		case "shift+tab":
+			v.editField = grantEditFieldEnvPrefix
+		}
+		return v, nil
+	}
 	switch mm.String() {
 	case "esc":
 		v.mode = grantModeAction
 		return v, nil
 	case "tab", "down":
-		if v.editField < grantEditFieldSave {
+		if v.editField == grantEditFieldPassphrase {
+			if needsPass {
+				v.editField = grantEditFieldSave
+			}
+		} else if v.editField < grantEditFieldSave {
 			v.editField++
+			// Skip passphrase row when it doesn't apply.
+			if v.editField == grantEditFieldPassphrase && !needsPass {
+				v.editField = grantEditFieldSave
+			}
 		}
 		return v, nil
 	case "shift+tab", "up":
-		if v.editField > grantEditFieldProjects {
+		if v.editField == grantEditFieldSave && !needsPass {
+			v.editField = grantEditFieldProtection
+		} else if v.editField > grantEditFieldProjects {
 			v.editField--
 		}
 		return v, nil
 	case "enter":
 		if v.editField == grantEditFieldSave {
+			if needsPass && v.editPassBuf.Len() == 0 {
+				v.editField = grantEditFieldPassphrase
+				v.err = "approval passphrase required to lock"
+				return v, nil
+			}
+			v.err = ""
 			v.mode = grantModeRun
 			return v, v.doEdit()
 		}
-		// otherwise advance to next field
+		if v.editField == grantEditFieldPassphrase {
+			if v.editPassBuf.Len() == 0 {
+				v.err = "approval passphrase required to lock"
+				return v, nil
+			}
+			v.err = ""
+			v.editField = grantEditFieldSave
+			return v, nil
+		}
+		// otherwise advance to next field (skipping passphrase if N/A).
 		if v.editField < grantEditFieldSave {
 			v.editField++
+			if v.editField == grantEditFieldPassphrase && !needsPass {
+				v.editField = grantEditFieldSave
+			}
 		}
 		return v, nil
 	case "backspace":
@@ -2125,6 +2209,8 @@ func (v *grantListView) editBuf() *strings.Builder {
 		return &v.editTags
 	case grantEditFieldEnvPrefix:
 		return &v.editPrefix
+	case grantEditFieldPassphrase:
+		return &v.editPassBuf
 	}
 	return nil
 }
@@ -2164,6 +2250,11 @@ func (v *grantListView) doEdit() tea.Cmd {
 	projects := strings.TrimSpace(v.editProject.String())
 	tags := strings.TrimSpace(v.editTags.String())
 	prefix := strings.TrimSpace(v.editPrefix.String())
+	// v1.14.0-rc3 — propagate grant-level protection choice through the
+	// CLI's tri-state --protected. Only lock-flips feed a passphrase.
+	protectChoice := v.editProtectChoice
+	protectWas := v.editProtectWas
+	passphrase := v.editPassBuf.String()
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		// `dop grant add` is upsert; passing the same id + integration +
@@ -2179,8 +2270,17 @@ func (v *grantListView) doEdit() tea.Cmd {
 		if prefix != "" {
 			args = append(args, "--env-prefix", prefix)
 		}
+		switch {
+		case protectChoice && !protectWas:
+			args = append(args, "--protected", "--passphrase-stdin")
+		case !protectChoice && protectWas:
+			args = append(args, "--protected=false")
+		}
 		cmd := exec.Command(self, args...)
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		if protectChoice && !protectWas {
+			cmd.Stdin = strings.NewReader(passphrase + "\n")
+		}
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -2372,6 +2472,48 @@ func (v *grantListView) viewEdit() string {
 		}
 		b.WriteString("\n")
 	}
+
+	// v1.14.0-rc3 — Protection preset picker (field 3).
+	protectLbl := "Protection"
+	protectVal := "default"
+	if v.editProtectChoice {
+		protectVal = "protected"
+	}
+	if v.editField == grantEditFieldProtection {
+		protectLbl = cursorSt.Render(protectLbl)
+	} else {
+		protectLbl = mutedSt.Render(protectLbl)
+	}
+	b.WriteString(protectLbl + ": " + protectVal + "\n")
+	if v.editField == grantEditFieldProtection {
+		for i, p := range protectionPresets {
+			prefix := "    "
+			label := p.label
+			hint := p.hint
+			if i == v.editProtectCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(p.label)
+			}
+			b.WriteString(prefix + label + "    " + mutedSt.Render(hint) + "\n")
+		}
+	}
+
+	// v1.14.0-rc3 — Passphrase (field 4). Only rendered when flipping
+	// unprotected → protected (same shape as integration edit).
+	needsPass := v.editProtectChoice && !v.editProtectWas
+	if needsPass {
+		passLbl := mutedSt.Render("Approval passphrase")
+		if v.editField == grantEditFieldPassphrase {
+			passLbl = cursorSt.Render("Approval passphrase")
+		}
+		masked := strings.Repeat("•", v.editPassBuf.Len())
+		b.WriteString(passLbl + ": " + masked)
+		if v.editField == grantEditFieldPassphrase {
+			b.WriteString(cursorSt.Render("▎"))
+		}
+		b.WriteString("\n")
+	}
+
 	b.WriteString("\n")
 	saveStyle := mutedSt
 	if v.editField == grantEditFieldSave {
@@ -2382,7 +2524,7 @@ func (v *grantListView) viewEdit() string {
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("tab / ↑↓ field | enter save (on [Save]) · esc cancel"))
+	b.WriteString("\n" + helpSt.Render("tab/↑↓ field · enter save (on [Save]) · esc cancel"))
 	return b.String()
 }
 
