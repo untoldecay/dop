@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -154,9 +155,11 @@ func isValidSessionID(v string) bool {
 	return true
 }
 
-// defaultGetsid wraps syscall.Getsid for the resolver injection point.
+// defaultGetsid wraps unix.Getsid for the resolver injection point.
+// Uses golang.org/x/sys/unix because syscall.Getsid is Darwin-only
+// in the stdlib — the x/sys variant works on both Darwin and Linux.
 func defaultGetsid(pid int) (int, error) {
-	return syscall.Getsid(pid)
+	return unix.Getsid(pid)
 }
 
 // readControllingTTY builds a stable identifier for the controlling
