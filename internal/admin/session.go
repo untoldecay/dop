@@ -55,6 +55,14 @@ type Session struct {
 	startedAt    time.Time
 	lastActivity time.Time
 
+	// v1.14.0-rc6 — shell trust cache for the eval/pipe pattern. Key is
+	// "<pid>:<subject>". Set when a non-tty approval goes through on a
+	// read surface (dop use, dop env); subsequent same-shell/same-subject
+	// invocations pass without re-prompting. In-memory only; stale PIDs
+	// after a shell dies are harmless (next shell has a new PID). Full
+	// clear on admin logout (daemon exits). Protected by `mu`.
+	trustedShells map[string]bool
+
 	done chan struct{}
 
 	// Optional: nowFn overrides time.Now for tests.
@@ -109,16 +117,17 @@ func StartSession(opts SessionOpts) (*Session, error) {
 		now = opts.NowFn()
 	}
 	s := &Session{
-		keys:         opts.Keys,
-		paths:        opts.Paths,
-		sockPath:     opts.SockPath,
-		listener:     lst,
-		idleTTL:      opts.IdleTTL,
-		absTTL:       opts.AbsTTL,
-		startedAt:    now,
-		lastActivity: now,
-		done:         make(chan struct{}),
-		nowFn:        opts.NowFn,
+		keys:          opts.Keys,
+		paths:         opts.Paths,
+		sockPath:      opts.SockPath,
+		listener:      lst,
+		idleTTL:       opts.IdleTTL,
+		absTTL:        opts.AbsTTL,
+		startedAt:     now,
+		lastActivity:  now,
+		trustedShells: map[string]bool{},
+		done:          make(chan struct{}),
+		nowFn:         opts.NowFn,
 	}
 	go s.acceptLoop()
 	go s.ttlLoop()
@@ -240,6 +249,8 @@ func (s *Session) dispatch(req Request) Response {
 		return s.opUnwrapPortable(req.Data)
 	case OpApprovalPopup:
 		return s.opApprovalPopup(req.Data)
+	case OpShellTrust:
+		return s.opShellTrust(req.Data)
 	default:
 		return Response{Error: "unknown op: " + req.Op}
 	}
@@ -482,6 +493,37 @@ func (s *Session) opApprovalPopup(payload []byte) Response {
 	default:
 		out, _ := json.Marshal(ApprovalPopupResp{Decision: "denied", Reason: "no_button"})
 		return okResp(out)
+	}
+}
+
+// opShellTrust — v1.14.0-rc6. Check or mark a (PID, subject) in the
+// in-memory trust cache. Used by printguard to skip the approval
+// popup on same-shell/same-subject repeat invocations after the
+// first eval already got a passphrase.
+func (s *Session) opShellTrust(payload []byte) Response {
+	var req ShellTrustReq
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return Response{Error: "shell_trust: bad payload"}
+	}
+	if req.PID <= 0 || req.Subject == "" {
+		return Response{Error: "shell_trust: pid+subject required"}
+	}
+	key := fmt.Sprintf("%d:%s", req.PID, req.Subject)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.trustedShells == nil {
+		s.trustedShells = map[string]bool{}
+	}
+	switch req.Mode {
+	case "check":
+		out, _ := json.Marshal(ShellTrustResp{Trusted: s.trustedShells[key]})
+		return okResp(out)
+	case "mark":
+		s.trustedShells[key] = true
+		out, _ := json.Marshal(ShellTrustResp{Trusted: true})
+		return okResp(out)
+	default:
+		return Response{Error: "shell_trust: unknown mode " + req.Mode}
 	}
 }
 

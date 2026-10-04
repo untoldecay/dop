@@ -45,6 +45,13 @@ const (
 	// as the LOCAL fast-path; they fall back to the tunnel+phone flow
 	// when the daemon isn't reachable or the popup times out.
 	OpApprovalPopup = "approval_popup"
+	// v1.14.0-rc6 — shell-trust cache for the eval/pipe pattern. Lets
+	// a shell session skip repeat approvals for the same subject after
+	// the first approval. Scoped to the eval case (stdout non-tty) on
+	// read surfaces (dop use, dop env). The daemon holds the map in
+	// memory keyed by "<pid>:<subject>"; shell death leaves stale
+	// entries that cost nothing. Logout clears the whole set.
+	OpShellTrust = "shell_trust"
 )
 
 // StatusResp is the payload of an `OpStatus` response.
@@ -115,6 +122,24 @@ type ApprovalPopupReq struct {
 	PromptText string `json:"prompt_text"`
 	// TimeoutMs bounds the dialog's wait. 0 → daemon default (60s).
 	TimeoutMs int `json:"timeout_ms,omitempty"`
+}
+
+// ShellTrustReq — v1.14.0-rc6. Mode is "check" (returns whether the
+// shell PID is already trusted for this subject) or "mark" (adds the
+// (PID, subject) tuple to the trusted set). The caller supplies its
+// own `os.Getppid()` so the daemon doesn't need a side-channel for
+// peer PID (unix socket peer-cred provides the uid but not a stable
+// shell PID).
+type ShellTrustReq struct {
+	PID     int    `json:"pid"`
+	Subject string `json:"subject"`
+	Mode    string `json:"mode"` // "check" | "mark"
+}
+
+// ShellTrustResp — Trusted=true means the (PID, subject) is in the
+// cache. For "mark" mode this is always true after a successful call.
+type ShellTrustResp struct {
+	Trusted bool `json:"trusted"`
 }
 
 // ApprovalPopupResp — the daemon's verdict.

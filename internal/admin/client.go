@@ -170,6 +170,31 @@ func (c *Client) ApprovalPopup(kind, subject, promptText string, timeout time.Du
 	return r.Decision, r.Reason, nil
 }
 
+// ShellTrustCheck — v1.14.0-rc6. Asks the daemon whether the current
+// shell PID is already trusted for the given subject on the eval/pipe
+// print path. Non-fatal: any error returns false (safe default).
+func (c *Client) ShellTrustCheck(pid int, subject string) (bool, error) {
+	req, _ := json.Marshal(ShellTrustReq{PID: pid, Subject: subject, Mode: "check"})
+	resp, err := c.call(Request{Op: OpShellTrust, Data: req})
+	if err != nil {
+		return false, err
+	}
+	var r ShellTrustResp
+	if err := json.Unmarshal(resp.Data, &r); err != nil {
+		return false, err
+	}
+	return r.Trusted, nil
+}
+
+// ShellTrustMark — v1.14.0-rc6. Records (PID, subject) in the daemon's
+// in-memory trust cache so subsequent same-shell/same-subject eval
+// invocations skip the approval popup.
+func (c *Client) ShellTrustMark(pid int, subject string) error {
+	req, _ := json.Marshal(ShellTrustReq{PID: pid, Subject: subject, Mode: "mark"})
+	_, err := c.call(Request{Op: OpShellTrust, Data: req})
+	return err
+}
+
 // SockPath returns the socket path this client is talking to.
 func (c *Client) SockPath() string { return c.sockPath }
 
