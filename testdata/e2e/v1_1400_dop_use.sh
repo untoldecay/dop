@@ -97,21 +97,18 @@ OUT7=$("$DOP" use --print-export CamAdmin 2>&1 || true)
 echo "$OUT7" | grep -qi "admin" || fail "expected admin-session hint, got: $OUT7"
 pass "locked session refused"
 
-echo "=== [8b] non-tty refusal without --print-export (Phase 6/rc4)"
+echo "=== [8b] rc5 Option A: approval required; env escape pre-approves"
 # Re-login (step 7 logged out).
 echo -n "$PASS" | "$DOP" admin login --passphrase-stdin >/dev/null
-# For this specific test we need the env escape OFF so the Tier 1
-# refusal path actually runs. Rest of the suite restores it.
-REFUSAL=$(DOP_APPROVAL_PASSPHRASE="" "$DOP" use CamAdmin 2>&1 || true)
-echo "$REFUSAL" | grep -q "refusing to print secret to a non-tty" \
-    || fail "expected non-tty refusal, got: $REFUSAL"
-echo "$REFUSAL" | grep -q 'eval "\$(dop use' \
-    || fail "refusal missing eval hint, got: $REFUSAL"
-# With DOP_APPROVAL_PASSPHRASE set (env-escape), stdout print proceeds.
-OK8B=$("$DOP" use --print-export CamAdmin 2>&1 || true)
+# With a WRONG env passphrase, approval verify fails and dop use refuses.
+BAD=$(DOP_APPROVAL_PASSPHRASE="wrong-pass" "$DOP" use CamAdmin 2>&1 || true)
+echo "$BAD" | grep -q "approval denied" \
+    || fail "wrong env passphrase should be denied, got: $BAD"
+# With the correct env passphrase, dop use emits the export line.
+OK8B=$("$DOP" use CamAdmin 2>&1 || true)
 echo "$OK8B" | grep -q "^export DOP_TOKEN=" \
     || fail "env-escape should emit export line, got: $OK8B"
-pass "non-tty refusal honored; env-escape opts in"
+pass "wrong env rejected; correct env auto-approves"
 
 echo "=== [8] audit event use_attached recorded, bearer NOT in log"
 grep -q '"event":"use_attached"' "$AUDIT" || fail "no use_attached event in audit log"
