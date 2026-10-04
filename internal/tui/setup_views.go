@@ -182,7 +182,7 @@ func (v *setupAdminView) doInit() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "admin", "init", "--passphrase-stdin")
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		// CLI reads two lines when --passphrase-stdin is set:
 		//   line 1 → admin passphrase
 		//   line 2 → approval passphrase
@@ -200,7 +200,7 @@ func (v *setupAdminView) login(pass string) tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "admin", "login", "--passphrase-stdin")
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		cmd.Stdin = strings.NewReader(pass)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -332,7 +332,7 @@ func (v *attachVaultView) attach(u string) tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "init", flag, u)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {

@@ -137,7 +137,7 @@ func (v *revokeView) doRevoke() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "token", "revoke", target)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -303,7 +303,7 @@ func (v *teamAddView) save() tea.Cmd {
 			args = append(args, "--note", note)
 		}
 		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -552,7 +552,7 @@ func (v *teamRemoveView) doRemove() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "team", "remove", "--name", name, "--force")
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {

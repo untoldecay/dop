@@ -411,7 +411,7 @@ func (v *integrationListView) doRemove() tea.Cmd {
 			args = append(args, "--force")
 		}
 		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -932,7 +932,7 @@ func (v *integrationRemoveView) doRemove() tea.Cmd {
 			args = append(args, "--token", tn)
 		}
 		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -1310,7 +1310,7 @@ func (v *integrationListView) doTokenSetScope() tea.Cmd {
 			"--name", integ,
 			"--token-name", tok,
 			"--scope-note", scope)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -1330,7 +1330,7 @@ func (v *integrationListView) doTokenRotate() tea.Cmd {
 			"--name", integ,
 			"--token-name", tok,
 			"--value-stdin")
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		cmd.Stdin = strings.NewReader(newValue + "\n")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -1349,7 +1349,7 @@ func (v *integrationListView) doTokenRemove() tea.Cmd {
 		cmd := exec.Command(self, "integration", "remove-token",
 			"--name", integ,
 			"--token", tok)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -1525,7 +1525,7 @@ func (v *integrationListView) doIntEdit() tea.Cmd {
 		self, _ := os.Executable()
 		if nameNew != "" && nameNew != nameWas {
 			rename := exec.Command(self, "integration", "rename", "--from", nameWas, "--to", nameNew)
-			rename.Env = append(os.Environ(), "DOP_NO_TUI=1")
+			rename.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 			var rstderr bytes.Buffer
 			rename.Stderr = &rstderr
 			if err := rename.Run(); err != nil {
@@ -1560,7 +1560,7 @@ func (v *integrationListView) doIntEdit() tea.Cmd {
 			args = append(args, "--protected=false")
 		}
 		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		if protectChoice && !protectWas {
 			cmd.Stdin = strings.NewReader(passphrase + "\n")
 		}
@@ -2348,7 +2348,7 @@ func (v *grantListView) doRemove() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "grant", "remove", "--id", id)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -2391,7 +2391,7 @@ func (v *grantListView) doEdit() tea.Cmd {
 			args = append(args, "--protected=false")
 		}
 		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		if protectChoice && !protectWas {
 			cmd.Stdin = strings.NewReader(passphrase + "\n")
 		}
@@ -2742,7 +2742,7 @@ func (v *grantRemoveView) doRemove() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "grant", "remove", "--id", id)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {

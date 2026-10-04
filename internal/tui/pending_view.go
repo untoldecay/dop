@@ -179,7 +179,7 @@ func runDopApprove(sas, passphrase string) error {
 	}
 	cmd := exec.Command(self, "approve", "--passphrase-stdin", sas)
 	cmd.Stdin = strings.NewReader(passphrase)
-	cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+	cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -199,7 +199,7 @@ func runDopReject(sas string) error {
 		return err
 	}
 	cmd := exec.Command(self, "reject", sas)
-	cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+	cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

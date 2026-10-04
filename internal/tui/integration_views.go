@@ -846,7 +846,7 @@ func (v *addIntegrationView) save() tea.Cmd {
 			args = append(args, "--protected", "--passphrase-stdin")
 		}
 		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		if protected {
 			cmd.Stdin = strings.NewReader(passphrase + "\n")
 		}
@@ -1385,7 +1385,7 @@ func (v *addGrantView) save() tea.Cmd {
 			args = append(args, "--tags", tags)
 		}
 		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
