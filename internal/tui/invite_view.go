@@ -344,6 +344,23 @@ func (v *inviteView) View() string {
 			b.WriteString(okSt.Render("✓ invite completed successfully") + "\n")
 		} else {
 			b.WriteString(failSt.Render("✗ invite failed: "+v.finalErr) + "\n")
+			// rc7g — surface the captured stderr tail on failure so the
+			// operator can see WHY. Previously only the running-step view
+			// showed the tail; on failure the view jumped to this done
+			// branch and the lines were invisible, leaving the operator
+			// with "exit status 1" and no diagnostic.
+			v.linesMu.Lock()
+			if len(v.lines) > 0 {
+				b.WriteString("\n" + mutedSt.Render("Last subprocess output:") + "\n")
+				start := 0
+				if len(v.lines) > 12 {
+					start = len(v.lines) - 12
+				}
+				for _, ln := range v.lines[start:] {
+					b.WriteString("  " + mutedSt.Render(ln) + "\n")
+				}
+			}
+			v.linesMu.Unlock()
 		}
 	}
 	if v.err != "" {
