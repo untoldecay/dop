@@ -13,6 +13,7 @@
 - MUST verify `binding.pubkey` matches the local agent key file (constant-time compare) when the binding is `pin`+claimed or `pubkey`.
 - MUST reject an unclaimed `pin` binding with "requires a PIN claim first".
 - MUST reject a bound bearer without a matching agent key with "no agent key on this machine".
+- **Portable-owner bypass (v1.14.0-rc3)**: MUST skip the binding/agent-key check when the bearer is admin-owned portable (record has `PortableWrapped != ""` AND an active admin session exists AND `rec.IssuedBy == session.AdminPubkey`). Signature + generation + expiry + scope checks still apply. Emits `exec` with `extra.portable_owner="yes"`.
 
 ## Mandatory Behaviors
 - `dop exec` MUST emit an `EventExec` audit event on success (subject, lookup_id, agent_name, generation, env_keys, child basename).

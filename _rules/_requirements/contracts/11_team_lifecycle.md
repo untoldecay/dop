@@ -2,6 +2,7 @@
 
 ## Scope
 - `dop team add-key` / `list` / `remove` and the trust + revocation guarantees that come with a multi-admin vault.
+- Admin-invite lifecycle (`dop team invite` / `approve-invite` / `cancel-invite`) lives in **contract 23**.
 
 ## Purpose
 - Let more than one operator administer the vault without letting removal be a foot-gun.

@@ -22,13 +22,18 @@ Short, scannable list of every feature contract. Each contract pins the invarian
 | 16 | [Integration Kinds](16_integration_kinds.md) | `api`/`cli`/`mcp`/`other` + canonical env-key promotion. |
 | 17 | [Endpoints Discovery Probe](17_endpoints_probe.md) | Opt-in probe at `integration add` time. OpenAPI path order + MCP tools/list. |
 | 18 | [Token Lifecycle](18_token_lifecycle.md) | `integration set-token` (rotate value / edit scope). TUI token drill-down parity with grants. |
-| 19 | [`dop use`](19_dop_use.md) | Admin's shortcut: `token issue --portable` stashes bearer; `dop use <subject>` emits export line via daemon unwrap. |
+| 19 | [`dop use`](19_dop_use.md) | Admin's shortcut: `token issue --portable` stashes bearer; `dop use <subject>` emits export line via daemon unwrap. Auto-unlock on locked session; `--print-export` deprecated (rc6h). |
+| 20 | [Trust Context Cache + Harness Adapters](20_trust_context_cache.md) | Daemon-held approval cache keyed on `(ContextKind, ContextValue, Subject)` with idle TTL. Resolver precedence: `DOP_SESSION_ID` → recognized harness env → tty → sid → ppid. |
+| 21 | [Self-Update](21_update_cli.md) | `dop update` CLI: GitHub release fetch + SHA256 verify + atomic rename + rollback dir. Semver-aware pre-release → stable upgrade. |
+| 22 | [Claude Code Plugin + Slash Command](22_claude_plugin.md) | `dop skill install` writes BOTH loose files AND a local-marketplace plugin bundle; `/dop-use` slash command bundled. `dop admin reset --purge` tears both down. |
+| 23 | [Admin Invite Lifecycle](23_invite_lifecycle.md) | Fire-and-forget `dop team invite` + `dop team approve-invite` + `dop team cancel-invite`. TUI Team > Pending tab with `a` approve + `d` cancel. |
 
 ## Status
 
 - 01-12 are foundational (pre-v1.13). Updated in-place as features landed.
 - 13-18 are v1.13 additions. Written against the `generate-contract.md` prompt.
-- 19+ are v1.14 additions.
+- 19 is v1.14.0-rc1 (`dop use` + portable).
+- 20-23 are v1.14.0+ (rc6–rc7p). TrustContext cache, update CLI, plugin packaging, fire-and-forget invite.
 
 ## When to add a new contract
 

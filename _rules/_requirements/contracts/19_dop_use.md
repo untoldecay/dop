@@ -19,10 +19,11 @@
 - Usage: `dop use [--token-file FILE] <subject>`
 - MUST resolve `<subject>` to exactly one ACTIVE capability. Zero matches or multiple matches MUST exit 1 with a clear error.
 - MUST refuse (exit 1) when the capability has an empty `PortableWrapped`, with a hint pointing at `--portable`.
-- MUST refuse (exit 1) when the session is locked, pointing operator at `dop admin login`.
+- When the session is locked, MUST call `requireAdminSessionOrUnlock` which pops the native osascript dialog on darwin + GUI reachability (`launchctl managername == Aqua` AND `/dev/console` uid matches). On operator approve → session re-active → flow continues. On cancel / dialog unavailable / non-darwin → exit 1 pointing operator at `dop admin login`.
 - MUST refuse (exit 1) when any grant carried by the bearer is protected and the current admin pubkey isn't the owner (rc12 gate reused).
 - Default output: `export DOP_TOKEN=<bearer>\n` to stdout. Nothing else to stdout. Operator pattern: `eval "$(dop use <subject>)"`.
-- v1.14.0-rc3 — MUST refuse to print to a non-tty unless `--print-export` is passed. LLM-driven shells running `! dop use X` capture stdout into transcripts on disk; this refusal keeps the bearer out of those captures. Refusal MUST include the safe eval incantation in the error text and point at `--print-export` for scripts that genuinely want stdout.
+- MUST route the print through `printguard.Guard` (approval always, rc5 Option A). See contract 07. Second `dop use` call in the same trust-context session skips the popup via the trust-context cache (contract 20).
+- v1.14.0-rc6h — `--print-export` is **DEPRECATED**. Parsed for backward-compat with pre-rc6h scripts; emits a one-line stderr deprecation warning when set. Has no effect on gating (printguard requires approval regardless of flag).
 - With `--token-file FILE`: writes a JSON envelope `{token, subject, issued_at, expires_at}` to FILE with mode 0600, prints a short confirmation to stderr, nothing to stdout.
 - The `--token-file` TTL (default 24h) is embedded in the file's `expires_at`. Readers (future `dop exec` extensions, etc.) MAY refuse an expired file.
 - MUST emit `EventUseAttached` on success. Fields: `Subject`, `LookupID`, `Actor` (short admin pubkey), `Extra.capability_id`, `Extra.disk` (bool-as-string).

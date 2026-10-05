@@ -14,8 +14,9 @@
 - MUST let both planes coexist on one host without opening a privilege-escalation path from execution to administrative.
 
 ## Mandatory Behaviors
-- MUST refuse admin subcommands (`token issue`, `token revoke`, `token repin`, `admin set-approval`, `integration *`, `grant *`, `team *`, `vault edit`) unless the caller can reach an active daemon socket.
+- MUST refuse admin subcommands (`token issue`, `token revoke`, `token repin`, `admin set-approval`, `integration *`, `grant *`, `team *`, `vault edit`, `trust list`, `trust revoke`, `use`) unless the caller can reach an active daemon socket.
 - MUST provide agent-only subcommands (`dop exec`, `dop whoami`, `dop env`, `dop claim`, `dop pending`, `dop approve`, `dop reject`, `dop watch`) that never open `vault.yaml`.
+- v1.14.0 — cross-plane subcommands (don't require daemon or admin keys): `dop update` (fetches from GitHub, replaces binary; see contract 21), `dop skill install` + `dop skill show` + `dop skill show-command` (writes templates; `claude plugin` registration is best-effort; see contract 22), `dop version`, `dop help`, `dop doctor`.
 - MUST detect the plane at install time (`admin.KeyFileExists`) and refuse `dop init --cache` on a host that already carries admin keys.
 - SHOULD surface which plane a host is on via `dop doctor` / `dop admin status`.
 

@@ -72,6 +72,41 @@
 - Persistent errors stay visible until the next successful action.
 - Flash and error MUST NOT render in the same frame; error wins.
 
+### Text input + caret (rc6f)
+- Every editable text field in the TUI MUST use `internal/tui.textField` (not `strings.Builder`).
+- `textField` MUST support left/right/home/end/delete/backspace in the handler layer; rune insert at cursor.
+- Views MUST render the active field via `Split()` or `SplitMasked()` so the `▎` caret glyph appears at the real cursor position, not always at the end.
+- UTF-8 safety: `textField` operates on rune slices, never byte-indexed slices into strings.
+
+### Settings pattern (rc7l)
+- Settings view MUST use a two-state list→picker navigation: list mode shows every setting with its current value in `[...]` brackets; cursor moves with ↑↓; enter opens a picker for the active row.
+- Picker MUST open with the cursor on the current value so enter-without-moving is a no-op commit.
+- A setting MAY add a `custom…` choice that drops into a text-input mode (operator types a free-form value, enter commits + returns to list, esc returns to picker).
+- MUST NOT use per-key toggle shortcuts (`f` / `t` / `h`) for settings — the select pattern is the one way.
+
+### Tabs pattern (rc7m)
+- When a view has distinct sub-pages (e.g. Team's `Members` / `Pending`), MUST render them as a tab bar in the title line: `Team   [1] Members (N)   [2] Pending (M)`.
+- `tab` key MUST cycle; `1`..`N` MUST jump to a specific tab; `esc` MUST exit the view (not the tab).
+- Each tab manages its own cursor; switching tabs resets cursor to 0.
+
+### Session-expiry guard (rc7h)
+- Every admin-gated menu dispatch (every `items[cursor].fn` and `g.direct` call in the hierarchical groups menu) MUST route through `rootModel.guardAdminAction(fn)`.
+- `guardAdminAction` MUST check `adminClient.SessionActive()` first. On active → call `fn(m)` directly.
+- On locked → stash `fn` in `pendingUnlockFn`, fire the `runGUIUnlock()` tea.Cmd (shells out to `dop admin __gui-unlock`).
+- `guiUnlockResultMsg` success → refresh state, rebuild menu, invoke stashed `fn`.
+- `guiUnlockResultMsg` failure → print specific stderr reason + `tea.Quit`.
+
+### Fire-and-forget subprocess pattern (rc7o)
+- When a TUI subprocess exits with rc=0 and the operation is intentionally async (e.g. invite waiting on remote response), MUST transition to a `waiting` state instead of marking the child done.
+- Waiting state MUST show the relevant handoff details (PIN, URL, invite_id) and a clear hint for the next step.
+- Enter on waiting MUST close the view without side effects.
+- Esc on waiting MUST open a cancel-confirm overlay (y/n); confirmed cancel runs a separate subprocess (`cancel-invite` style).
+
+### Locked-field pattern (rc7n)
+- When a form flow enters a sub-mode where some fields are display-only (e.g. "add credential to existing integration"), locked rows MUST render with a `🔒 ` prefix (via `mutedSt`) so operators scan them as read-only.
+- The step-navigation handler MUST clamp shift+tab/up so the cursor cannot enter a locked step.
+- Title + subtitle MUST change to reflect the sub-mode (e.g. `Add credential to <service>` + "Integration-level fields are locked for view.").
+
 ## Forbidden Behaviors
 - MUST NOT render any UI element whose visible width depends on terminal width without `lipgloss.Width()` measurement.
 - MUST NOT use raw space-padding (`"  "`, `"   "`) as a reservation for a column that elsewhere in the SAME list may contain an emoji or a mixed-cell-width glyph. Pin the slot via `lipgloss.NewStyle().Width(N).Render(glyph)` so every row produces exactly N cells regardless of what the terminal does with the glyph.

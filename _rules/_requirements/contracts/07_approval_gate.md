@@ -2,9 +2,11 @@
 
 ## Scope
 - The approval passphrase, the shared 8-attempt rate limit, and the rules that make claim approval a genuine second factor.
+- rc5 Option A expansion: approval also gates every **print surface** (`dop use`, `dop token issue`, `dop env`, `dop claim --shell`) via `internal/cli/printguard`.
 
 ## Purpose
 - Prevent a same-uid agent (or anyone with the pending-claim URL) from finalizing a claim on their own.
+- Prevent an LLM-driven `! dop <print>` call from leaking a bearer into chat transcripts without operator consent.
 
 ## Invariants
 - MUST maintain an approval passphrase distinct from the admin passphrase.
@@ -21,6 +23,12 @@
 - Both the CLI and web paths MUST share the pending-claim's `FailureCount` field via `pendingclaim.BumpFailure`.
 - `BumpFailure` and `SetState` MUST hold a `LOCK_EX` flock on `<PendingDir>/<lookup_id>.lock` for their read-modify-write section.
 - The pending claim MUST be auto-rejected when `FailureCount` reaches `pendingclaim.MaxFailures` (8).
+- **Print surfaces (rc5 Option A)** — `dop use` / `dop token issue` / `dop env` / `dop claim --shell` MUST route every print through `printguard.Guard`. Guard MUST require approval regardless of tty state. Two bypasses:
+  - `DOP_FROM_TUI=1` — TUI subprocess invocation; captured output goes to the TUI render path, not a transcript.
+  - `DOP_APPROVAL_PASSPHRASE` — scripted/CI pre-approval, verified via `approval.Verify`.
+- **Trust-context cache** — see contract 20. On `KindUse` + `KindEnv` + non-tty + daemon reachable, Guard MUST serve a cache hit without re-prompting.
+- **Local osascript dialog** — on darwin with GUI reachability (`launchctl managername == Aqua` AND `/dev/console` uid matches), Guard MUST prompt via `admin.ApprovalPopup` RPC → daemon-side `approvalprompt.Ask`. Timeout from `userprefs.ApprovalPopupTimeoutSeconds` (default 60s).
+- **Phone fallback** — on local-popup timeout OR daemon unreachable OR `decision=unsupported`, Guard MUST escalate to `printapproval.Run` (tunnel + QR + mobile approval; see contract 08).
 
 ## Forbidden Behaviors
 - MUST NOT reuse the admin passphrase for approval (never type the master secret into a phone form).
@@ -32,7 +40,7 @@
 ## Interfaces
 - Inputs: TTY prompt (or `--passphrase-stdin`) for CLI; HTML form for web.
 - Outputs: `approval.Verify` returns `(bool, error)`; `pendingclaim.BumpFailure` returns `(count, autoRejected, err)`.
-- Events: `claim_approved`, `claim_denied` (with reason=`pin_mismatch`|`rejected`|`approval_timeout`|`pin_expired`).
+- Events: `claim_approved`, `claim_denied` (with reason=`pin_mismatch`|`rejected`|`approval_timeout`|`pin_expired`), `print_approval_requested`, `print_approval_granted`, `print_approval_denied` (with `extra.surface` ∈ {`print_use`,`print_issue`,`print_env`,`print_claim`} and `extra.channel` ∈ {`local`,`phone`,`env`,`trust_context`,`shell_trust`}).
 - Dependencies: `golang.org/x/crypto/argon2`, `golang.org/x/sys/unix` (flock).
 
 ## State & Data Rules
