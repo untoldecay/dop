@@ -98,3 +98,4 @@ This index provides a record of human-AI collaboration.
 
 | [adopt] _timeless digest fire and resilience | Automatically adopted during verify | Unknown | Unknown | 2026-09-15 | N/A | [2026-09-15_timeless-digest-fire-and-resilience.md](2026-09-15_timeless-digest-fire-and-resilience.md) |
 | [fix] TUI issue-success bearer-loss guard | any key dismissed the one-time bearer; pbcopy ran on every repaint | untoldecay | Unknown | 2026-10-05 21:45 | main | [2026-10-05_dop-tui-bearer-loss-guard.md](2026-10-05_dop-tui-bearer-loss-guard.md?id=sess-8aed4c&sha=da3ad167ae275dc0384632ad01d919db192f6fe2) |
+| [fix] TUI update view channel flip from done screen | c only handled on confirm step; up-to-date stable skipped to done with no way to reach dev | untoldecay | Unknown | 2026-10-05 22:29 | main | [2026-10-05_dop-tui-update-channel-flip.md](2026-10-05_dop-tui-update-channel-flip.md?id=sess-c1160c&sha=d6fcfef5bffd0ec39682c73490d1351ad888a2c5) |

@@ -10,7 +10,8 @@
 //   1. check phase: run `dop update --check-only` (channel from flag or
 //      prefs), parse the stderr for "Latest: <tag>" vs installed.
 //   2. confirm phase: operator sees installed → latest, picks y/n, can
-//      flip the channel with `c`.
+//      flip the channel with `c`. `c` also works on the done screen
+//      when nothing was installed (already up to date / check failed).
 //   3. install phase: run `dop update` (no --check-only), stream
 //      stderr. On rc=0, exit TUI so the stale binary doesn't keep
 //      running (the renamed file is already in place).
@@ -128,6 +129,12 @@ func (v *updateView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		if v.step == updateStepDone {
+			// Nothing installed (already up to date, or the check
+			// failed) → c still flips the channel. Without this, an
+			// operator on the latest stable can never reach dev.
+			if mm.String() == "c" && v.canFlipFromDone() {
+				return v, v.flipChannel()
+			}
 			v.done = true
 			// Successful update means the running binary is stale —
 			// exit the TUI so the next `dop` launch gets the new one.
@@ -146,13 +153,7 @@ func (v *updateView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				v.flash = "update cancelled"
 				return v, nil
 			case "c":
-				if v.channel == "stable" {
-					v.channel = "dev"
-				} else {
-					v.channel = "stable"
-				}
-				v.step = updateStepChecking
-				return v, v.runCheck()
+				return v, v.flipChannel()
 			}
 		}
 	}
@@ -253,6 +254,28 @@ func (v *updateView) waitForLine() tea.Cmd {
 	}
 }
 
+// flipChannel toggles stable ⇄ dev and re-runs the check.
+func (v *updateView) flipChannel() tea.Cmd {
+	if v.channel == "stable" {
+		v.channel = "dev"
+	} else {
+		v.channel = "stable"
+	}
+	v.step = updateStepChecking
+	v.rc, v.err, v.checkErr, v.flash = 0, "", "", ""
+	v.installed, v.latest = "", ""
+	return v.runCheck()
+}
+
+// canFlipFromDone is true when the done screen was reached without an
+// install attempt — up to date, or the check itself failed.
+func (v *updateView) canFlipFromDone() bool {
+	if v.checkErr != "" {
+		return true
+	}
+	return v.rc == 0 && (v.installed == v.latest || v.latest == "")
+}
+
 func (v *updateView) View() string {
 	var b strings.Builder
 	b.WriteString(titleSt.Render("Update") + "\n\n")
@@ -308,7 +331,11 @@ func (v *updateView) View() string {
 			}
 			v.linesMu.Unlock()
 		}
-		b.WriteString("\n" + helpSt.Render("any key to continue"))
+		if v.canFlipFromDone() {
+			b.WriteString("\n" + helpSt.Render("c flip channel (stable/dev) · any other key to continue"))
+		} else {
+			b.WriteString("\n" + helpSt.Render("any key to continue"))
+		}
 	}
 	return b.String()
 }
