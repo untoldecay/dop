@@ -210,7 +210,7 @@ func (v *loginView) login(passphrase string) tea.Cmd {
 			return loginResultMsg{err: err.Error()}
 		}
 		cmd := exec.Command(self, "admin", "login", "--passphrase-stdin")
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		cmd.Stdin = strings.NewReader(passphrase)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -281,6 +281,19 @@ type issueView struct {
 	// custom and starts typing.
 	expiryPickCursor int
 	expiryCustom     bool
+
+	// v1.14.0-rc2 — portable toggle. Step 3 is a picker over
+	// portablePresets (yes/no). When yes, the issue subprocess
+	// receives --portable so the bearer gets age-wrapped on the
+	// capability record for later `dop use <subject>` recall.
+	portableChoice     bool
+	portablePickCursor int
+
+	// rc6c — passphrase step for protected grants (rc3-smoke-retakes [S2]).
+	// Shown as field 4 ONLY when at least one selected grant is protected.
+	// Otherwise step 3 (portable) commits directly to issue(). The typed
+	// value is piped to the subprocess via --passphrase-stdin.
+	protectedPassBuf strings.Builder
 }
 
 type grantRow struct {
@@ -298,6 +311,12 @@ type tuiGrantInfo struct {
 	Prefix      string   // resolved via EffectivePrefix()
 	Tags        []string
 	Projects    []string
+	// rc6c — carried so the issue flow can detect protected grants and
+	// insert a passphrase step before shelling out. CLI's issue path
+	// uses promptProtectionPassphrase which reads from a tty; without
+	// --passphrase-stdin + a piped passphrase, it errors on the TUI's
+	// non-tty subprocess stdin. See rc3-smoke-retakes [S2].
+	Protected bool
 }
 
 func newIssueView(c *admin.Client, p *config.Paths) *issueView {
@@ -330,6 +349,19 @@ var expiryPresets = []struct {
 	{"1y   (one year — 365d)", "365d"},
 	{"never (no expiry — revoke manually)", "never"},
 	{"custom…", ""},
+}
+
+// portablePresets drives the Portable step (v1.14.0-rc2). Yes stashes
+// an age-wrapped bearer on the capability so the issuing admin can
+// later `dop use <subject>` from any shell on any of their machines.
+// Only the issuing admin's daemon can unwrap — other admins can't.
+var portablePresets = []struct {
+	label string
+	value bool
+	hint  string
+}{
+	{"no", false, "default · bearer shown once, you copy it yourself"},
+	{"yes", true, "keep a copy for your own shell · run `dop use <subject>` later to export it"},
 }
 
 // grantsListMode returns true when we should show the picker instead
@@ -407,6 +439,21 @@ func (v *issueView) collidingPrefixes() map[string][]string {
 		}
 	}
 	return out
+}
+
+// rc6c — count protected grants in the current selection. Non-zero
+// → inject a passphrase step before issue (rc3-smoke-retakes [S2]).
+func (v *issueView) protectedSelectedCount() int {
+	n := 0
+	for id, sel := range v.grantSelected {
+		if !sel {
+			continue
+		}
+		if info, ok := v.grantByID[id]; ok && info.Protected {
+			n++
+		}
+	}
+	return n
 }
 
 func (v *issueView) selectedGrantCount() int {
@@ -540,6 +587,23 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return v, nil
 		}
+		// v1.14.0-rc2 — portable step: yes/no picker.
+		if v.step == 3 {
+			switch mm.String() {
+			case "up", "k":
+				if v.portablePickCursor > 0 {
+					v.portablePickCursor--
+				}
+			case "down", "j":
+				if v.portablePickCursor < len(portablePresets)-1 {
+					v.portablePickCursor++
+				}
+			case "enter", " ":
+				v.portableChoice = portablePresets[v.portablePickCursor].value
+				return v.advance()
+			}
+			return v, nil
+		}
 		switch mm.String() {
 		case "enter":
 			return v.advance()
@@ -570,17 +634,30 @@ func (v *issueView) currentBuf() *strings.Builder {
 		return &v.grantsBuf
 	case 2:
 		return &v.expiryBuf
+	case 4:
+		return &v.protectedPassBuf
 	}
 	return &strings.Builder{}
 }
 
 func (v *issueView) advance() (tea.Model, tea.Cmd) {
 	val := strings.TrimSpace(v.currentBuf().String())
-	if val == "" && v.step != 2 {
+	// Step 0/1 require a buffer value; step 2 is the expiry picker and
+	// step 3 is the portable picker — both commit via Update's picker
+	// path, so the buffer check doesn't apply.
+	// rc6c — step 4 is the protected-grant passphrase, required when
+	// any selected grant is protected (rc3-smoke-retakes [S2]). Text
+	// input, must be non-empty.
+	if val == "" && v.step != 2 && v.step != 3 {
 		return v, nil
 	}
 	v.step++
-	if v.step == 3 {
+	// After portable step: if any selected grant is protected, insert
+	// the passphrase step; else go straight to issue.
+	if v.step == 4 && v.protectedSelectedCount() == 0 {
+		return v, v.issue()
+	}
+	if v.step == 5 {
 		return v, v.issue()
 	}
 	return v, nil
@@ -637,7 +714,7 @@ func (v *issueView) watchForClaimAndReseal() tea.Cmd {
 			// Claim completed. Run reseal.
 			self, _ := os.Executable()
 			cmd := exec.Command(self, "token", "reseal", c.LookupID[:12])
-			cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+			cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout = &stdout
 			cmd.Stderr = &stderr
@@ -659,13 +736,25 @@ func (v *issueView) issue() tea.Cmd {
 	}
 	v.subject = name
 	prefs := v.prefs
+	portable := v.portableChoice
+	// rc6c — pipe protected-grant passphrase when any grant is protected.
+	// Non-empty only after the step 4 passphrase field was shown.
+	protectedPass := v.protectedPassBuf.String()
+	needsPass := v.protectedSelectedCount() > 0
 	return func() tea.Msg {
 		self, err := os.Executable()
 		if err != nil {
 			return issueResultMsg{err: err.Error()}
 		}
-		cmd := exec.Command(self, "token", "issue", "--grants", grants, "--name", name, "--expires", expires)
-		cmdEnv := append(os.Environ(), "DOP_NO_TUI=1")
+		args := []string{"token", "issue", "--grants", grants, "--name", name, "--expires", expires}
+		if portable {
+			args = append(args, "--portable")
+		}
+		if needsPass {
+			args = append(args, "--passphrase-stdin")
+		}
+		cmd := exec.Command(self, args...)
+		cmdEnv := append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		// v1.13 — when the prefs toggle is on, flow DOP_ALLOW_FILE_KEYS
 		// through so the agent's claim can land a P-256 file-backed
 		// key (prereq for `token reseal` + direct availability).
@@ -673,6 +762,9 @@ func (v *issueView) issue() tea.Cmd {
 			cmdEnv = append(cmdEnv, "DOP_ALLOW_FILE_KEYS=1")
 		}
 		cmd.Env = cmdEnv
+		if needsPass {
+			cmd.Stdin = strings.NewReader(protectedPass + "\n")
+		}
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
@@ -759,15 +851,21 @@ func (v *issueView) View() string {
 		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
 		return b.String()
 	}
-	labels := []string{"Subject (label)", "Grants", "Expires"}
-	values := []string{v.nameBuf.String(), v.grantsBuf.String(), v.expiryBuf.String()}
+	portableLabel := "no"
+	if v.portableChoice {
+		portableLabel = "yes"
+	}
+	labels := []string{"Subject (label)", "Grants", "Expires", "Portable"}
+	values := []string{v.nameBuf.String(), v.grantsBuf.String(), v.expiryBuf.String(), portableLabel}
 
 	// Steps 0 and 2 render specially. Step 1 renders as a
 	// picker when the vault has grants, otherwise text-entry.
 	// v1.13.0-rc5: step 2 defaults to a preset picker; drops into
 	// text input only when the user picks "custom…".
+	// v1.14.0-rc2: step 3 is the portable picker (yes/no).
 	pickerAtStep1 := v.step == 1 && v.grantsListMode()
 	pickerAtStep2 := v.step == 2 && !v.expiryCustom
+	pickerAtStep3 := v.step == 3
 
 	for i, l := range labels {
 		if i == 1 && pickerAtStep1 {
@@ -776,6 +874,10 @@ func (v *issueView) View() string {
 		}
 		if i == 2 && pickerAtStep2 {
 			// Skip; the preset picker renders below.
+			continue
+		}
+		if i == 3 && pickerAtStep3 {
+			// Skip; the portable picker renders below.
 			continue
 		}
 		style := mutedSt
@@ -867,12 +969,38 @@ func (v *issueView) View() string {
 		}
 	}
 
+	// v1.14.0-rc2: portable picker on step 3.
+	if pickerAtStep3 {
+		b.WriteString("\n" + cursorSt.Render("Portable") + "  " +
+			mutedSt.Render("· keep a copy for your own shell, recoverable later with `dop use`") + "\n")
+		for i, p := range portablePresets {
+			prefix := "    "
+			label := p.label
+			hint := mutedSt.Render(p.hint)
+			if i == v.portablePickCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(p.label)
+			}
+			b.WriteString(prefix + label + "  " + hint + "\n")
+		}
+	}
+
+	// rc6c — step 4: approval passphrase for protected grants.
+	if v.step == 4 && v.protectedSelectedCount() > 0 {
+		masked := strings.Repeat("•", v.protectedPassBuf.Len())
+		hint := fmt.Sprintf("approval passphrase (issue bearer containing %d protected grant(s))", v.protectedSelectedCount())
+		b.WriteString("\n" + cursorSt.Render("Approval passphrase") + "  " + mutedSt.Render("· "+hint) + "\n")
+		b.WriteString("    " + masked + cursorSt.Render("▎") + "\n")
+	}
+
 	if pickerAtStep1 {
 		b.WriteString("\n" + helpSt.Render("↑↓ move | space toggle | a section | A all | n none | enter next | esc cancel"))
 	} else if pickerAtStep2 {
 		b.WriteString("\n" + helpSt.Render("↑↓ move | enter select | esc cancel"))
 	} else if v.step == 2 && v.expiryCustom {
 		b.WriteString("\n" + helpSt.Render("type duration (e.g. 72h, 30d) · backspace at empty returns to presets · enter submit · esc cancel"))
+	} else if pickerAtStep3 {
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter select | esc cancel"))
 	} else {
 		b.WriteString("\n" + helpSt.Render("enter next | esc cancel"))
 	}
@@ -912,6 +1040,7 @@ func loadGrantsForList(client *admin.Client, paths *config.Paths) ([]string, []g
 			Prefix:      g.EffectivePrefix(),
 			Tags:        append([]string(nil), g.Tags...),
 			Projects:    append([]string(nil), g.Projects...),
+			Protected:   g.Protected,
 		}
 	}
 	sort.Strings(ids)
@@ -969,6 +1098,11 @@ type listView struct {
 	capIDs       []string
 	done         bool
 
+	// v1.14.0-rc2 — the viewing admin's pubkey, so the row renderer
+	// can draw 👤 for "mine" and 🔒 for "another admin's" based on
+	// each capability's IssuedBy. Set from the daemon status at load.
+	viewerPubkey string
+
 	// v1.10.0 picker state
 	mode          int    // listMode*
 	cursor        int    // index into visible()
@@ -988,6 +1122,14 @@ type listView struct {
 	grantPickCursor   int
 	grantPickSelected map[string]bool
 	pendingGrantOp    string
+	// rc6f — passphrase sub-step for add-grant / remove-grant when the
+	// picker's selection includes a protected grant. Mirrors the issue
+	// path's protectedPassBuf (rc6c [S2] fix). grantPickProtectedMap
+	// tells the picker which grant IDs are protected without re-reading
+	// the vault; populated at prepareGrantPicker time.
+	grantPickProtectedMap map[string]bool
+	grantPickPassBuf      textField
+	grantPickPassPhase    bool // true once protected picks required a passphrase screen
 
 	// v1.13.0-rc9 — repin form state. Two fields: bearer paste +
 	// PIN TTL (preset picker). pinResult is set once the CLI returns.
@@ -1041,6 +1183,7 @@ func (v *listView) Flash() string { return v.flash }
 type listLoadedMsg struct {
 	capabilities []vault.Capability
 	capIDs       []string
+	viewerPubkey string
 	err          string
 }
 type listActionMsg struct {
@@ -1087,7 +1230,15 @@ func (v *listView) load() tea.Msg {
 		caps[i] = k.c
 		ids[i] = k.id
 	}
-	return listLoadedMsg{capabilities: caps, capIDs: ids}
+	// v1.14.0-rc2 — fetch the viewer's admin pubkey so the row renderer
+	// can draw ownership perspective (👤 mine vs 🔒 another admin's).
+	// Best-effort — if status fails for any reason, we just render
+	// without the icon.
+	viewerPubkey := ""
+	if st, serr := v.client.Status(); serr == nil {
+		viewerPubkey = st.AdminPubkey
+	}
+	return listLoadedMsg{capabilities: caps, capIDs: ids, viewerPubkey: viewerPubkey}
 }
 
 // visible returns the indexes into v.capabilities that should be shown
@@ -1157,6 +1308,7 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.loaded = true
 		v.capabilities = mm.capabilities
 		v.capIDs = mm.capIDs
+		v.viewerPubkey = mm.viewerPubkey
 		v.loadErr = mm.err
 	case listActionMsg:
 		if mm.err != "" {
@@ -1335,15 +1487,28 @@ func (v *listView) prepareGrantPicker(op string) bool {
 	v.grantPickCursor = 0
 	v.grantPickList = nil
 	v.grantPickSelected = map[string]bool{}
+	// rc6f — reset passphrase state so a prior session doesn't bleed in.
+	v.grantPickProtectedMap = map[string]bool{}
+	v.grantPickPassBuf.Reset()
+	v.grantPickPassPhase = false
 
+	// Vault lookup serves two purposes: enumerate add-candidates (op=add)
+	// AND seed the protected-flag map for both ops.
+	vlt, _, verr := loadVaultForListing(v.client, v.paths)
+	if verr == nil && vlt != nil {
+		for gid, g := range vlt.Grants {
+			if g.Protected {
+				v.grantPickProtectedMap[gid] = true
+			}
+		}
+	}
 	if op == "remove" {
 		v.grantPickList = append(v.grantPickList, cap.Grants...)
 		sort.Strings(v.grantPickList)
 		return len(v.grantPickList) > 0
 	}
 	// op == "add": vault grants NOT already on this token.
-	vlt, _, err := loadVaultForListing(v.client, v.paths)
-	if err != nil || vlt == nil {
+	if verr != nil || vlt == nil {
 		return false
 	}
 	have := map[string]bool{}
@@ -1357,6 +1522,19 @@ func (v *listView) prepareGrantPicker(op string) bool {
 	}
 	sort.Strings(v.grantPickList)
 	return len(v.grantPickList) > 0
+}
+
+// grantPickProtectedCount returns the number of currently-selected
+// grants that carry Protected=true. Non-zero on enter means the
+// picker drops into the passphrase sub-step before shelling out.
+func (v *listView) grantPickProtectedCount() int {
+	n := 0
+	for gid, sel := range v.grantPickSelected {
+		if sel && v.grantPickProtectedMap[gid] {
+			n++
+		}
+	}
+	return n
 }
 
 // doGrantMutation shells out to `dop token add-grant` or `remove-grant`
@@ -1376,12 +1554,30 @@ func (v *listView) doGrantMutation() tea.Cmd {
 			picked = append(picked, gid)
 		}
 	}
+	// rc6f — pipe passphrase per-call when the picked set includes a
+	// protected grant (shadow of [S2]: CLI's promptProtectionPassphrase
+	// reads from the terminal; TUI subprocesses have no tty on stdin).
+	protectedSet := map[string]bool{}
+	for _, gid := range picked {
+		if v.grantPickProtectedMap[gid] {
+			protectedSet[gid] = true
+		}
+	}
+	passphrase := v.grantPickPassBuf.String()
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		applied := []string{}
 		for _, gid := range picked {
-			cmd := exec.Command(self, "token", op+"-grant", target, gid)
-			cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+			args := []string{"token", op + "-grant"}
+			if protectedSet[gid] {
+				args = append(args, "--passphrase-stdin")
+			}
+			args = append(args, target, gid)
+			cmd := exec.Command(self, args...)
+			cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+			if protectedSet[gid] {
+				cmd.Stdin = strings.NewReader(passphrase + "\n")
+			}
 			var stderr bytes.Buffer
 			cmd.Stderr = &stderr
 			if err := cmd.Run(); err != nil {
@@ -1413,7 +1609,7 @@ func (v *listView) doReseal() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "token", "reseal", target)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
@@ -1428,6 +1624,43 @@ func (v *listView) doReseal() tea.Cmd {
 // v1.13.0-rc5: multi-select — ↑↓ to move, space to toggle, enter to
 // apply the whole selection, esc to cancel.
 func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// rc6f — passphrase sub-step: entered when the picker's selection
+	// contains at least one protected grant. All other keys are routed
+	// through the field for in-line caret editing.
+	if v.grantPickPassPhase {
+		key := mm.String()
+		switch key {
+		case "left", "right", "home", "end", "ctrl+a", "ctrl+e", "delete", "ctrl+d":
+			v.grantPickPassBuf.handleKey(key, mm.Runes)
+			return v, nil
+		case "enter":
+			if v.grantPickPassBuf.Len() == 0 {
+				v.err = "approval passphrase required for the protected grant(s)"
+				return v, nil
+			}
+			v.err = ""
+			v.mode = listModeRun
+			return v, v.doGrantMutation()
+		case "backspace":
+			if v.grantPickPassBuf.Len() > 0 {
+				v.grantPickPassBuf.Backspace()
+			} else {
+				// Empty + backspace → return to picker.
+				v.grantPickPassPhase = false
+			}
+			return v, nil
+		case "esc":
+			// Back to the multi-select picker; keep selection + buffer.
+			v.grantPickPassPhase = false
+			v.err = ""
+			return v, nil
+		default:
+			if len(mm.Runes) > 0 {
+				v.grantPickPassBuf.InsertRunes(mm.Runes)
+			}
+			return v, nil
+		}
+	}
 	switch mm.String() {
 	case "up", "k":
 		if v.grantPickCursor > 0 {
@@ -1461,6 +1694,13 @@ func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		v.err = ""
+		// rc6f — if any protected grants are in the selection, require
+		// the admin's approval passphrase before shelling out.
+		if v.grantPickProtectedCount() > 0 {
+			v.grantPickPassPhase = true
+			v.grantPickPassBuf.Reset()
+			return v, nil
+		}
 		v.mode = listModeRun
 		return v, v.doGrantMutation()
 	case "esc", "q":
@@ -1468,6 +1708,9 @@ func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		v.grantPickList = nil
 		v.grantPickSelected = nil
 		v.pendingGrantOp = ""
+		v.grantPickProtectedMap = nil
+		v.grantPickPassBuf.Reset()
+		v.grantPickPassPhase = false
 		v.err = ""
 	}
 	return v, nil
@@ -1556,7 +1799,7 @@ func (v *listView) doRepin() tea.Cmd {
 			"--subject", subject,
 			"--token-file", tmp.Name(),
 			"--pin-ttl", ttl)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
@@ -1639,7 +1882,7 @@ func (v *listView) doRevoke() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "token", "revoke", target)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -1714,6 +1957,33 @@ func (v *listView) View() string {
 			prefix = "  " + cursorSt.Render("➤ ")
 			subj = cursorSt.Render(subj)
 		}
+		// v1.14.0-rc3 — ownership glyph is gated on OWNER-EXCLUSIVITY,
+		// not merely on IssuedBy. The glyph only appears when a lock
+		// relationship actually exists: today that's portable (bearer
+		// stash wrapped to one admin's age recipient); after Phase 3
+		// protection migration lands, also when any grant on this
+		// capability is protected. 👤 = owner-locked to this viewer;
+		// 🔒 = owner-locked to another admin. Slot is pinned to a
+		// fixed cell width via lipgloss.Width so terminals that render
+		// emoji at 1 cell don't shift the following columns.
+		ownerRaw := ""
+		ownerExclusive := c.PortableWrapped != ""
+		if ownerExclusive && c.IssuedBy != "" && v.viewerPubkey != "" {
+			if c.IssuedBy == v.viewerPubkey {
+				ownerRaw = "👤"
+			} else {
+				ownerRaw = "🔒"
+			}
+		}
+		ownerGlyph := lipgloss.NewStyle().Width(3).Render(ownerRaw)
+		// v1.14.0-rc2 — portable prefix. `p.` on the name column when
+		// the capability carries an admin-use stash. Dim style so it's
+		// noticeable but not loud. Width-pinned at 3 cells.
+		portRaw := ""
+		if c.PortableWrapped != "" {
+			portRaw = mutedSt.Render("p.")
+		}
+		portPrefix := lipgloss.NewStyle().Width(3).Render(portRaw)
 		// v1.13 — surface the cap-id prefix in every row so two
 		// tokens sharing a subject are visibly distinct. Without
 		// this they looked identical in the TUI and only the first
@@ -1730,18 +2000,34 @@ func (v *listView) View() string {
 		// v1.13.0-rc20 — row trimmed to subj + capId + status. gen +
 		// expires moved to the status bar.
 		subjPad := lipgloss.NewStyle().Width(labelWidth).Render(subj)
-		b.WriteString(prefix + subjPad + "  " +
+		b.WriteString(prefix + ownerGlyph + portPrefix + subjPad + "  " +
 			mutedSt.Render(capShort) + "  " +
 			statusStyle.Render(c.Status) + "\n")
 	}
 
 	// v1.13.0-rc20 — status bar for the cursor row.
+	// v1.14.0-rc2 — adds portable + owner markers.
 	if len(vis) > 0 && v.cursor >= 0 && v.cursor < len(vis) {
 		c := v.capabilities[vis[v.cursor]]
-		bar := fmt.Sprintf("selected: %s  |  gen=%d  |  expires=%s  |  grants=%s",
+		portable := "no"
+		if c.PortableWrapped != "" {
+			portable = "yes"
+		}
+		owner := "—"
+		if c.IssuedBy != "" {
+			if c.IssuedBy == v.viewerPubkey {
+				owner = "you"
+			} else if len(c.IssuedBy) >= 8 {
+				owner = c.IssuedBy[:8] + "…"
+			} else {
+				owner = c.IssuedBy
+			}
+		}
+		bar := fmt.Sprintf("%s  ·  gen %d  ·  expires %s  ·  grants %s  ·  portable %s  ·  owner %s",
 			c.Subject, c.Generation,
 			expiresDisplay(c.ExpiresAt, "2006-01-02"),
-			strings.Join(c.Grants, ","))
+			strings.Join(c.Grants, ","),
+			portable, owner)
 		b.WriteString("\n" + mutedSt.Render(bar) + "\n")
 	}
 
@@ -1756,7 +2042,8 @@ func (v *listView) View() string {
 	if v.mode == listModeAction {
 		b.WriteString("\n" + v.renderActionMenu())
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move | enter actions | esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter actions | esc back") +
+			"\n" + helpSt.Render("👤 yours · 🔒 another admin's · p. portable"))
 	}
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
@@ -1956,9 +2243,27 @@ func (v *listView) viewGrantPick() string {
 			prefix = "  " + cursorSt.Render("➤ ")
 			label = cursorSt.Render(gid)
 		}
-		b.WriteString(prefix + marker + "  " + label + "\n")
+		// rc6f — flag protected grants with 🔒 so operators know a
+		// passphrase will be requested when they commit the selection.
+		lockMark := ""
+		if v.grantPickProtectedMap[gid] {
+			lockMark = "  " + mutedSt.Render("🔒")
+		}
+		b.WriteString(prefix + marker + "  " + label + lockMark + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move | space toggle | a all | n none | enter apply | esc back"))
+	// rc6f — passphrase sub-step. Rendered under the picker once the
+	// operator has pressed enter AND the selection includes a protected
+	// grant. Mirrors the issueView passphrase row.
+	if v.grantPickPassPhase {
+		b.WriteString("\n")
+		n := v.grantPickProtectedCount()
+		passLbl := cursorSt.Render(fmt.Sprintf("Approval passphrase (%d protected grant(s))", n))
+		before, after := v.grantPickPassBuf.SplitMasked("•")
+		b.WriteString(passLbl + ": " + before + cursorSt.Render("▎") + after + "\n")
+		b.WriteString("\n" + helpSt.Render("enter apply | ←→ move caret | backspace delete | esc back to picker"))
+	} else {
+		b.WriteString("\n" + helpSt.Render("↑↓ move | space toggle | a all | n none | enter apply | esc back"))
+	}
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
 	}

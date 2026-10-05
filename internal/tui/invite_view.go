@@ -30,13 +30,18 @@ const (
 )
 
 // Step ordinals. Device flow uses all five; team-member flow skips
-// inviteStepIdentity and goes name → passphrase → running → done.
+// inviteStepIdentity and goes name → passphrase → running → waiting →
+// done. rc7o — "waiting" is the new post-stage screen: subprocess
+// returns rc=0 (invite staged + pushed), TUI shows PIN + URL and stays
+// open. Enter closes (invite stays live); Esc confirms + cancels.
 const (
 	inviteStepName       = 0
 	inviteStepIdentity   = 1 // device only
 	inviteStepPassphrase = 2
 	inviteStepRunning    = 3
-	inviteStepDone       = 4
+	inviteStepWaiting    = 4 // rc7o — invite staged, waiting on teammate (fire-and-forget)
+	inviteStepDone       = 5
+	inviteStepCancelConfirm = 6 // rc7o — "really cancel this invite?" y/n overlay
 )
 
 type inviteView struct {
@@ -57,6 +62,8 @@ type inviteView struct {
 	linesMu   sync.Mutex
 	lines     []string
 	pin       string
+	inviteID  string // rc7o — captured from subprocess stderr so we can cancel on esc
+	vaultURL  string // rc7o — captured from subprocess stderr for the waiting screen
 	finalErr  string
 	finalRC   int
 }
@@ -87,24 +94,69 @@ func (v *inviteView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if p := extractPIN(mm.line); p != "" {
 			v.pin = p
 		}
+		// rc7o — grab invite_id + vault URL out of the subprocess output
+		// so the waiting screen can show them and `esc` can cancel the
+		// right invite.
+		if id := extractInviteID(mm.line); id != "" {
+			v.inviteID = id
+		}
+		if u := extractVaultURL(mm.line); u != "" {
+			v.vaultURL = u
+		}
 		return v, v.waitForLine()
 	case inviteDone:
-		// v1.10.7 — was hard-coded to 3, but that's inviteStepRunning after
-		// the identity step landed. Same class of bug as the v1.9.10 join
-		// TUI hang. The CLI completes cleanly on shared-identity flows;
-		// this was the reason the TUI stayed on "waiting for response…".
-		v.step = inviteStepDone
 		v.finalRC = mm.rc
 		v.finalErr = mm.err
 		if mm.rc == 0 {
-			v.flash = "invite completed — new admin device added · synced with team"
+			// rc7o — subprocess exits as soon as the invite is staged + pushed
+			// (no more polling loop). Land on the waiting screen; operator
+			// presses enter to close (invite stays live) or esc to cancel.
+			v.step = inviteStepWaiting
+			return v, nil
 		}
+		v.step = inviteStepDone
+		return v, nil
+	case teamCancelDoneMsg:
+		// rc7o — reply from the shell-out to `dop team cancel-invite`.
+		if mm.err != "" {
+			v.err = "cancel failed: " + mm.err
+			v.step = inviteStepWaiting
+			return v, nil
+		}
+		v.flash = "invite cancelled"
+		v.done = true
 		return v, nil
 	case tea.KeyMsg:
+		// rc7o — waiting state: enter closes (invite stays live); esc
+		// opens a cancel-confirm overlay (y/n). Any other key is ignored.
+		if v.step == inviteStepWaiting {
+			switch mm.String() {
+			case "enter":
+				v.flash = "invite open · teammate can join with: dop admin join <URL> " + v.pin
+				v.done = true
+				return v, nil
+			case "esc", "ctrl+c":
+				v.step = inviteStepCancelConfirm
+				return v, nil
+			}
+			return v, nil
+		}
+		// rc7o — cancel-confirm overlay.
+		if v.step == inviteStepCancelConfirm {
+			switch mm.String() {
+			case "y", "enter":
+				v.step = inviteStepRunning
+				return v, v.cancelInvite(v.inviteID)
+			case "n", "esc":
+				v.step = inviteStepWaiting
+				return v, nil
+			}
+			return v, nil
+		}
 		switch mm.String() {
 		case "esc", "ctrl+c":
 			if v.step == inviteStepRunning && v.cmd != nil && v.cmd.Process != nil {
-				// Kill the subprocess so it doesn't linger polling.
+				// Kill the subprocess so it doesn't linger (pre-stage).
 				_ = v.cmd.Process.Kill()
 			}
 			v.done = true
@@ -195,7 +247,7 @@ func (v *inviteView) launch() tea.Cmd {
 			args = append(args, "--share-identity")
 		}
 		v.cmd = exec.Command(self, args...)
-		v.cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		v.cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		stdin, err := v.cmd.StdinPipe()
 		if err != nil {
 			return inviteDone{rc: 1, err: err.Error()}
@@ -261,6 +313,49 @@ func extractPIN(s string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// extractInviteID looks for lines like "  invite_id:  <hex>".
+// rc7o — the CLI prints this so the TUI can cancel the right invite.
+var inviteIDLineRe = regexp.MustCompile(`invite_id:\s+([a-f0-9]{8,})`)
+
+func extractInviteID(s string) string {
+	m := inviteIDLineRe.FindStringSubmatch(s)
+	if len(m) == 2 {
+		return m[1]
+	}
+	return ""
+}
+
+// extractVaultURL grabs the `  vault URL:  <url>` line.
+var vaultURLLineRe = regexp.MustCompile(`vault URL:\s+(\S+)`)
+
+func extractVaultURL(s string) string {
+	m := vaultURLLineRe.FindStringSubmatch(s)
+	if len(m) == 2 && !strings.HasPrefix(m[1], "(") {
+		return m[1]
+	}
+	return ""
+}
+
+// cancelInvite shells out to `dop team cancel-invite <id>` and returns
+// a teamCancelDoneMsg. Shared with the Team view's cancel action; the
+// message type lives in team_views.go.
+func (v *inviteView) cancelInvite(id string) tea.Cmd {
+	return func() tea.Msg {
+		self, err := os.Executable()
+		if err != nil {
+			return teamCancelDoneMsg{id: id, err: err.Error()}
+		}
+		cmd := exec.Command(self, "team", "cancel-invite", id)
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return teamCancelDoneMsg{id: id, err: strings.TrimSpace(stderr.String())}
+		}
+		return teamCancelDoneMsg{id: id}
+	}
 }
 
 func filepathBase(p string) string {
@@ -338,12 +433,61 @@ func (v *inviteView) View() string {
 		}
 		v.linesMu.Unlock()
 	}
+	// rc7o — waiting screen (post-stage, pre-approve). Shows PIN + URL
+	// prominently so operators can read-off the join incantation; stays
+	// open until enter (close, invite stays live) or esc (cancel +
+	// delete).
+	if v.step == inviteStepWaiting {
+		b.WriteString("\n" + okSt.Render("✓ invite staged + pushed") + "\n\n")
+		bold := lipgloss.NewStyle().Bold(true)
+		if v.pin != "" {
+			b.WriteString("  PIN:        " + bold.Render(v.pin) + "\n")
+		}
+		if v.inviteID != "" {
+			b.WriteString("  invite_id:  " + mutedSt.Render(v.inviteID[:8]) + "\n")
+		}
+		if v.vaultURL != "" {
+			b.WriteString("  vault URL:  " + v.vaultURL + "\n\n")
+			b.WriteString(mutedSt.Render("  Teammate runs:  dop admin join "+v.vaultURL+" "+v.pin) + "\n")
+		} else {
+			b.WriteString(mutedSt.Render("  Teammate runs:  dop admin join <VAULT-URL> "+v.pin) + "\n")
+		}
+		b.WriteString("\n")
+		if v.shareIdentity {
+			b.WriteString(mutedSt.Render("  Shared-identity: no approval needed on your side; join completes automatically.") + "\n")
+		} else {
+			b.WriteString(mutedSt.Render("  Approve-later: when they finish `dop admin join`, open List → Team → Pending") + "\n")
+			b.WriteString(mutedSt.Render("  and press `a` on the row (or run `dop team approve-invite "+safeShortID(v.inviteID)+"`).") + "\n")
+		}
+	}
+	if v.step == inviteStepCancelConfirm {
+		b.WriteString("\n" + failSt.Render("Cancel this invite?") + "\n")
+		b.WriteString(mutedSt.Render("  the pending invite file (and identity blob if shared) will be removed from the vault + pushed.") + "\n")
+		b.WriteString(mutedSt.Render("  the teammate's `dop admin join` will fail with 'invite not found'.") + "\n")
+	}
 	if v.step == inviteStepDone {
 		b.WriteString("\n")
 		if v.finalRC == 0 {
 			b.WriteString(okSt.Render("✓ invite completed successfully") + "\n")
 		} else {
 			b.WriteString(failSt.Render("✗ invite failed: "+v.finalErr) + "\n")
+			// rc7g — surface the captured stderr tail on failure so the
+			// operator can see WHY. Previously only the running-step view
+			// showed the tail; on failure the view jumped to this done
+			// branch and the lines were invisible, leaving the operator
+			// with "exit status 1" and no diagnostic.
+			v.linesMu.Lock()
+			if len(v.lines) > 0 {
+				b.WriteString("\n" + mutedSt.Render("Last subprocess output:") + "\n")
+				start := 0
+				if len(v.lines) > 12 {
+					start = len(v.lines) - 12
+				}
+				for _, ln := range v.lines[start:] {
+					b.WriteString("  " + mutedSt.Render(ln) + "\n")
+				}
+			}
+			v.linesMu.Unlock()
 		}
 	}
 	if v.err != "" {
@@ -356,11 +500,25 @@ func (v *inviteView) View() string {
 	case inviteStepName, inviteStepPassphrase:
 		b.WriteString("\n" + helpSt.Render("enter next | esc cancel"))
 	case inviteStepRunning:
-		b.WriteString("\n" + helpSt.Render("esc kill invite | (auto-approves when passphrase matches)"))
+		b.WriteString("\n" + helpSt.Render("esc kill invite | staging now…"))
+	case inviteStepWaiting:
+		b.WriteString("\n" + helpSt.Render("enter close (invite stays live) · esc cancel invite"))
+	case inviteStepCancelConfirm:
+		b.WriteString("\n" + helpSt.Render("y/enter confirm cancel · n/esc keep invite open"))
 	case inviteStepDone:
 		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
 	}
 	return b.String()
+}
+
+// safeShortID returns the 8-char prefix of id, or a placeholder when
+// id is empty (shouldn't happen in practice but defensive against the
+// rare case where extractInviteID didn't match).
+func safeShortID(id string) string {
+	if len(id) >= 8 {
+		return id[:8]
+	}
+	return "<id>"
 }
 
 // renderIdentityChoice draws two pill options side-by-side with the

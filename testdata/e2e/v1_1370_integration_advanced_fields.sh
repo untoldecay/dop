@@ -25,6 +25,7 @@ export DOP_NO_KEYCHAIN=1
 export DOP_ALLOW_FILE_KEYS=1
 PASS="pass-word-long-enough"
 APPROVE="$PASS-approve"
+export DOP_APPROVAL_PASSPHRASE="$APPROVE"
 
 echo "=== [1] admin init + login"
 printf '%s\n%s\n' "$PASS" "$APPROVE" | "$DOP" admin init --passphrase-stdin >/dev/null

@@ -25,6 +25,10 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/fray/dop/internal/approval"
+	"github.com/fray/dop/internal/approvalprompt"
+	"github.com/fray/dop/internal/config"
 )
 
 // Default TTLs. Overridable at Session creation.
@@ -39,6 +43,10 @@ type Session struct {
 	keys     *Keys
 	sockPath string
 	listener net.Listener
+	// v1.14.0-rc4 — Paths let the daemon reach the approval.hash
+	// without a round-trip through the client. Needed for the
+	// local-popup approval RPC.
+	paths *config.Paths
 
 	idleTTL time.Duration
 	absTTL  time.Duration
@@ -46,6 +54,16 @@ type Session struct {
 	mu           sync.Mutex
 	startedAt    time.Time
 	lastActivity time.Time
+
+	// v1.14.0-rc6 — shell trust cache (legacy; kept for one-release
+	// backward-compat with CLIs that still send OpShellTrust).
+	trustedShells map[string]bool
+	// v1.14.0-rc6i — trust-context grant store. Supersedes trustedShells.
+	// Key is "<ContextKind>:<ContextValue>:<Subject>" (built by the
+	// CLI-side resolver in internal/sessiontrust). Each grant carries
+	// metadata so `dop trust list` can show the operator which contexts
+	// are approved and when they'll idle-expire. Protected by `mu`.
+	trustGrants map[string]trustGrant
 
 	done chan struct{}
 
@@ -56,6 +74,7 @@ type Session struct {
 // SessionOpts configures StartSession.
 type SessionOpts struct {
 	Keys     *Keys
+	Paths    *config.Paths // v1.14.0-rc4 — enables local approval popup
 	SockPath string        // path to unix socket to create
 	IdleTTL  time.Duration // default 15min
 	AbsTTL   time.Duration // default 60min
@@ -100,15 +119,18 @@ func StartSession(opts SessionOpts) (*Session, error) {
 		now = opts.NowFn()
 	}
 	s := &Session{
-		keys:         opts.Keys,
-		sockPath:     opts.SockPath,
-		listener:     lst,
-		idleTTL:      opts.IdleTTL,
-		absTTL:       opts.AbsTTL,
-		startedAt:    now,
-		lastActivity: now,
-		done:         make(chan struct{}),
-		nowFn:        opts.NowFn,
+		keys:          opts.Keys,
+		paths:         opts.Paths,
+		sockPath:      opts.SockPath,
+		listener:      lst,
+		idleTTL:       opts.IdleTTL,
+		absTTL:        opts.AbsTTL,
+		startedAt:     now,
+		lastActivity:  now,
+		trustedShells: map[string]bool{},
+		trustGrants:   map[string]trustGrant{},
+		done:          make(chan struct{}),
+		nowFn:         opts.NowFn,
 	}
 	go s.acceptLoop()
 	go s.ttlLoop()
@@ -226,6 +248,14 @@ func (s *Session) dispatch(req Request) Response {
 		return s.opDecryptVault(req.Data)
 	case OpEncryptVault:
 		return s.opEncryptVault(req.Data)
+	case OpUnwrapPortable:
+		return s.opUnwrapPortable(req.Data)
+	case OpApprovalPopup:
+		return s.opApprovalPopup(req.Data)
+	case OpShellTrust:
+		return s.opShellTrust(req.Data)
+	case OpTrustContext:
+		return s.opTrustContext(req.Data)
 	default:
 		return Response{Error: "unknown op: " + req.Op}
 	}
@@ -361,8 +391,257 @@ func (s *Session) opEncryptVault(payload []byte) Response {
 	return okResp(nil)
 }
 
+// opUnwrapPortable — v1.14.0-rc1. Decrypts a bearer value that was
+// stashed at `token issue --portable` time (wrapped to the
+// admin's own age recipient). Used by `dop use <subject>` to retrieve
+// the bearer so the shell can set DOP_TOKEN.
+//
+// Only works while the session is unlocked (the age identity lives
+// in s.keys.Age, same as DecryptVault). Returns the plaintext bearer
+// as base64 so JSON stays binary-safe, mirroring DecryptVaultResp.
+func (s *Session) opUnwrapPortable(payload []byte) Response {
+	var req UnwrapPortableReq
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return Response{Error: "unwrap_portable: bad payload"}
+	}
+	if req.CiphertextB64 == "" {
+		return Response{Error: "unwrap_portable: ciphertext_b64 required"}
+	}
+	s.mu.Lock()
+	if s.keys == nil {
+		s.mu.Unlock()
+		return Response{Error: "unwrap_portable: session locked"}
+	}
+	id := s.keys.Age
+	s.mu.Unlock()
+	plaintext, err := UnwrapWithIdentity(req.CiphertextB64, id)
+	if err != nil {
+		return Response{Error: "unwrap_portable: " + err.Error()}
+	}
+	s.bumpActivity()
+	body, _ := json.Marshal(UnwrapPortableResp{
+		PlaintextB64: base64.StdEncoding.EncodeToString(plaintext),
+	})
+	return okResp(body)
+}
+
 func okResp(data []byte) Response {
 	return Response{OK: true, Data: data}
+}
+
+// opApprovalPopup — v1.14.0-rc4. Daemon-side handler for the local
+// approval fast-path. Opens a native OS dialog (osascript on darwin),
+// collects the typed passphrase, verifies against approval.hash, and
+// returns the decision. Supports:
+//   - approved: Approve clicked + passphrase verified
+//   - denied: Deny / Cancel clicked
+//   - timeout: dialog closed by its "giving up after" clause
+//   - unsupported: platform without a native dialog OR
+//     DOP_NO_POPUP=1 — caller falls back to tunnel+phone
+//
+// The typed passphrase lives only inside this handler's stack frame
+// for the ~1 ms it takes to run Verify + zero it. Never written to disk,
+// never passed through the socket to the caller.
+func (s *Session) opApprovalPopup(payload []byte) Response {
+	var req ApprovalPopupReq
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return Response{Error: "approval_popup: bad payload"}
+	}
+	s.mu.Lock()
+	if s.keys == nil {
+		s.mu.Unlock()
+		return Response{Error: "approval_popup: session locked"}
+	}
+	paths := s.paths
+	s.mu.Unlock()
+	// DOP_NO_POPUP escape hatch for headless CI running on macOS where
+	// osascript would still succeed but there's no human to click.
+	if os.Getenv("DOP_NO_POPUP") == "1" {
+		body, _ := json.Marshal(ApprovalPopupResp{Decision: "unsupported", Reason: "DOP_NO_POPUP=1"})
+		return okResp(body)
+	}
+	title := "DOP — " + req.Kind
+	body := req.PromptText
+	if body == "" {
+		body = fmt.Sprintf("Approve %s for %q?", req.Kind, req.Subject)
+	}
+	timeout := time.Duration(req.TimeoutMs) * time.Millisecond
+	res, err := approvalprompt.Ask(title, body, timeout)
+	if err != nil {
+		if errors.Is(err, approvalprompt.ErrUnsupported) {
+			out, _ := json.Marshal(ApprovalPopupResp{Decision: "unsupported", Reason: err.Error()})
+			return okResp(out)
+		}
+		return Response{Error: "approval_popup: " + err.Error()}
+	}
+	switch {
+	case res.Timeout:
+		out, _ := json.Marshal(ApprovalPopupResp{Decision: "timeout"})
+		return okResp(out)
+	case res.Denied:
+		out, _ := json.Marshal(ApprovalPopupResp{Decision: "denied"})
+		return okResp(out)
+	case res.Approved:
+		ok, verr := approval.Verify(paths, res.Passphrase)
+		// Zero the passphrase as soon as Verify returns.
+		res.Passphrase = ""
+		if verr != nil {
+			return Response{Error: "approval_popup: verify: " + verr.Error()}
+		}
+		if !ok {
+			out, _ := json.Marshal(ApprovalPopupResp{Decision: "denied", Reason: "wrong_passphrase"})
+			return okResp(out)
+		}
+		s.bumpActivity()
+		out, _ := json.Marshal(ApprovalPopupResp{Decision: "approved"})
+		return okResp(out)
+	default:
+		out, _ := json.Marshal(ApprovalPopupResp{Decision: "denied", Reason: "no_button"})
+		return okResp(out)
+	}
+}
+
+// opShellTrust — v1.14.0-rc6. Check or mark a (PID, subject) in the
+// in-memory trust cache. Used by printguard to skip the approval
+// popup on same-shell/same-subject repeat invocations after the
+// first eval already got a passphrase.
+func (s *Session) opShellTrust(payload []byte) Response {
+	var req ShellTrustReq
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return Response{Error: "shell_trust: bad payload"}
+	}
+	if req.PID <= 0 || req.Subject == "" {
+		return Response{Error: "shell_trust: pid+subject required"}
+	}
+	key := fmt.Sprintf("%d:%s", req.PID, req.Subject)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.trustedShells == nil {
+		s.trustedShells = map[string]bool{}
+	}
+	switch req.Mode {
+	case "check":
+		out, _ := json.Marshal(ShellTrustResp{Trusted: s.trustedShells[key]})
+		return okResp(out)
+	case "mark":
+		s.trustedShells[key] = true
+		out, _ := json.Marshal(ShellTrustResp{Trusted: true})
+		return okResp(out)
+	default:
+		return Response{Error: "shell_trust: unknown mode " + req.Mode}
+	}
+}
+
+// trustGrant — v1.14.0-rc6i. One row in the TrustContext grant map.
+// Stored metadata lets `dop trust list` show operators which contexts
+// are active + when they'll idle-expire. Protected by Session.mu.
+type trustGrant struct {
+	ContextKind  string
+	ContextValue string
+	Subject      string
+	CreatedAt    time.Time
+	LastUsedAt   time.Time
+	// Source — the surface that originally granted the trust. Purely
+	// for observability; never read as a security signal. e.g.
+	// "print_use/local" or "print_env/phone".
+	Source string
+}
+
+// trustGrantIdleTTL — how long a grant stays usable without a hit.
+// Counselor-recommended 30-60min default; we go with 30m as the
+// conservative floor. The absolute-max is bounded by daemon lifetime
+// (logout + absolute session TTL both clear the grant map).
+const trustGrantIdleTTL = 30 * time.Minute
+
+// opTrustContext — v1.14.0-rc6i. Replaces opShellTrust with a richer
+// context model + metadata + idle expiry. See protocol.go
+// TrustContextReq for the mode semantics.
+func (s *Session) opTrustContext(payload []byte) Response {
+	var req TrustContextReq
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return Response{Error: "trust_context: bad payload"}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.trustGrants == nil {
+		s.trustGrants = map[string]trustGrant{}
+	}
+	now := s.now()
+	// Idle-expire pass: drop any grant whose LastUsedAt is older than
+	// the idle TTL. Done on every op so the map stays bounded without a
+	// background sweeper.
+	for k, g := range s.trustGrants {
+		if now.Sub(g.LastUsedAt) > trustGrantIdleTTL {
+			delete(s.trustGrants, k)
+		}
+	}
+	switch req.Mode {
+	case "check":
+		if req.ContextKind == "" || req.ContextValue == "" || req.Subject == "" {
+			return Response{Error: "trust_context check: kind+value+subject required"}
+		}
+		key := req.ContextKind + ":" + req.ContextValue + ":" + req.Subject
+		if g, ok := s.trustGrants[key]; ok {
+			g.LastUsedAt = now
+			s.trustGrants[key] = g
+			out, _ := json.Marshal(TrustContextResp{Trusted: true})
+			return okResp(out)
+		}
+		out, _ := json.Marshal(TrustContextResp{Trusted: false})
+		return okResp(out)
+	case "mark":
+		if req.ContextKind == "" || req.ContextValue == "" || req.Subject == "" {
+			return Response{Error: "trust_context mark: kind+value+subject required"}
+		}
+		key := req.ContextKind + ":" + req.ContextValue + ":" + req.Subject
+		g, exists := s.trustGrants[key]
+		if !exists {
+			g = trustGrant{
+				ContextKind:  req.ContextKind,
+				ContextValue: req.ContextValue,
+				Subject:      req.Subject,
+				CreatedAt:    now,
+			}
+		}
+		g.LastUsedAt = now
+		s.trustGrants[key] = g
+		out, _ := json.Marshal(TrustContextResp{Trusted: true})
+		return okResp(out)
+	case "list":
+		out := make([]TrustGrantInfo, 0, len(s.trustGrants))
+		for _, g := range s.trustGrants {
+			out = append(out, TrustGrantInfo{
+				ContextKind:  g.ContextKind,
+				ContextValue: g.ContextValue,
+				Subject:      g.Subject,
+				CreatedUnix:  g.CreatedAt.Unix(),
+				LastUsedUnix: g.LastUsedAt.Unix(),
+				Source:       g.Source,
+			})
+		}
+		b, _ := json.Marshal(TrustContextResp{Grants: out})
+		return okResp(b)
+	case "revoke":
+		if req.RevokeAll {
+			n := len(s.trustGrants)
+			s.trustGrants = map[string]trustGrant{}
+			b, _ := json.Marshal(TrustContextResp{Revoked: n})
+			return okResp(b)
+		}
+		if req.ContextKind == "" || req.ContextValue == "" || req.Subject == "" {
+			return Response{Error: "trust_context revoke: kind+value+subject required (or set revoke_all)"}
+		}
+		key := req.ContextKind + ":" + req.ContextValue + ":" + req.Subject
+		if _, ok := s.trustGrants[key]; ok {
+			delete(s.trustGrants, key)
+			b, _ := json.Marshal(TrustContextResp{Revoked: 1})
+			return okResp(b)
+		}
+		b, _ := json.Marshal(TrustContextResp{Revoked: 0})
+		return okResp(b)
+	default:
+		return Response{Error: "trust_context: unknown mode " + req.Mode}
+	}
 }
 
 // --- context-cancellation helper for shutdown-on-context ---

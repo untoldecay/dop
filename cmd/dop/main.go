@@ -26,6 +26,9 @@ usage:
   dop                                            interactive TUI (default when on a TTY)
   dop version | -v | --version                   print version + commit + build date
   dop uninstall [--force]                        wipe DOP from this machine (alias for admin reset)
+  dop skill install [--force] [--path FILE]      install the DOP agent skill AND /dop-use slash command — loose files at ~/.claude/skills/dop + ~/.claude/commands/dop-use.md AND a local-marketplace plugin at ~/.claude-local-plugins/dop-tools (registered via the claude CLI if available, for Orca and plugin-only Claude Code). --path installs only the skill at that path (loose file only, no plugin).
+  dop skill show                                 print the embedded skill content to stdout (agent-agnostic install)
+  dop skill show-command                         print the /dop-use slash command content to stdout
   dop help                                       this message
 
   # Admin plane
@@ -36,7 +39,9 @@ usage:
   dop admin set-approval                         (re)set the approval passphrase
   dop admin join <VAULT-URL> <PIN>               join a vault as a new admin device (v1.9)
   dop admin reset [--force]                      wipe local DOP state (v1.9.2)
-  dop team invite --name <label>                 open an admin invite (v1.9)
+  dop team invite --name <label>                 open an admin invite (rc7o: stages + exits; approve later)
+  dop team approve-invite <id>                   complete a pending invite after the teammate joined (rc7o)
+  dop team cancel-invite <id>                    delete a pending invite from the vault (rc7m)
   dop init --vault <url|path>                    attach vault (admin-required for first attach)
   dop token issue --grants CSV --name L [flags]  mint a capability + bearer (admin-required)
   dop token list                                 list capabilities (admin-required)
@@ -86,15 +91,28 @@ usage:
   dop doctor [--security]                        health check
   dop watch [--since D] [--filter K,K] [--all]   live-tail the audit log
   dop credential-helper map|list|remove          manage host→grant map for dop-credential-git
+  dop trust list                                 list active TrustContext grants (session approvals cached in the daemon)
+  dop trust revoke [--all] [KIND VALUE SUBJECT]  drop a cached approval (or every one with --all)
+  dop update [--check-only] [--channel X] [--version TAG] [--rollback]
+                                                 in-place update from GitHub. Default channel: stable (--channel dev for pre-releases).
+                                                 --rollback reverts to the previous stored version. Keeps last 3 at ~/.local/share/dop/old-versions/.
 
 env:
-  DOP_TOKEN          bearer for exec/whoami/env
-  DOP_TOKEN_FILE     path to a file containing a bearer (alternative to env)
-  DOP_VAULT          override vault path
-  DOP_NO_TUI         disable TUI on 'dop' alone (agents/cron)
-  DOP_ADMIN_TTL      admin session idle timeout (default 15m)
-  DOP_ADMIN_MAX_TTL  admin session absolute timeout (default 60m)
-  DOP_AUTO_PULL      max staleness before dop exec auto-pulls (default 5m)
+  DOP_TOKEN                     bearer for exec/whoami/env
+  DOP_TOKEN_FILE                path to a file containing a bearer (alternative to env)
+  DOP_VAULT                     override vault path
+  DOP_NO_TUI                    disable TUI on 'dop' alone (agents/cron)
+  DOP_ADMIN_TTL                 admin session idle timeout (default 15m)
+  DOP_ADMIN_MAX_TTL             admin session absolute timeout (default 60m)
+  DOP_AUTO_PULL                 max staleness before dop exec auto-pulls (default 5m)
+  DOP_SESSION_ID                v1.14.0-rc6i: explicit trust-context identifier so burst dop use/env calls in the same
+                                conversation / terminal / shell session share one approval (keep opaque, >=128 bits)
+  DOP_HARNESS                   v1.14.0-rc7i: tells the trust-context resolver which harness env var to consult. Values:
+                                claude-code | codex | opencode | any | none. Normally set from Settings → Harness picker;
+                                exported here for one-shot overrides and headless/CI contexts.
+  DOP_INFER_HARNESS_SESSION=1   v1.14.0-rc6i, DEPRECATED (rc7i): legacy opt-in, now aliased to DOP_HARNESS=any. Prefer
+                                the Settings → Harness picker (or DOP_HARNESS directly) which also recognizes Codex and
+                                opencode. Still works for backward compat.
 `
 
 func main() {
@@ -115,6 +133,8 @@ func main() {
 		os.Exit(runInit(os.Args[2:]))
 	case "token":
 		os.Exit(runToken(os.Args[2:]))
+	case "use":
+		os.Exit(runUse(os.Args[2:]))
 	case "integration":
 		os.Exit(runIntegration(os.Args[2:]))
 	case "grant":
@@ -159,6 +179,22 @@ func main() {
 		// this machine" action is discoverable without knowing about
 		// the admin subcommand tree.
 		os.Exit(runAdminReset(os.Args[2:]))
+	case "skill":
+		// v1.14.0-rc6 — install the DOP Claude Code skill into
+		// ~/.claude/skills/dop/SKILL.md so LLM agents on this machine
+		// use the safe eval pattern + know about the approval popup.
+		os.Exit(runSkill(os.Args[2:]))
+	case "trust":
+		// v1.14.0-rc6i — operator observability for the TrustContext
+		// grant cache. `dop trust list` / `dop trust revoke` show +
+		// manage the per-(context, subject) approvals cached in the
+		// admin daemon.
+		os.Exit(runTrust(os.Args[2:]))
+	case "update":
+		// v1.14.0-rc7f — in-place updater. Fetches releases from
+		// GitHub, verifies checksum, atomic-renames. Keeps the last 3
+		// versions in ~/.local/share/dop/old-versions/ for rollback.
+		os.Exit(runUpdate(os.Args[2:]))
 	case "version", "-v", "--version":
 		fmt.Println(versionString())
 		return

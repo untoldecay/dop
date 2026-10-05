@@ -48,7 +48,7 @@ func (v *resetView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.rc = mm.rc
 		v.stdErr = mm.err
 		if mm.rc == 0 {
-			v.flash = "local DOP state wiped — use `dop admin init` or `dop admin join` to start over"
+			v.flash = "DOP wiped from this machine — re-install with the one-liner to come back"
 		}
 		return v, nil
 	case tea.KeyMsg:
@@ -59,6 +59,14 @@ func (v *resetView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if v.step == 2 {
 			v.done = true
+			// rc6n — on successful uninstall, QUIT the whole TUI
+			// instead of returning to the setup menu. The binary that
+			// backs this process just got unlinked; staying open to
+			// show "Setup admin" would be nonsensical since there's no
+			// `dop admin init` to run anymore.
+			if v.rc == 0 {
+				return v, tea.Quit
+			}
 			return v, nil
 		}
 		if v.step == 1 {
@@ -94,8 +102,10 @@ func (v *resetView) launch() tea.Cmd {
 		if err != nil {
 			return resetDone{rc: 1, err: err.Error()}
 		}
-		cmd := exec.Command(self, "admin", "reset", "--force")
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		// rc6n — TUI Uninstall → full purge (state + binary). CLI
+		// `dop admin reset` without --purge keeps the binary.
+		cmd := exec.Command(self, "admin", "reset", "--force", "--purge")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err = cmd.Run()
@@ -130,7 +140,13 @@ func (v *resetView) View() string {
 		b.WriteString("  · " + mutedSt.Render(it) + "\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(mutedSt.Render("The dop binary itself is NOT removed.") + "\n\n")
+	// rc6n — the TUI purges the binary too; CLI (dop admin reset) keeps
+	// it unless called with --purge.
+	binPath, _ := os.Executable()
+	if binPath == "" {
+		binPath = "the dop binary"
+	}
+	b.WriteString(mutedSt.Render("The dop binary at ") + binPath + mutedSt.Render(" WILL be removed.") + "\n\n")
 
 	if v.step == 0 {
 		b.WriteString(cursorSt.Render("Type RESET (all caps) to confirm") + ": ")
@@ -147,8 +163,8 @@ func (v *resetView) View() string {
 	if v.step == 2 {
 		b.WriteString("\n")
 		if v.rc == 0 {
-			b.WriteString(okSt.Render("✓ done — this machine is clean.") + "\n")
-			b.WriteString(mutedSt.Render("  the TUI will exit; run `dop admin init` or `dop admin join` to start over.") + "\n")
+			b.WriteString(okSt.Render("✓ done — DOP is gone from this machine.") + "\n")
+			b.WriteString(mutedSt.Render("  re-install with the one-liner at https://github.com/untoldecay/dop to come back.") + "\n")
 		} else {
 			b.WriteString(failSt.Render("✗ reset failed:") + "\n")
 			b.WriteString(mutedSt.Render("  "+v.stdErr) + "\n")

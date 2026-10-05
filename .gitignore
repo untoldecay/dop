@@ -1,6 +1,7 @@
 # Compiled binaries
 /dop
 /dop-credential-git
+/dop-print-probe
 
 # Go build artifacts
 *.test

@@ -20,6 +20,7 @@ export DOP_NO_NOTIFY=1
 
 PASS="pass-word-long-enough"
 APPROVAL="approve-me-secret"
+export DOP_APPROVAL_PASSPHRASE="$APPROVAL"
 CFG_ROOT="$HOME/Library/Application Support/dop"
 VAULT_DIR="$CFG_ROOT/vault"
 

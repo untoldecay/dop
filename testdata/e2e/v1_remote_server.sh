@@ -17,6 +17,7 @@ MACHINE_B="$WORKROOT/b"
 mkdir -p "$MACHINE_A" "$MACHINE_B"
 BARE="$WORKROOT/bare"
 PASS="the-passphrase-15chars"
+export DOP_APPROVAL_PASSPHRASE="$PASS-approve"
 
 # --- Machine A: admin ---
 echo "=== [A1] admin init + attach vault + login + seed"

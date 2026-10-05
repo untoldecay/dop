@@ -19,6 +19,7 @@ export DOP_NO_KEYCHAIN=1        # force file-backend path
 export DOP_ALLOW_FILE_KEYS=1    # opt into extractable P-256 file keys
 
 PASS="pass-word-long-enough"
+export DOP_APPROVAL_PASSPHRASE="$PASS-approve"
 CFG_ROOT="$HOME/Library/Application Support/dop"
 VAULT_DIR="$CFG_ROOT/vault"
 

@@ -15,10 +15,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/fray/dop/internal/admin"
@@ -49,7 +47,13 @@ func runTeamInvite(args []string) int {
 	kind := fs.String("kind", "device", "\"device\" (another machine of yours) or \"team_member\"")
 	pfromStdin := fs.Bool("passphrase-stdin", false, "read passphrase(s) from stdin (testing only)")
 	timeoutStr := fs.String("timeout", "30m", "how long to wait for the response before giving up")
-	pinTTL := fs.String("pin-ttl", "30m", "invite validity window")
+	// rc7p — bumped from 30m to 7d. Pre-rc7o this matched the inline
+	// polling timeout; post-rc7o the invite is fire-and-forget so the
+	// window should be sized for "teammate joins when ready" (weekend-
+	// safe) not for "polling loop ends soon." Accepts d/w suffixes
+	// via parseDurationLoose so operators can type "7d" / "2w"
+	// without unit math.
+	pinTTL := fs.String("pin-ttl", "7d", "invite validity window — accepts d/w (default 7d; teammate can join anytime within this window)")
 	shareIdentity := fs.Bool("share-identity", false, "give the joining machine THIS machine's admin identity (Flavor Y — single revocation surface across devices)")
 	_ = fs.Parse(args)
 
@@ -62,7 +66,7 @@ func runTeamInvite(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop team invite: bad --timeout: %v\n", err)
 		return 2
 	}
-	pinDur, err := time.ParseDuration(*pinTTL)
+	pinDur, err := parseDurationLoose(*pinTTL)
 	if err != nil || pinDur <= 0 {
 		fmt.Fprintf(os.Stderr, "dop team invite: bad --pin-ttl: %v\n", err)
 		return 2
@@ -134,9 +138,13 @@ func runTeamInvite(args []string) int {
 		Extra:   map[string]string{"invite_id": inviteID, "kind": *kind},
 	})
 
-	// Show the human details.
+	// rc7o — show the human details + the approve-later hint, then exit.
+	// No more polling loop. Operator runs `dop team approve-invite <id>`
+	// (or picks the invite in the TUI Team → Pending tab and presses `a`)
+	// when the teammate has joined.
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Admin invite for", *name)
+	fmt.Fprintf(os.Stderr, "  invite_id:  %s\n", inviteID)
 	fmt.Fprintf(os.Stderr, "  PIN:        %s   (valid %s)\n", pin, pinDur)
 	vaultURL := vaultOriginURL(paths.Vault)
 	if vaultURL != "" {
@@ -149,92 +157,109 @@ func runTeamInvite(args []string) int {
 		fmt.Fprintf(os.Stderr, "    dop admin join <VAULT-URL> %s\n", pin)
 	}
 	fmt.Fprintln(os.Stderr)
+	if *shareIdentity {
+		fmt.Fprintf(os.Stderr, "  Shared-identity invite — nothing to approve on this side; the join completes\n")
+		fmt.Fprintf(os.Stderr, "  on the teammate's machine automatically. Check later via `dop team list`.\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "  Approve-later: when %s finishes `dop admin join`, run:\n", *name)
+		fmt.Fprintf(os.Stderr, "    dop team approve-invite %s\n", inviteID[:8])
+		fmt.Fprintf(os.Stderr, "  or open the TUI Team → Pending tab and press `a` on the row.\n")
+	}
+	fmt.Fprintln(os.Stderr)
+	// Keep the invite in the vault; the operator can `dop team cancel-invite`
+	// if they want to drop it before the teammate completes.
+	_ = waitTimeout // kept for backward-compat with pre-rc7o scripts passing --timeout
+	return 0
+}
 
-	// Poll for M2's response.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(sigCh)
+// runTeamApproveInvite — rc7o. Complete a pending admin invite by
+// reading the teammate's response, verifying the signature, prompting
+// for the approval passphrase, running the add-admin logic, and
+// pushing. Replaces the inline polling loop in rc6/pre-rc7o
+// runTeamInvite.
+func runTeamApproveInvite(args []string) int {
+	fs := flag.NewFlagSet("team approve-invite", flag.ExitOnError)
+	pfromStdin := fs.Bool("passphrase-stdin", false, "read approval passphrase from stdin (TUI uses this)")
+	_ = fs.Parse(args)
+	rest := fs.Args()
+	if len(rest) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: dop team approve-invite <invite-id>")
+		fmt.Fprintln(os.Stderr, "  invite id is the hex prefix shown by `dop team invite` output,")
+		fmt.Fprintln(os.Stderr, "  or any of the ids in `dop team list` pending output.")
+		return 2
+	}
+	id := rest[0]
 
-	deadline := time.Now().Add(waitTimeout)
-	tick := time.NewTicker(3 * time.Second)
-	defer tick.Stop()
+	paths, err := config.Resolve()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team approve-invite: %v\n", err)
+		return 1
+	}
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team approve-invite: %v\n", err)
+		return 1
+	}
 
-	fmt.Fprintln(os.Stderr, "  ⋯ waiting for response…")
+	// Pull so the teammate's response + any other admin's changes are visible.
+	_ = gitQuiet(paths.Vault, "pull", "--ff-only")
 
-	for {
-		select {
-		case <-sigCh:
-			// Best-effort cleanup: leave the invite in the vault so M2
-			// can still complete if they've partially started; but
-			// user knows they aborted.
-			fmt.Fprintln(os.Stderr, "\ndop team invite: cancelled (invite left in vault; delete with `dop team cancel-invite`)")
-			return 1
-		case <-tick.C:
-		}
-		if time.Now().After(deadline) {
-			fmt.Fprintln(os.Stderr, "\ndop team invite: timed out — no response received.")
-			_ = admininvite.Delete(paths, inviteID)
-			_ = gitAddCommitPush(paths.Vault, "pending-admin-invites",
-				fmt.Sprintf("dop: expire admin invite %s", inviteID[:8]))
-			return 1
-		}
+	full, err := resolveInviteID(paths, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team approve-invite: %v\n", err)
+		return 1
+	}
+	inv, err := admininvite.ReadInvite(paths, full)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team approve-invite: %v\n", err)
+		return 1
+	}
 
-		if err := gitQuiet(paths.Vault, "pull", "--ff-only"); err != nil {
-			continue // transient
-		}
-		// v1.9.3 — shared-identity: M2 consumes the invite by deleting
-		// the invite file after installing the identity locally. No
-		// response file is needed; just detect the disappearance.
-		if *shareIdentity {
-			if _, err := admininvite.ReadInvite(paths, inviteID); os.IsNotExist(err) {
-				fmt.Fprintln(os.Stderr)
-				fmt.Fprintln(os.Stderr, "  ✓ shared-identity join completed on the other machine.")
-				audit.Append(paths, audit.Event{
-					Kind:    audit.EventInviteComplete,
-					Subject: *name,
-					Extra:   map[string]string{"invite_id": inviteID, "shared": "true"},
-				})
-				return 0
-			}
-			continue
-		}
-		resp, err := admininvite.ReadResponse(paths, inviteID)
-		if err != nil {
-			continue // not there yet
-		}
-		if err := resp.Verify(); err != nil {
-			fmt.Fprintf(os.Stderr, "\ndop team invite: response signature invalid: %v\n", err)
-			continue
-		}
-
-		// M2 responded. Confirm + prompt for approval passphrase.
-		fmt.Fprintln(os.Stderr)
-		fmt.Fprintf(os.Stderr, "  ✓ %s responded from host %s\n", *name, resp.Host)
-		fmt.Fprintf(os.Stderr, "    pubkey  %s\n", resp.Ed25519Pubkey)
-		fmt.Fprintf(os.Stderr, "    age     %s\n", resp.AgeRecipient)
-
-		pass, err := readPassphrase("Approval passphrase (to confirm add): ", *pfromStdin)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "dop team invite: %v\n", err)
-			return 1
-		}
-		ok, err := approval.Verify(paths, pass)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "dop team invite: %v\n", err)
-			return 1
-		}
-		if !ok {
-			fmt.Fprintln(os.Stderr, "dop team invite: incorrect passphrase — leaving invite open, try again")
-			continue
-		}
-
-		// Passphrase good — add the admin.
-		if rc := completeInvite(client, paths, inv, resp); rc != 0 {
-			return rc
-		}
-		fmt.Fprintln(os.Stderr, "  ✓ approved — pushed. joining machine will pick it up on its next pull.")
+	// Shared-identity has no response file — the teammate consumes
+	// the invite by deleting it on their side. If the invite still
+	// exists, they haven't completed. If it's gone, this command is
+	// a no-op (there's nothing to approve).
+	if inv.ShareIdentity {
+		fmt.Fprintf(os.Stderr, "dop team approve-invite: shared-identity invite — nothing to approve on this side;\n")
+		fmt.Fprintln(os.Stderr, "  the teammate's `dop admin join` completes the join automatically.")
+		fmt.Fprintln(os.Stderr, "  check `dop team list` for the admin entry.")
 		return 0
 	}
+
+	resp, err := admininvite.ReadResponse(paths, full)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team approve-invite: no response yet from %s — try again when they've run `dop admin join`.\n", inv.Name)
+		return 1
+	}
+	if err := resp.Verify(); err != nil {
+		fmt.Fprintf(os.Stderr, "dop team approve-invite: response signature invalid: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(os.Stderr, "  ✓ response from %s at host %s\n", inv.Name, resp.Host)
+	fmt.Fprintf(os.Stderr, "    pubkey  %s\n", resp.Ed25519Pubkey)
+	fmt.Fprintf(os.Stderr, "    age     %s\n", resp.AgeRecipient)
+
+	pass, err := readPassphrase("Approval passphrase (to confirm add): ", *pfromStdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team approve-invite: %v\n", err)
+		return 1
+	}
+	ok, err := approval.Verify(paths, pass)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team approve-invite: %v\n", err)
+		return 1
+	}
+	if !ok {
+		fmt.Fprintln(os.Stderr, "dop team approve-invite: incorrect passphrase — leaving invite open, try again")
+		return 1
+	}
+
+	if rc := completeInvite(client, paths, *inv, resp); rc != 0 {
+		return rc
+	}
+	fmt.Fprintln(os.Stderr, "  ✓ approved — pushed. joining machine will pick it up on its next pull.")
+	return 0
 }
 
 // completeInvite runs the "add the new admin + cleanup + push" path.

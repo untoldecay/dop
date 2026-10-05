@@ -1,0 +1,314 @@
+// TUI update view — v1.14.0-rc7j. More › Update entry.
+//
+// Shells out to the existing `dop update` CLI (rc7f) rather than
+// reimplementing the GitHub-API + extract + atomic-rename pipeline
+// inline. That keeps one code path for all install scenarios (CI,
+// terminal, TUI) and inherits the same checksum verification and
+// rollback-slot handling.
+//
+// Flow:
+//   1. check phase: run `dop update --check-only` (channel from flag or
+//      prefs), parse the stderr for "Latest: <tag>" vs installed.
+//   2. confirm phase: operator sees installed → latest, picks y/n, can
+//      flip the channel with `c`.
+//   3. install phase: run `dop update` (no --check-only), stream
+//      stderr. On rc=0, exit TUI so the stale binary doesn't keep
+//      running (the renamed file is already in place).
+
+package tui
+
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+	"sync"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/fray/dop/internal/config"
+)
+
+type updateStep int
+
+const (
+	updateStepChecking  updateStep = 0
+	updateStepConfirm   updateStep = 1
+	updateStepInstalling updateStep = 2
+	updateStepDone      updateStep = 3
+)
+
+type updateView struct {
+	paths   *config.Paths
+	step    updateStep
+	channel string // "stable" | "dev"
+
+	installed string
+	latest    string
+	checkErr  string
+
+	cmd     *exec.Cmd
+	lineCh  chan string
+	linesMu sync.Mutex
+	lines   []string
+
+	rc     int
+	err    string
+	done   bool
+	flash  string
+}
+
+func newUpdateView(paths *config.Paths) *updateView {
+	return &updateView{
+		paths:   paths,
+		step:    updateStepChecking,
+		channel: "stable", // operators who want dev set it in-view with `c`
+		lineCh:  make(chan string, 32),
+	}
+}
+
+func (v *updateView) Init() tea.Cmd { return v.runCheck() }
+func (v *updateView) Done() bool    { return v.done }
+func (v *updateView) Flash() string { return v.flash }
+
+type updateCheckMsg struct {
+	installed string
+	latest    string
+	err       string
+}
+
+type updateLineMsg struct{ line string }
+type updateInstallDoneMsg struct {
+	rc  int
+	err string
+}
+
+func (v *updateView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch mm := msg.(type) {
+	case updateCheckMsg:
+		v.installed = mm.installed
+		v.latest = mm.latest
+		v.checkErr = mm.err
+		if mm.err != "" {
+			v.step = updateStepDone
+			v.rc = 1
+			return v, nil
+		}
+		if mm.installed == mm.latest {
+			v.step = updateStepDone
+			v.rc = 0
+			v.flash = "already on " + mm.installed + " (" + v.channel + " channel)"
+			return v, nil
+		}
+		v.step = updateStepConfirm
+		return v, nil
+	case updateLineMsg:
+		v.linesMu.Lock()
+		v.lines = append(v.lines, mm.line)
+		if len(v.lines) > 40 {
+			v.lines = v.lines[len(v.lines)-40:]
+		}
+		v.linesMu.Unlock()
+		return v, v.waitForLine()
+	case updateInstallDoneMsg:
+		v.step = updateStepDone
+		v.rc = mm.rc
+		v.err = mm.err
+		if mm.rc == 0 {
+			v.flash = "updated to " + v.latest + " — TUI will exit; relaunch to use the new version"
+		}
+		return v, nil
+	case tea.KeyMsg:
+		switch mm.String() {
+		case "esc", "ctrl+c", "q":
+			v.done = true
+			return v, nil
+		}
+		if v.step == updateStepDone {
+			v.done = true
+			// Successful update means the running binary is stale —
+			// exit the TUI so the next `dop` launch gets the new one.
+			if v.rc == 0 && v.installed != v.latest && v.latest != "" {
+				return v, tea.Quit
+			}
+			return v, nil
+		}
+		if v.step == updateStepConfirm {
+			switch mm.String() {
+			case "y", "enter":
+				v.step = updateStepInstalling
+				return v, tea.Batch(v.runInstall(), v.waitForLine())
+			case "n":
+				v.done = true
+				v.flash = "update cancelled"
+				return v, nil
+			case "c":
+				if v.channel == "stable" {
+					v.channel = "dev"
+				} else {
+					v.channel = "stable"
+				}
+				v.step = updateStepChecking
+				return v, v.runCheck()
+			}
+		}
+	}
+	return v, nil
+}
+
+// runCheck shells out `dop update --check-only --channel X` and parses
+// the stderr for the "Installed:" and "Latest:" lines.
+func (v *updateView) runCheck() tea.Cmd {
+	return func() tea.Msg {
+		self, err := os.Executable()
+		if err != nil {
+			return updateCheckMsg{err: err.Error()}
+		}
+		cmd := exec.Command(self, "update", "--check-only", "--channel", v.channel)
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return updateCheckMsg{err: strings.TrimSpace(stderr.String())}
+		}
+		installed, latest := parseCheckOutput(stderr.String())
+		return updateCheckMsg{installed: installed, latest: latest}
+	}
+}
+
+// parseCheckOutput — pulls "Installed: X" and "Latest (channel): Y"
+// out of `dop update --check-only` stderr.
+func parseCheckOutput(s string) (installed, latest string) {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "Installed:"):
+			installed = strings.TrimSpace(strings.TrimPrefix(line, "Installed:"))
+		case strings.HasPrefix(line, "Latest"):
+			// "Latest (dev channel): v1.14.0-rc7i-smoke  (published …)"
+			i := strings.Index(line, ":")
+			if i < 0 {
+				continue
+			}
+			rest := strings.TrimSpace(line[i+1:])
+			// Trim the "(published …)" suffix if present.
+			if j := strings.Index(rest, "  ("); j >= 0 {
+				rest = rest[:j]
+			}
+			latest = strings.TrimSpace(rest)
+		}
+	}
+	return
+}
+
+// runInstall shells out `dop update --channel X` and streams stderr
+// lines to the view through lineCh. On exit, pushes updateInstallDoneMsg.
+func (v *updateView) runInstall() tea.Cmd {
+	return func() tea.Msg {
+		self, err := os.Executable()
+		if err != nil {
+			return updateInstallDoneMsg{rc: 1, err: err.Error()}
+		}
+		v.cmd = exec.Command(self, "update", "--channel", v.channel)
+		v.cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+		stderr, err := v.cmd.StderrPipe()
+		if err != nil {
+			return updateInstallDoneMsg{rc: 1, err: err.Error()}
+		}
+		v.cmd.Stdout = io.Discard
+		if err := v.cmd.Start(); err != nil {
+			return updateInstallDoneMsg{rc: 1, err: err.Error()}
+		}
+		go func() {
+			sc := bufio.NewScanner(stderr)
+			sc.Buffer(make([]byte, 0, 4096), 64*1024)
+			for sc.Scan() {
+				v.lineCh <- sc.Text()
+			}
+			err := v.cmd.Wait()
+			rc := 0
+			msg := ""
+			if err != nil {
+				rc = 1
+				msg = err.Error()
+			}
+			v.rc = rc
+			v.err = msg
+			v.lineCh <- "__DONE__"
+		}()
+		return updateLineMsg{line: fmt.Sprintf("… running: dop update --channel %s", v.channel)}
+	}
+}
+
+func (v *updateView) waitForLine() tea.Cmd {
+	return func() tea.Msg {
+		ln, ok := <-v.lineCh
+		if !ok || ln == "__DONE__" {
+			return updateInstallDoneMsg{rc: v.rc, err: v.err}
+		}
+		return updateLineMsg{line: ln}
+	}
+}
+
+func (v *updateView) View() string {
+	var b strings.Builder
+	b.WriteString(titleSt.Render("Update") + "\n\n")
+	b.WriteString(mutedSt.Render("channel: "+v.channel) + "\n\n")
+
+	switch v.step {
+	case updateStepChecking:
+		b.WriteString(mutedSt.Render("checking GitHub for the latest release…") + "\n")
+	case updateStepConfirm:
+		b.WriteString("  Installed: " + v.installed + "\n")
+		b.WriteString("  Latest:    " + okSt.Render(v.latest) + "\n\n")
+		b.WriteString("  Install this version and exit the TUI?\n")
+		b.WriteString("\n" + helpSt.Render("y/enter install · n cancel · c flip channel (stable/dev) · esc back"))
+	case updateStepInstalling:
+		b.WriteString(mutedSt.Render("installing…") + "\n\n")
+		v.linesMu.Lock()
+		start := 0
+		if len(v.lines) > 10 {
+			start = len(v.lines) - 10
+		}
+		for _, ln := range v.lines[start:] {
+			b.WriteString("  " + mutedSt.Render(ln) + "\n")
+		}
+		v.linesMu.Unlock()
+	case updateStepDone:
+		b.WriteString("\n")
+		if v.rc == 0 {
+			if v.installed == v.latest || v.latest == "" {
+				b.WriteString(okSt.Render("✓ "+v.flash) + "\n")
+			} else {
+				b.WriteString(okSt.Render("✓ updated to "+v.latest+" — TUI will exit") + "\n")
+				b.WriteString(mutedSt.Render("  relaunch dop to use the new version.") + "\n")
+			}
+		} else {
+			b.WriteString(failSt.Render("✗ update failed") + "\n")
+			if v.checkErr != "" {
+				b.WriteString(mutedSt.Render("  "+v.checkErr) + "\n")
+			}
+			if v.err != "" {
+				b.WriteString(mutedSt.Render("  "+v.err) + "\n")
+			}
+			// Surface the stderr tail so the operator can diagnose.
+			v.linesMu.Lock()
+			if len(v.lines) > 0 {
+				b.WriteString("\n" + mutedSt.Render("Last output:") + "\n")
+				start := 0
+				if len(v.lines) > 12 {
+					start = len(v.lines) - 12
+				}
+				for _, ln := range v.lines[start:] {
+					b.WriteString("  " + mutedSt.Render(ln) + "\n")
+				}
+			}
+			v.linesMu.Unlock()
+		}
+		b.WriteString("\n" + helpSt.Render("any key to continue"))
+	}
+	return b.String()
+}

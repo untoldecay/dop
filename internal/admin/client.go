@@ -125,6 +125,147 @@ func (c *Client) EncryptVault(vaultPath string, plaintext []byte, ageRecipient s
 	return err
 }
 
+// UnwrapPortable — v1.14.0-rc1. Decrypts an portable-stashed bearer
+// value via the daemon's age identity. Used by `dop use <subject>`.
+func (c *Client) UnwrapPortable(ciphertextB64 string) ([]byte, error) {
+	req, _ := json.Marshal(UnwrapPortableReq{CiphertextB64: ciphertextB64})
+	resp, err := c.call(Request{Op: OpUnwrapPortable, Data: req})
+	if err != nil {
+		return nil, err
+	}
+	var r UnwrapPortableResp
+	if err := json.Unmarshal(resp.Data, &r); err != nil {
+		return nil, err
+	}
+	return base64.StdEncoding.DecodeString(r.PlaintextB64)
+}
+
+// ApprovalPopup — v1.14.0-rc4. Asks the daemon to show a native approval
+// dialog and verify the typed passphrase. Blocking: waits up to the
+// server-side timeout (default 60s) for a human response. Returns the
+// decision ("approved", "denied", "timeout", "unsupported") plus an
+// optional reason string. Callers get "unsupported" when the daemon
+// can't show a native dialog on this platform; standard fallback is
+// the tunnel+phone flow.
+//
+// Kind is a short tag the daemon uses to format the dialog title +
+// audit the decision. Subject names the thing being approved.
+// PromptText (optional) is the human-readable body; the daemon
+// synthesizes a default when empty.
+func (c *Client) ApprovalPopup(kind, subject, promptText string, timeout time.Duration) (string, string, error) {
+	req, _ := json.Marshal(ApprovalPopupReq{
+		Kind:       kind,
+		Subject:    subject,
+		PromptText: promptText,
+		TimeoutMs:  int(timeout.Milliseconds()),
+	})
+	resp, err := c.call(Request{Op: OpApprovalPopup, Data: req})
+	if err != nil {
+		return "", "", err
+	}
+	var r ApprovalPopupResp
+	if err := json.Unmarshal(resp.Data, &r); err != nil {
+		return "", "", err
+	}
+	return r.Decision, r.Reason, nil
+}
+
+// ShellTrustCheck — v1.14.0-rc6. Asks the daemon whether the current
+// shell PID is already trusted for the given subject on the eval/pipe
+// print path. Non-fatal: any error returns false (safe default).
+func (c *Client) ShellTrustCheck(pid int, subject string) (bool, error) {
+	req, _ := json.Marshal(ShellTrustReq{PID: pid, Subject: subject, Mode: "check"})
+	resp, err := c.call(Request{Op: OpShellTrust, Data: req})
+	if err != nil {
+		return false, err
+	}
+	var r ShellTrustResp
+	if err := json.Unmarshal(resp.Data, &r); err != nil {
+		return false, err
+	}
+	return r.Trusted, nil
+}
+
+// ShellTrustMark — v1.14.0-rc6. Records (PID, subject) in the daemon's
+// in-memory trust cache so subsequent same-shell/same-subject eval
+// invocations skip the approval popup.
+func (c *Client) ShellTrustMark(pid int, subject string) error {
+	req, _ := json.Marshal(ShellTrustReq{PID: pid, Subject: subject, Mode: "mark"})
+	_, err := c.call(Request{Op: OpShellTrust, Data: req})
+	return err
+}
+
+// TrustContextCheck — v1.14.0-rc6i. Replaces ShellTrustCheck.
+// kind+value identify the operator-approved execution context (built
+// by sessiontrust.Resolve); subject names the vault subject the
+// approval applies to. Non-fatal: any error returns false.
+func (c *Client) TrustContextCheck(kind, value, subject string) (bool, error) {
+	req, _ := json.Marshal(TrustContextReq{
+		ContextKind:  kind,
+		ContextValue: value,
+		Subject:      subject,
+		Mode:         "check",
+	})
+	resp, err := c.call(Request{Op: OpTrustContext, Data: req})
+	if err != nil {
+		return false, err
+	}
+	var r TrustContextResp
+	if err := json.Unmarshal(resp.Data, &r); err != nil {
+		return false, err
+	}
+	return r.Trusted, nil
+}
+
+// TrustContextMark — v1.14.0-rc6i. Replaces ShellTrustMark.
+func (c *Client) TrustContextMark(kind, value, subject string) error {
+	req, _ := json.Marshal(TrustContextReq{
+		ContextKind:  kind,
+		ContextValue: value,
+		Subject:      subject,
+		Mode:         "mark",
+	})
+	_, err := c.call(Request{Op: OpTrustContext, Data: req})
+	return err
+}
+
+// TrustContextList returns every active grant in the daemon's cache.
+// Operators use this via `dop trust list` to see what approvals are
+// in flight + when they'll idle-expire.
+func (c *Client) TrustContextList() ([]TrustGrantInfo, error) {
+	req, _ := json.Marshal(TrustContextReq{Mode: "list"})
+	resp, err := c.call(Request{Op: OpTrustContext, Data: req})
+	if err != nil {
+		return nil, err
+	}
+	var r TrustContextResp
+	if err := json.Unmarshal(resp.Data, &r); err != nil {
+		return nil, err
+	}
+	return r.Grants, nil
+}
+
+// TrustContextRevoke drops a single grant from the cache. Pass empty
+// strings + revokeAll=true to drop every grant.
+func (c *Client) TrustContextRevoke(kind, value, subject string, revokeAll bool) (int, error) {
+	req, _ := json.Marshal(TrustContextReq{
+		ContextKind:  kind,
+		ContextValue: value,
+		Subject:      subject,
+		Mode:         "revoke",
+		RevokeAll:    revokeAll,
+	})
+	resp, err := c.call(Request{Op: OpTrustContext, Data: req})
+	if err != nil {
+		return 0, err
+	}
+	var r TrustContextResp
+	if err := json.Unmarshal(resp.Data, &r); err != nil {
+		return 0, err
+	}
+	return r.Revoked, nil
+}
+
 // SockPath returns the socket path this client is talking to.
 func (c *Client) SockPath() string { return c.sockPath }
 

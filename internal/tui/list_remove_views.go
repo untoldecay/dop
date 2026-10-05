@@ -73,12 +73,36 @@ type integrationListView struct {
 	tokenScopePickCursor int
 
 	// Integration-level edit form state (integModeIntEdit).
-	intEditField        int // 0=kind picker, 1=description, 2=KindSlot (URL/CMD), 3=save
-	intEditKindCursor   int
-	intEditKindChoice   string
-	intEditDescBuf      strings.Builder
-	intEditKindSlotBuf  strings.Builder
+	// v1.14.0-rc3 Phase 5 — field 0 is Name (rename), Phase 4 added
+	// Projects/Tags; see intEditField* constants below.
+	intEditField         int
+	intEditNameBuf       textField
+	intEditNameWas       string // snapshot at open time, so rename detection is cheap at save
+	intEditKindCursor    int
+	intEditKindChoice    string
+	intEditDescBuf       textField
+	intEditKindSlotBuf   textField
+	intEditProjectsBuf   textField
+	intEditTagsBuf       textField
+	intEditProtectCursor int
+	intEditProtectChoice bool // mirrors protectionPresets[cursor].value
+	intEditProtectWas    bool // snapshot at enter time, used to decide if passphrase step is needed
+	intEditPassBuf       textField
 }
+
+// Integration edit field constants.
+// v1.14.0-rc3 Phase 4 added Projects/Tags; Phase 5 adds Name (rename).
+// Name is field 0 so a rename is the first thing an operator sees.
+const (
+	intEditFieldName       = 0
+	intEditFieldKind       = 1
+	intEditFieldDesc       = 2
+	intEditFieldKindSlot   = 3
+	intEditFieldProjects   = 4
+	intEditFieldTags       = 5
+	intEditFieldProtection = 6
+	intEditFieldPassphrase = 7
+)
 
 func newIntegrationListView(c *admin.Client, p *config.Paths) *integrationListView {
 	return &integrationListView{client: c, paths: p}
@@ -273,7 +297,12 @@ func (v *integrationListView) enterIntEdit() *integrationListView {
 		return v
 	}
 	it := v.items[name]
-	v.intEditField = 0
+	v.intEditField = intEditFieldName
+	// v1.14.0-rc3 Phase 5 — Name field (rename support). Snapshot the
+	// current key so doIntEdit can detect "operator typed a different
+	// name" without re-reading the vault.
+	v.intEditNameBuf.SetString(name)
+	v.intEditNameWas = name
 	v.intEditKindChoice = vault.IntegrationKindOf(it)
 	// Pre-position the kind cursor on the current kind.
 	for i, p := range kindPresets {
@@ -282,21 +311,32 @@ func (v *integrationListView) enterIntEdit() *integrationListView {
 			break
 		}
 	}
-	v.intEditDescBuf.Reset()
-	v.intEditDescBuf.WriteString(it.Description)
-	v.intEditKindSlotBuf.Reset()
+	v.intEditDescBuf.SetString(it.Description)
 	switch vault.IntegrationKindOf(it) {
 	case vault.IntegrationKindCLI:
-		v.intEditKindSlotBuf.WriteString(it.Metadata["cli_cmd"])
+		v.intEditKindSlotBuf.SetString(it.Metadata["cli_cmd"])
 	case vault.IntegrationKindMCP:
 		if it.Metadata["mcp_url"] != "" {
-			v.intEditKindSlotBuf.WriteString(it.Metadata["mcp_url"])
+			v.intEditKindSlotBuf.SetString(it.Metadata["mcp_url"])
 		} else {
-			v.intEditKindSlotBuf.WriteString(it.Metadata["mcp_cmd"])
+			v.intEditKindSlotBuf.SetString(it.Metadata["mcp_cmd"])
 		}
 	default: // api, other
-		v.intEditKindSlotBuf.WriteString(it.Metadata["base_url"])
+		v.intEditKindSlotBuf.SetString(it.Metadata["base_url"])
 	}
+	// v1.14.0-rc3 — prime projects/tags buffers (Phase 4).
+	v.intEditProjectsBuf.SetString(strings.Join(it.Projects, ","))
+	v.intEditTagsBuf.SetString(strings.Join(it.Tags, ","))
+	// v1.14.0-rc3 — prime protection state + reset passphrase buffer.
+	v.intEditProtectChoice = it.Protected
+	v.intEditProtectWas = it.Protected
+	for i, p := range protectionPresets {
+		if p.value == it.Protected {
+			v.intEditProtectCursor = i
+			break
+		}
+	}
+	v.intEditPassBuf.Reset()
 	v.mode = integModeIntEdit
 	return v
 }
@@ -366,7 +406,7 @@ func (v *integrationListView) doRemove() tea.Cmd {
 			args = append(args, "--force")
 		}
 		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -434,11 +474,15 @@ func (v *integrationListView) View() string {
 		// style doesn't shrink the visible column (ANSI escapes don't
 		// count toward Width()).
 		// v1.13.0-rc12 — prepend a muted lock glyph on protected rows.
-		// It sits inside the padded column so alignment stays stable.
-		lock := "  "
+		// v1.14.0-rc3 — glyph slot pinned to a fixed cell width via
+		// lipgloss.Width to defeat the "emoji is 2 cells, empty is 2
+		// spaces, with-space is 3" misalignment. Row-to-row columns
+		// now line up regardless of terminal emoji rendering.
+		lockGlyph := ""
 		if it.Protected {
-			lock = mutedSt.Render("🔒 ")
+			lockGlyph = mutedSt.Render("🔒")
 		}
+		lock := lipgloss.NewStyle().Width(3).Render(lockGlyph)
 		desc := it.Description
 		if desc == "" {
 			desc = "-"
@@ -458,6 +502,12 @@ func (v *integrationListView) View() string {
 		nrefs := len(v.referrers(selName))
 		bar := fmt.Sprintf("selected: %s  |  kind=%s  |  grants=%d  |  tokens=%d",
 			selName, vault.IntegrationKindOf(selIt), nrefs, len(selIt.Tokens))
+		if len(selIt.Tags) > 0 {
+			bar += "  |  tags=" + strings.Join(selIt.Tags, ",")
+		}
+		if len(selIt.Projects) > 0 {
+			bar += "  |  projects=" + strings.Join(selIt.Projects, ",")
+		}
 		if selIt.Protected {
 			owner := selIt.Owner
 			if len(owner) > 8 {
@@ -877,7 +927,7 @@ func (v *integrationRemoveView) doRemove() tea.Cmd {
 			args = append(args, "--token", tn)
 		}
 		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -919,10 +969,14 @@ func (v *integrationRemoveView) View() string {
 				prefix = "  " + cursorSt.Render("➤ ")
 				disp = cursorSt.Render(n)
 			}
-			lock := "  "
+			// v1.14.0-rc3 — Width(3)-pinned slot, same as the integration
+			// list render above. Keeps rows aligned across terminal emoji
+			// widths.
+			lockGlyph := ""
 			if it.Protected {
-				lock = mutedSt.Render("🔒 ")
+				lockGlyph = mutedSt.Render("🔒")
 			}
+			lock := lipgloss.NewStyle().Width(3).Render(lockGlyph)
 			desc := it.Description
 			if desc == "" {
 				desc = "-"
@@ -1251,7 +1305,7 @@ func (v *integrationListView) doTokenSetScope() tea.Cmd {
 			"--name", integ,
 			"--token-name", tok,
 			"--scope-note", scope)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -1271,7 +1325,7 @@ func (v *integrationListView) doTokenRotate() tea.Cmd {
 			"--name", integ,
 			"--token-name", tok,
 			"--value-stdin")
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		cmd.Stdin = strings.NewReader(newValue + "\n")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -1290,7 +1344,7 @@ func (v *integrationListView) doTokenRemove() tea.Cmd {
 		cmd := exec.Command(self, "integration", "remove-token",
 			"--name", integ,
 			"--token", tok)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -1300,11 +1354,16 @@ func (v *integrationListView) doTokenRemove() tea.Cmd {
 	}
 }
 
-// updateIntEdit handles the integration-level edit form (kind, desc, URL/CMD).
+// updateIntEdit handles the integration-level edit form.
+// v1.14.0-rc3 — see field constants above intEditField declaration.
+// Text fields: Desc, KindSlot, Projects, Tags, Passphrase.
+// Picker fields: Kind (0), Protection (5).
+// Passphrase (6) is conditional on flipping unprotected → protected.
 func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Field 0 is the Kind preset picker — treat up/down as cursor move,
-	// enter to advance.
-	if v.intEditField == 0 {
+	needsPass := v.intEditProtectChoice && !v.intEditProtectWas
+
+	// Field 1 — Kind picker (previously 0, shifted by Name).
+	if v.intEditField == intEditFieldKind {
 		switch mm.String() {
 		case "esc":
 			v.mode = integModeList
@@ -1318,66 +1377,160 @@ func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) 
 			}
 		case "enter":
 			v.intEditKindChoice = kindPresets[v.intEditKindCursor].value
-			v.intEditField = 1
+			v.intEditField = intEditFieldDesc
+		case "shift+tab":
+			v.intEditField = intEditFieldName
 		}
 		return v, nil
 	}
-	// Fields 1/2 are text inputs.
-	switch mm.String() {
+	// Field 5 — Protection picker.
+	if v.intEditField == intEditFieldProtection {
+		switch mm.String() {
+		case "esc":
+			v.mode = integModeList
+		case "up", "k":
+			if v.intEditProtectCursor > 0 {
+				v.intEditProtectCursor--
+			}
+		case "down", "j":
+			if v.intEditProtectCursor < len(protectionPresets)-1 {
+				v.intEditProtectCursor++
+			}
+		case "enter":
+			v.intEditProtectChoice = protectionPresets[v.intEditProtectCursor].value
+			if v.intEditProtectChoice && !v.intEditProtectWas {
+				v.intEditField = intEditFieldPassphrase
+			} else {
+				v.mode = integModeRun
+				return v, v.doIntEdit()
+			}
+		case "tab":
+			v.intEditProtectChoice = protectionPresets[v.intEditProtectCursor].value
+			if v.intEditProtectChoice && !v.intEditProtectWas {
+				v.intEditField = intEditFieldPassphrase
+			}
+		case "shift+tab":
+			v.intEditField = intEditFieldTags
+		}
+		return v, nil
+	}
+	// Text input fields: Name (0), Desc (2), KindSlot (3), Projects (4),
+	// Tags (5), Passphrase (7). rc6f — the current field's textField
+	// gets first dibs on caret keys (left/right/home/end/delete/backspace
+	// and rune insert) so operators can edit the pre-filled content in
+	// place. Only navigation keys (tab/enter/esc/up/down/shift+tab) fall
+	// through to the view's own switch.
+	key := mm.String()
+	if buf := v.intEditCurBuf(); buf != nil {
+		switch key {
+		case "left", "right", "home", "end", "ctrl+a", "ctrl+e", "backspace", "delete", "ctrl+d":
+			buf.handleKey(key, mm.Runes)
+			return v, nil
+		default:
+			// Rune insert — tea delivers the typed runes in mm.Runes
+			// alongside a key string like "a" or "@". Only consume if
+			// there are actual runes (filters out named navigation keys).
+			if len(mm.Runes) > 0 && key != "enter" && key != "tab" && key != "shift+tab" && key != "up" && key != "down" && key != "esc" {
+				buf.InsertRunes(mm.Runes)
+				return v, nil
+			}
+		}
+	}
+	switch key {
 	case "esc":
 		v.mode = integModeList
 	case "enter":
-		if v.intEditField < 2 {
+		switch v.intEditField {
+		case intEditFieldName:
+			v.intEditField = intEditFieldKind
+		case intEditFieldDesc, intEditFieldKindSlot, intEditFieldProjects:
 			v.intEditField++
-		} else {
+		case intEditFieldTags:
+			v.intEditField = intEditFieldProtection
+		case intEditFieldPassphrase:
+			if v.intEditPassBuf.Len() == 0 {
+				v.err = "approval passphrase required to lock"
+				return v, nil
+			}
+			v.err = ""
 			v.mode = integModeRun
 			return v, v.doIntEdit()
 		}
 	case "tab", "down":
-		if v.intEditField < 2 {
+		switch v.intEditField {
+		case intEditFieldName:
+			v.intEditField = intEditFieldKind
+		case intEditFieldDesc, intEditFieldKindSlot, intEditFieldProjects:
 			v.intEditField++
+		case intEditFieldTags:
+			v.intEditField = intEditFieldProtection
 		}
 	case "shift+tab", "up":
-		if v.intEditField > 0 {
-			v.intEditField--
-		}
-	case "backspace":
-		buf := v.intEditCurBuf()
-		if buf == nil {
-			return v, nil
-		}
-		s := buf.String()
-		if len(s) > 0 {
-			buf.Reset()
-			buf.WriteString(s[:len(s)-1])
-		}
-	default:
-		if len(mm.Runes) > 0 {
-			if buf := v.intEditCurBuf(); buf != nil {
-				buf.WriteString(string(mm.Runes))
+		switch v.intEditField {
+		case intEditFieldPassphrase:
+			v.intEditField = intEditFieldProtection
+		case intEditFieldDesc:
+			v.intEditField = intEditFieldKind
+		case intEditFieldName:
+			// top; no-op
+		default:
+			if v.intEditField > intEditFieldName {
+				v.intEditField--
 			}
 		}
 	}
+	_ = needsPass
 	return v, nil
 }
 
-func (v *integrationListView) intEditCurBuf() *strings.Builder {
+func (v *integrationListView) intEditCurBuf() *textField {
 	switch v.intEditField {
-	case 1:
+	case intEditFieldName:
+		return &v.intEditNameBuf
+	case intEditFieldDesc:
 		return &v.intEditDescBuf
-	case 2:
+	case intEditFieldKindSlot:
 		return &v.intEditKindSlotBuf
+	case intEditFieldProjects:
+		return &v.intEditProjectsBuf
+	case intEditFieldTags:
+		return &v.intEditTagsBuf
+	case intEditFieldPassphrase:
+		return &v.intEditPassBuf
 	}
 	return nil
 }
 
 func (v *integrationListView) doIntEdit() tea.Cmd {
-	name := v.selectedName()
+	nameWas := v.intEditNameWas
+	nameNew := strings.TrimSpace(v.intEditNameBuf.String())
+	// v1.14.0-rc3 Phase 5 — if the operator typed a different name,
+	// rename FIRST, then update the renamed integration with every
+	// other field. Rename runs through its own CLI subcommand with its
+	// own audit event and coordinated grant rewrite.
+	name := nameWas
+	if nameNew != "" && nameNew != nameWas {
+		name = nameNew
+	}
 	kind := v.intEditKindChoice
 	desc := v.intEditDescBuf.String()
 	slot := v.intEditKindSlotBuf.String()
+	projects := strings.TrimSpace(v.intEditProjectsBuf.String())
+	tags := strings.TrimSpace(v.intEditTagsBuf.String())
+	protectChoice := v.intEditProtectChoice
+	protectWas := v.intEditProtectWas
+	passphrase := v.intEditPassBuf.String()
 	return func() tea.Msg {
 		self, _ := os.Executable()
+		if nameNew != "" && nameNew != nameWas {
+			rename := exec.Command(self, "integration", "rename", "--from", nameWas, "--to", nameNew)
+			rename.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+			var rstderr bytes.Buffer
+			rename.Stderr = &rstderr
+			if err := rename.Run(); err != nil {
+				return integActionMsg{err: "rename: " + strings.TrimSpace(rstderr.String())}
+			}
+		}
 		args := []string{"integration", "add", "--name", name, "--kind", kind}
 		if desc != "" {
 			args = append(args, "--description", desc)
@@ -1396,8 +1549,20 @@ func (v *integrationListView) doIntEdit() tea.Cmd {
 				args = append(args, "--base-url", slot)
 			}
 		}
+		// v1.14.0-rc3 Phase 4 — always pass projects + tags so the TUI
+		// can edit them (empty string clears the field, nonempty replaces).
+		args = append(args, "--projects", projects, "--tags", tags)
+		switch {
+		case protectChoice && !protectWas:
+			args = append(args, "--protected", "--passphrase-stdin")
+		case !protectChoice && protectWas:
+			args = append(args, "--protected=false")
+		}
 		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+		if protectChoice && !protectWas {
+			cmd.Stdin = strings.NewReader(passphrase + "\n")
+		}
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -1643,16 +1808,40 @@ func (v *integrationListView) viewIntEdit() string {
 	var b strings.Builder
 	b.WriteString(titleSt.Render("Edit integration: "+name) + "\n\n")
 
-	// Kind picker (field 0).
+	// v1.14.0-rc3 Phase 5 — Name field (rename). Changing it triggers
+	// `dop integration rename` at save time (coordinated grant rewrite).
+	nameLbl := "Name"
+	if v.intEditField == intEditFieldName {
+		nameLbl = cursorSt.Render(nameLbl)
+	} else {
+		nameLbl = mutedSt.Render(nameLbl)
+	}
+	if v.intEditField == intEditFieldName {
+		before, after := v.intEditNameBuf.Split()
+		b.WriteString(nameLbl + ": " + before + cursorSt.Render("▎") + after)
+	} else {
+		b.WriteString(nameLbl + ": " + v.intEditNameBuf.String())
+	}
+	b.WriteString("\n")
+	if v.intEditField == intEditFieldName {
+		b.WriteString("    " + mutedSt.Render("changing the name renames every referring grant") + "\n")
+	}
+
+	// Kind picker (field intEditFieldKind). rc6m-fix: the literal `0`
+	// and `1` here predated the Name field (which took slot 0), so Kind
+	// highlighting + picker drew on Name focus, and Desc highlighting
+	// drew on Kind focus. The handler was always correct — only the
+	// renderer lied, so arrow keys silently adjusted the kind cursor
+	// behind an invisible picker.
 	kindLbl := "Kind"
 	kindVal := v.intEditKindChoice
-	if v.intEditField == 0 {
+	if v.intEditField == intEditFieldKind {
 		kindLbl = cursorSt.Render("Kind")
 	} else {
 		kindLbl = mutedSt.Render("Kind")
 	}
 	b.WriteString(kindLbl + ": " + kindVal + "\n")
-	if v.intEditField == 0 {
+	if v.intEditField == intEditFieldKind {
 		for i, p := range kindPresets {
 			prefix := "    "
 			label := p.label
@@ -1664,33 +1853,105 @@ func (v *integrationListView) viewIntEdit() string {
 		}
 	}
 
-	// Description (field 1).
+	// Description (field intEditFieldDesc).
 	descLbl := mutedSt.Render("What it's for")
-	if v.intEditField == 1 {
+	if v.intEditField == intEditFieldDesc {
 		descLbl = cursorSt.Render("What it's for")
 	}
-	b.WriteString(descLbl + ": " + v.intEditDescBuf.String())
-	if v.intEditField == 1 {
-		b.WriteString(cursorSt.Render("▎"))
+	if v.intEditField == intEditFieldDesc {
+		before, after := v.intEditDescBuf.Split()
+		b.WriteString(descLbl + ": " + before + cursorSt.Render("▎") + after)
+	} else {
+		b.WriteString(descLbl + ": " + v.intEditDescBuf.String())
 	}
 	b.WriteString("\n")
 
 	// KindSlot (field 2) — label depends on kind.
 	slotLbl, slotHint := kindSlotLabel(v.intEditKindChoice)
 	st := mutedSt
-	if v.intEditField == 2 {
+	if v.intEditField == intEditFieldKindSlot {
 		st = cursorSt
 	}
-	b.WriteString(st.Render(slotLbl) + ": " + v.intEditKindSlotBuf.String())
-	if v.intEditField == 2 {
-		b.WriteString(cursorSt.Render("▎"))
+	if v.intEditField == intEditFieldKindSlot {
+		before, after := v.intEditKindSlotBuf.Split()
+		b.WriteString(st.Render(slotLbl) + ": " + before + cursorSt.Render("▎") + after)
+	} else {
+		b.WriteString(st.Render(slotLbl) + ": " + v.intEditKindSlotBuf.String())
 	}
 	b.WriteString("\n")
-	if v.intEditField == 2 {
+	if v.intEditField == intEditFieldKindSlot {
 		b.WriteString("    " + mutedSt.Render(slotHint) + "\n")
 	}
 
-	b.WriteString("\n" + helpSt.Render("enter next/save | tab/↑↓ jump | esc cancel"))
+	// v1.14.0-rc3 — Projects + Tags rows (Phase 4). Grouping metadata,
+	// no inheritance to grants. Comma-separated input.
+	projLbl := mutedSt.Render("Projects (comma-separated)")
+	if v.intEditField == intEditFieldProjects {
+		projLbl = cursorSt.Render("Projects (comma-separated)")
+	}
+	if v.intEditField == intEditFieldProjects {
+		before, after := v.intEditProjectsBuf.Split()
+		b.WriteString(projLbl + ": " + before + cursorSt.Render("▎") + after)
+	} else {
+		b.WriteString(projLbl + ": " + v.intEditProjectsBuf.String())
+	}
+	b.WriteString("\n")
+	tagsLbl := mutedSt.Render("Tags (comma-separated)")
+	if v.intEditField == intEditFieldTags {
+		tagsLbl = cursorSt.Render("Tags (comma-separated)")
+	}
+	if v.intEditField == intEditFieldTags {
+		before, after := v.intEditTagsBuf.Split()
+		b.WriteString(tagsLbl + ": " + before + cursorSt.Render("▎") + after)
+	} else {
+		b.WriteString(tagsLbl + ": " + v.intEditTagsBuf.String())
+	}
+	b.WriteString("\n")
+
+	// v1.14.0-rc3 — Protection picker (field 5).
+	protectLbl := "Protection"
+	protectVal := "default"
+	if v.intEditProtectChoice {
+		protectVal = "protected"
+	}
+	if v.intEditField == intEditFieldProtection {
+		protectLbl = cursorSt.Render(protectLbl)
+	} else {
+		protectLbl = mutedSt.Render(protectLbl)
+	}
+	b.WriteString(protectLbl + ": " + protectVal + "\n")
+	if v.intEditField == intEditFieldProtection {
+		for i, p := range protectionPresets {
+			prefix := "    "
+			label := p.label
+			hint := p.hint
+			if i == v.intEditProtectCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(p.label)
+			}
+			b.WriteString(prefix + label + "    " + mutedSt.Render(hint) + "\n")
+		}
+	}
+
+	// v1.14.0-rc3 — Passphrase (field 6). Rendered only when flipping
+	// from unprotected → protected. For unlock + no-change, enter at
+	// Protection commits directly without this row ever showing.
+	needsPass := v.intEditProtectChoice && !v.intEditProtectWas
+	if needsPass {
+		passLbl := mutedSt.Render("Approval passphrase")
+		if v.intEditField == intEditFieldPassphrase {
+			passLbl = cursorSt.Render("Approval passphrase")
+		}
+		if v.intEditField == intEditFieldPassphrase {
+			before, after := v.intEditPassBuf.SplitMasked("•")
+			b.WriteString(passLbl + ": " + before + cursorSt.Render("▎") + after)
+		} else {
+			b.WriteString(passLbl + ": " + strings.Repeat("•", v.intEditPassBuf.Len()))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n" + helpSt.Render("enter next/save · tab/↑↓ jump field · ←→ move caret · home/end jump · esc cancel"))
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err))
 	}
@@ -1708,12 +1969,16 @@ const (
 	grantModeEdit    = 5
 )
 
-// Edit sub-steps: field selection is by row (projects, tags, env_prefix).
+// Edit sub-steps: field selection is by row.
+// v1.14.0-rc3 adds Protection + optional Passphrase; grant-level
+// protection becomes independently settable (per rc3-plan.md Phase 3).
 const (
-	grantEditFieldProjects  = 0
-	grantEditFieldTags      = 1
-	grantEditFieldEnvPrefix = 2
-	grantEditFieldSave      = 3
+	grantEditFieldProjects   = 0
+	grantEditFieldTags       = 1
+	grantEditFieldEnvPrefix  = 2
+	grantEditFieldProtection = 3
+	grantEditFieldPassphrase = 4
+	grantEditFieldSave       = 5
 )
 
 type grantListView struct {
@@ -1725,6 +1990,11 @@ type grantListView struct {
 	items  map[string]vault.Grant
 	done   bool
 
+	// rc6c — viewer pubkey primed at load so row renderer can draw
+	// perspective-sensitive owner glyphs (👤 mine / 🔒 another admin's)
+	// on protected grants. See rc3-smoke-retakes [S1].
+	viewerPubkey string
+
 	mode         int
 	cursor       int
 	actionCursor int
@@ -1735,6 +2005,11 @@ type grantListView struct {
 	editProject strings.Builder
 	editTags    strings.Builder
 	editPrefix  strings.Builder
+	// v1.14.0-rc3 — grant-level protection toggle in edit form.
+	editProtectCursor int
+	editProtectChoice bool
+	editProtectWas    bool
+	editPassBuf       strings.Builder
 }
 
 func newGrantListView(c *admin.Client, p *config.Paths) *grantListView {
@@ -1745,8 +2020,9 @@ func (v *grantListView) Done() bool    { return v.done }
 func (v *grantListView) Flash() string { return v.flash }
 
 type grantListLoadedMsg struct {
-	items map[string]vault.Grant
-	err   string
+	items        map[string]vault.Grant
+	viewerPubkey string
+	err          string
 }
 
 type grantActionMsg struct {
@@ -1765,7 +2041,14 @@ func (v *grantListView) load() tea.Msg {
 		}
 		return grantListLoadedMsg{err: err.Error()}
 	}
-	return grantListLoadedMsg{items: vlt.Grants}
+	// rc6c — viewer pubkey for perspective-sensitive owner glyphs on
+	// protected grant rows. Best-effort — missing status just renders
+	// without the icon instead of crashing.
+	viewerPubkey := ""
+	if st, serr := v.client.Status(); serr == nil {
+		viewerPubkey = st.AdminPubkey
+	}
+	return grantListLoadedMsg{items: vlt.Grants, viewerPubkey: viewerPubkey}
 }
 
 func (v *grantListView) selectedID() string {
@@ -1799,6 +2082,7 @@ func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.loaded = true
 		v.err = mm.err
 		v.items = mm.items
+		v.viewerPubkey = mm.viewerPubkey
 		v.ids = v.ids[:0]
 		for id := range v.items {
 			v.ids = append(v.ids, id)
@@ -1934,34 +2218,109 @@ func (v *grantListView) openEditor() {
 	v.editTags.WriteString(strings.Join(g.Tags, ","))
 	v.editPrefix.Reset()
 	v.editPrefix.WriteString(g.EnvPrefix)
+	// v1.14.0-rc3 — prime protection + reset passphrase buffer.
+	v.editProtectChoice = g.Protected
+	v.editProtectWas = g.Protected
+	for i, p := range protectionPresets {
+		if p.value == g.Protected {
+			v.editProtectCursor = i
+			break
+		}
+	}
+	v.editPassBuf.Reset()
 	v.editField = grantEditFieldProjects
 	v.mode = grantModeEdit
 	v.err = ""
 }
 
 func (v *grantListView) updateEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Passphrase field (4) is only visited when flipping unprotected →
+	// protected. Everything else skips over it.
+	needsPass := v.editProtectChoice && !v.editProtectWas
+
+	// Field 3 — Protection preset picker.
+	if v.editField == grantEditFieldProtection {
+		switch mm.String() {
+		case "esc":
+			v.mode = grantModeAction
+			return v, nil
+		case "up", "k":
+			if v.editProtectCursor > 0 {
+				v.editProtectCursor--
+			}
+		case "down", "j":
+			if v.editProtectCursor < len(protectionPresets)-1 {
+				v.editProtectCursor++
+			}
+		case "enter":
+			v.editProtectChoice = protectionPresets[v.editProtectCursor].value
+			if v.editProtectChoice && !v.editProtectWas {
+				v.editField = grantEditFieldPassphrase
+			} else {
+				v.editField = grantEditFieldSave
+			}
+		case "tab":
+			v.editProtectChoice = protectionPresets[v.editProtectCursor].value
+			if v.editProtectChoice && !v.editProtectWas {
+				v.editField = grantEditFieldPassphrase
+			} else {
+				v.editField = grantEditFieldSave
+			}
+		case "shift+tab":
+			v.editField = grantEditFieldEnvPrefix
+		}
+		return v, nil
+	}
 	switch mm.String() {
 	case "esc":
 		v.mode = grantModeAction
 		return v, nil
 	case "tab", "down":
-		if v.editField < grantEditFieldSave {
+		if v.editField == grantEditFieldPassphrase {
+			if needsPass {
+				v.editField = grantEditFieldSave
+			}
+		} else if v.editField < grantEditFieldSave {
 			v.editField++
+			// Skip passphrase row when it doesn't apply.
+			if v.editField == grantEditFieldPassphrase && !needsPass {
+				v.editField = grantEditFieldSave
+			}
 		}
 		return v, nil
 	case "shift+tab", "up":
-		if v.editField > grantEditFieldProjects {
+		if v.editField == grantEditFieldSave && !needsPass {
+			v.editField = grantEditFieldProtection
+		} else if v.editField > grantEditFieldProjects {
 			v.editField--
 		}
 		return v, nil
 	case "enter":
 		if v.editField == grantEditFieldSave {
+			if needsPass && v.editPassBuf.Len() == 0 {
+				v.editField = grantEditFieldPassphrase
+				v.err = "approval passphrase required to lock"
+				return v, nil
+			}
+			v.err = ""
 			v.mode = grantModeRun
 			return v, v.doEdit()
 		}
-		// otherwise advance to next field
+		if v.editField == grantEditFieldPassphrase {
+			if v.editPassBuf.Len() == 0 {
+				v.err = "approval passphrase required to lock"
+				return v, nil
+			}
+			v.err = ""
+			v.editField = grantEditFieldSave
+			return v, nil
+		}
+		// otherwise advance to next field (skipping passphrase if N/A).
 		if v.editField < grantEditFieldSave {
 			v.editField++
+			if v.editField == grantEditFieldPassphrase && !needsPass {
+				v.editField = grantEditFieldSave
+			}
 		}
 		return v, nil
 	case "backspace":
@@ -1993,6 +2352,8 @@ func (v *grantListView) editBuf() *strings.Builder {
 		return &v.editTags
 	case grantEditFieldEnvPrefix:
 		return &v.editPrefix
+	case grantEditFieldPassphrase:
+		return &v.editPassBuf
 	}
 	return nil
 }
@@ -2016,7 +2377,7 @@ func (v *grantListView) doRemove() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "grant", "remove", "--id", id)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -2032,6 +2393,11 @@ func (v *grantListView) doEdit() tea.Cmd {
 	projects := strings.TrimSpace(v.editProject.String())
 	tags := strings.TrimSpace(v.editTags.String())
 	prefix := strings.TrimSpace(v.editPrefix.String())
+	// v1.14.0-rc3 — propagate grant-level protection choice through the
+	// CLI's tri-state --protected. Only lock-flips feed a passphrase.
+	protectChoice := v.editProtectChoice
+	protectWas := v.editProtectWas
+	passphrase := v.editPassBuf.String()
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		// `dop grant add` is upsert; passing the same id + integration +
@@ -2047,8 +2413,17 @@ func (v *grantListView) doEdit() tea.Cmd {
 		if prefix != "" {
 			args = append(args, "--env-prefix", prefix)
 		}
+		switch {
+		case protectChoice && !protectWas:
+			args = append(args, "--protected", "--passphrase-stdin")
+		case !protectChoice && protectWas:
+			args = append(args, "--protected=false")
+		}
 		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+		if protectChoice && !protectWas {
+			cmd.Stdin = strings.NewReader(passphrase + "\n")
+		}
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -2101,10 +2476,23 @@ func (v *grantListView) View() string {
 			prefix = "  " + cursorSt.Render("➤ ")
 			disp = cursorSt.Render(id)
 		}
+		// rc6c — perspective-sensitive owner glyph. Protected grants
+		// show 👤 (yours) when g.Owner matches the viewer's admin
+		// pubkey, 🔒 (another admin's) otherwise. Unprotected grants
+		// get a blank slot. Width-pinned via lipgloss per contract 14.
+		ownerRaw := ""
+		if g.Protected {
+			if g.Owner != "" && v.viewerPubkey != "" && g.Owner == v.viewerPubkey {
+				ownerRaw = "👤"
+			} else {
+				ownerRaw = mutedSt.Render("🔒")
+			}
+		}
+		ownerGlyph := lipgloss.NewStyle().Width(3).Render(ownerRaw)
 		// v1.13.0-rc20 — row shows id + target only. Projects moved to
 		// the status bar so the row stays clean.
 		dispPad := lipgloss.NewStyle().Width(labelWidth).Render(disp)
-		b.WriteString(prefix + dispPad +
+		b.WriteString(prefix + ownerGlyph + dispPad +
 			fmt.Sprintf("  → %s.%s\n", g.Integration, g.Token))
 	}
 
@@ -2136,7 +2524,8 @@ func (v *grantListView) View() string {
 	if v.mode == grantModeAction {
 		b.WriteString("\n" + v.renderActionMenu())
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move | enter actions | esc back"))
+		b.WriteString("\n" + helpSt.Render("↑↓ move | enter actions | esc back") +
+			"\n" + helpSt.Render("👤 yours · 🔒 another admin's"))
 	}
 	if v.flash != "" {
 		b.WriteString("\n" + okSt.Render(v.flash))
@@ -2240,6 +2629,48 @@ func (v *grantListView) viewEdit() string {
 		}
 		b.WriteString("\n")
 	}
+
+	// v1.14.0-rc3 — Protection preset picker (field 3).
+	protectLbl := "Protection"
+	protectVal := "default"
+	if v.editProtectChoice {
+		protectVal = "protected"
+	}
+	if v.editField == grantEditFieldProtection {
+		protectLbl = cursorSt.Render(protectLbl)
+	} else {
+		protectLbl = mutedSt.Render(protectLbl)
+	}
+	b.WriteString(protectLbl + ": " + protectVal + "\n")
+	if v.editField == grantEditFieldProtection {
+		for i, p := range protectionPresets {
+			prefix := "    "
+			label := p.label
+			hint := p.hint
+			if i == v.editProtectCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(p.label)
+			}
+			b.WriteString(prefix + label + "    " + mutedSt.Render(hint) + "\n")
+		}
+	}
+
+	// v1.14.0-rc3 — Passphrase (field 4). Only rendered when flipping
+	// unprotected → protected (same shape as integration edit).
+	needsPass := v.editProtectChoice && !v.editProtectWas
+	if needsPass {
+		passLbl := mutedSt.Render("Approval passphrase")
+		if v.editField == grantEditFieldPassphrase {
+			passLbl = cursorSt.Render("Approval passphrase")
+		}
+		masked := strings.Repeat("•", v.editPassBuf.Len())
+		b.WriteString(passLbl + ": " + masked)
+		if v.editField == grantEditFieldPassphrase {
+			b.WriteString(cursorSt.Render("▎"))
+		}
+		b.WriteString("\n")
+	}
+
 	b.WriteString("\n")
 	saveStyle := mutedSt
 	if v.editField == grantEditFieldSave {
@@ -2250,7 +2681,7 @@ func (v *grantListView) viewEdit() string {
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("tab / ↑↓ field | enter save (on [Save]) · esc cancel"))
+	b.WriteString("\n" + helpSt.Render("tab/↑↓ field · enter save (on [Save]) · esc cancel"))
 	return b.String()
 }
 
@@ -2354,7 +2785,7 @@ func (v *grantRemoveView) doRemove() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "grant", "remove", "--id", id)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
