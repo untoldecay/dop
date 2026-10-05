@@ -53,6 +53,12 @@ func runTeam(args []string) int {
 		// timeout output since v1.9 but the command was never actually
 		// wired up until rc7m.
 		return runTeamCancelInvite(args[1:])
+	case "approve-invite":
+		// rc7o — complete a pending invite after the teammate has
+		// responded. Replaces the inline polling loop in pre-rc7o
+		// runTeamInvite. `dop team invite` now exits immediately after
+		// staging; this is the fire-and-forget completion step.
+		return runTeamApproveInvite(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop team: unknown subcommand %q\n", args[0])
 		return 2
