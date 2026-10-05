@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/userprefs"
 )
 
 // ---------- Setup admin (first-run admin init) ----------
@@ -34,18 +35,24 @@ const (
 	setupStepApprovalConf = 3
 	setupStepRunning      = 4
 	setupStepLoggingIn    = 5
+	// rc7k — first-start harness picker. New operators pick their AI
+	// harness here so DOP's trust-context cache knows which session
+	// env var to consult. Persisted to userprefs.Harness; the Settings
+	// view can change it later.
+	setupStepHarness = 6
 )
 
 type setupAdminView struct {
-	paths       *config.Paths
-	step        int
-	adminPass1  strings.Builder
-	adminPass2  strings.Builder
-	approvPass1 strings.Builder
-	approvPass2 strings.Builder
-	err         string
-	done        bool
-	flash       string
+	paths         *config.Paths
+	step          int
+	adminPass1    strings.Builder
+	adminPass2    strings.Builder
+	approvPass1   strings.Builder
+	approvPass2   strings.Builder
+	harnessCursor int // rc7k — cursor into userprefs.HarnessChoices
+	err           string
+	done          bool
+	flash         string
 }
 
 func newSetupAdminView(paths *config.Paths) *setupAdminView {
@@ -84,10 +91,16 @@ func (v *setupAdminView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.flash = "admin created but login failed — try 'dop admin login' manually"
 			return v, nil
 		}
-		v.flash = "admin ready — session unlocked"
-		v.done = true
+		// rc7k — after login succeeds, offer the harness picker before
+		// landing on the first menu. Operators who pick get the right
+		// trust-context env var consulted automatically.
+		v.step = setupStepHarness
 		return v, nil
 	case tea.KeyMsg:
+		// rc7k — harness picker owns its own key routing.
+		if v.step == setupStepHarness {
+			return v.updateHarnessStep(mm)
+		}
 		if v.step >= setupStepRunning {
 			return v, nil // running / logging in — ignore keys
 		}
@@ -161,6 +174,39 @@ func (v *setupAdminView) advance() (tea.Model, tea.Cmd) {
 	return v, nil
 }
 
+// updateHarnessStep — rc7k. Up/down moves the cursor; enter commits
+// the pick (saves to userprefs) and ends the setup. esc skips the
+// picker (leaves Harness empty; operator can set in Settings later).
+func (v *setupAdminView) updateHarnessStep(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch mm.String() {
+	case "esc":
+		// Skip — leave Harness empty; operator can pick in Settings.
+		v.flash = "admin ready — session unlocked (harness pick skipped; set it in Settings → Harness)"
+		v.done = true
+		return v, nil
+	case "up", "k":
+		if v.harnessCursor > 0 {
+			v.harnessCursor--
+		}
+	case "down", "j":
+		if v.harnessCursor < len(userprefs.HarnessChoices)-1 {
+			v.harnessCursor++
+		}
+	case "enter":
+		pick := userprefs.HarnessChoices[v.harnessCursor]
+		prefs := userprefs.Load(v.paths)
+		prefs.Harness = pick
+		if err := userprefs.Save(v.paths, prefs); err != nil {
+			v.err = "save prefs: " + err.Error()
+			return v, nil
+		}
+		v.flash = "admin ready — harness set to " + userprefs.HarnessLabel(pick)
+		v.done = true
+		return v, nil
+	}
+	return v, nil
+}
+
 func (v *setupAdminView) currentBuf() *strings.Builder {
 	switch v.step {
 	case setupStepAdminPass:
@@ -222,6 +268,27 @@ func (v *setupAdminView) View() string {
 	}
 	if v.step == setupStepLoggingIn {
 		b.WriteString("Signing in…\n")
+		return b.String()
+	}
+	// rc7k — harness picker step.
+	if v.step == setupStepHarness {
+		b.WriteString(okSt.Render("✓ admin ready, session unlocked.") + "\n\n")
+		b.WriteString("One last step: " + cursorSt.Render("which AI harness do you primarily use?") + "\n")
+		b.WriteString(mutedSt.Render("DOP's trust-context cache uses this to consult the right session env var") + "\n")
+		b.WriteString(mutedSt.Render("so `dop use` only pops the approval dialog once per conversation.") + "\n\n")
+		for i, choice := range userprefs.HarnessChoices {
+			prefix := "    "
+			label := userprefs.HarnessLabel(choice)
+			if i == v.harnessCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(label)
+			}
+			b.WriteString(prefix + label + "\n")
+		}
+		if v.err != "" {
+			b.WriteString("\n" + failSt.Render(v.err) + "\n")
+		}
+		b.WriteString("\n" + helpSt.Render("↑↓ pick | enter confirm | esc skip (change later in Settings → Harness)"))
 		return b.String()
 	}
 

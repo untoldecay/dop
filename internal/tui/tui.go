@@ -267,9 +267,10 @@ func (m *rootModel) rebuildMenu() {
 				},
 			},
 			{
-				label: "More", hint: "settings · logout · uninstall · quit", key: "M",
+				label: "More", hint: "settings · update · logout · uninstall · quit", key: "M",
 				items: []menuItem{
-					{label: "Settings", hint: "TUI preferences (file keys, …) · press F to toggle", fn: (*rootModel).openSettings},
+					{label: "Settings", hint: "TUI preferences (file keys, timeout, harness) · press F to toggle", fn: (*rootModel).openSettings},
+					{label: "Update", hint: "check GitHub for a newer dop + install in-place", fn: (*rootModel).openUpdate},
 					{label: "Logout", hint: "end admin session", fn: (*rootModel).doLogout},
 					{label: "Uninstall", hint: "wipe every DOP file on this machine (keeps the vault repo)", fn: (*rootModel).openReset},
 					{label: "Quit", hint: "exit", fn: (*rootModel).quit},
@@ -835,6 +836,10 @@ func (m *rootModel) openJoin() (tea.Model, tea.Cmd) {
 }
 func (m *rootModel) openReset() (tea.Model, tea.Cmd) {
 	m.child = newResetView(m.paths)
+	return m, m.child.Init()
+}
+func (m *rootModel) openUpdate() (tea.Model, tea.Cmd) {
+	m.child = newUpdateView(m.paths)
 	return m, m.child.Init()
 }
 func (m *rootModel) openTeamList() (tea.Model, tea.Cmd) {
