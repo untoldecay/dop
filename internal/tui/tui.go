@@ -10,6 +10,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -104,6 +105,20 @@ type rootModel struct {
 	flashMessage  string // one-shot info message shown below the menu
 
 	pendingCount int // v1.7 — surfaced as a banner above the menu
+
+	// rc7h — session-expiry guard. When a leaf dispatch sees a locked
+	// session, it stashes the target fn here and fires the osascript
+	// unlock subprocess. On completion, Update handles guiUnlockResultMsg
+	// by either invoking pendingUnlockFn (on success) or printing a
+	// stderr line + tea.Quit (on failure).
+	pendingUnlockFn func(*rootModel) (tea.Model, tea.Cmd)
+}
+
+// guiUnlockResultMsg is delivered by the runGUIUnlock Cmd when the
+// `dop admin __gui-unlock` subprocess exits.
+type guiUnlockResultMsg struct {
+	success bool
+	stderr  string
 }
 
 type menuItem struct {
@@ -288,6 +303,27 @@ func (m *rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch sz := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = sz.Width, sz.Height
+	case guiUnlockResultMsg:
+		// rc7h — session-guard result handler. On success refresh state
+		// so the daemon's new session is visible, then invoke the stashed
+		// leaf fn. On failure print the specific error to stderr (so it
+		// survives the TUI exit) and quit cleanly — the operator will
+		// re-enter at the shell prompt and can `dop admin login` manually.
+		if sz.success {
+			m.refreshState()
+			m.rebuildMenu()
+			if fn := m.pendingUnlockFn; fn != nil {
+				m.pendingUnlockFn = nil
+				return fn(m)
+			}
+			return m, nil
+		}
+		fmt.Fprintln(os.Stderr, "dop: admin session expired — unlock cancelled or dialog unavailable.")
+		if sz.stderr != "" {
+			fmt.Fprintln(os.Stderr, "  "+sz.stderr)
+		}
+		fmt.Fprintln(os.Stderr, "  run `dop admin login` and re-launch the TUI.")
+		return m, tea.Quit
 	}
 	if m.child != nil {
 		child, cmd := m.child.Update(msg)
@@ -345,6 +381,43 @@ func (m *rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// guardAdminAction runs fn if the admin session is still active;
+// otherwise it stashes fn in pendingUnlockFn and fires the osascript
+// unlock subprocess. The user sees the dialog; on success Update will
+// invoke fn; on cancel/fail Update prints a stderr line + quits the TUI.
+// rc7h — fixes the "TUI stayed open with stale session, downstream
+// subprocess failed cryptically" trap on invite/add/remove/... flows.
+func (m *rootModel) guardAdminAction(fn func(*rootModel) (tea.Model, tea.Cmd)) (tea.Model, tea.Cmd) {
+	if m.adminClient != nil && m.adminClient.SessionActive() {
+		return fn(m)
+	}
+	m.pendingUnlockFn = fn
+	m.flashMessage = "admin session expired — unlock prompt opening…"
+	return m, runGUIUnlock()
+}
+
+// runGUIUnlock spawns `dop admin __gui-unlock` and returns the result
+// as a guiUnlockResultMsg. Blocking subprocess (osascript dialog), so
+// the Cmd goroutine stays alive until the user interacts.
+func runGUIUnlock() tea.Cmd {
+	return func() tea.Msg {
+		self, err := os.Executable()
+		if err != nil {
+			return guiUnlockResultMsg{success: false, stderr: err.Error()}
+		}
+		cmd := exec.Command(self, "admin", "__gui-unlock",
+			"--title", "DOP admin unlock",
+			"--body", "The admin session expired. Enter your admin passphrase to continue.")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return guiUnlockResultMsg{success: false, stderr: strings.TrimSpace(stderr.String())}
+		}
+		return guiUnlockResultMsg{success: true}
+	}
 }
 
 // updateGroupsMenu handles key routing for the v1.13.0-rc19 hierarchical
@@ -405,13 +478,13 @@ func (m *rootModel) updateGroupsMenu(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if m.cursor >= 0 && m.cursor < len(items) {
-			return items[m.cursor].fn(m)
+			return m.guardAdminAction(items[m.cursor].fn)
 		}
 	}
 	// Numeric shortcut within the sub-menu (1..len(items)).
 	if n, ok := parseDigit(s); ok {
 		if n >= 1 && n <= len(items) {
-			return items[n-1].fn(m)
+			return m.guardAdminAction(items[n-1].fn)
 		}
 	}
 	return m, nil
@@ -426,7 +499,7 @@ func (m *rootModel) enterGroup(i int) (tea.Model, tea.Cmd) {
 	}
 	g := m.groups[i]
 	if g.direct != nil {
-		return g.direct(m)
+		return m.guardAdminAction(g.direct)
 	}
 	m.inGroup = i
 	m.cursor = 0
