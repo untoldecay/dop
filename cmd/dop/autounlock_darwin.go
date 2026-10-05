@@ -18,8 +18,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/fray/dop/internal/admin"
@@ -35,6 +37,47 @@ var ErrAutoUnlockUnsupported = errors.New("admin auto-unlock: native dialog unsu
 // "run dop admin login" error so the operator can retry at a terminal.
 var ErrAutoUnlockCanceled = errors.New("admin auto-unlock: operator canceled")
 
+// canShowGUIDialog reports whether this process can plausibly reach
+// WindowServer to render a native osascript dialog.
+//
+// rc6k (handoff 4cca9621 finding [C]): pre-rc6k we blindly ran
+// osascript and swallowed any failure as "no active admin session —
+// run dop admin login first". In agent harnesses like Orca where the
+// subprocess inherits a non-Aqua environment, osascript silently
+// fails and the operator never learns the dialog was attempted.
+//
+// Positive signals (both required):
+//   - launchctl managername == "Aqua" — tells us we're in a GUI session
+//   - /dev/console owner uid == our uid — tells us the active console
+//     user matches the invoking user (not a background daemon context)
+//
+// Deliberately NOT checked (anti-patterns from the handoff):
+//   - $TERM — set to "xterm-256color" in agent shells despite no tty
+//   - isatty(stdin/stdout/stderr) — always false in agent shells
+//   - $DISPLAY — macOS doesn't use it
+//
+// Returns (ok, reason). When ok is false, reason names the first
+// failing check so operators can see why the dialog was skipped
+// (surfaced to stderr by callers).
+func canShowGUIDialog() (bool, string) {
+	out, err := exec.Command("launchctl", "managername").Output()
+	if err != nil {
+		return false, "launchctl managername failed: " + err.Error()
+	}
+	mgr := strings.TrimSpace(string(out))
+	if mgr != "Aqua" {
+		return false, fmt.Sprintf("launchctl managername = %q, want Aqua (no GUI session reachable from here)", mgr)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat("/dev/console", &st); err != nil {
+		return false, "stat /dev/console: " + err.Error()
+	}
+	if int(st.Uid) != os.Getuid() {
+		return false, fmt.Sprintf("console uid %d != process uid %d (dialog would surface for a different user)", st.Uid, os.Getuid())
+	}
+	return true, ""
+}
+
 // autoUnlockPrompt shows a native osascript dialog asking for the
 // admin passphrase, then calls performAdminLogin with the result.
 // Returns a connected admin.Client once the session is live.
@@ -47,6 +90,13 @@ var ErrAutoUnlockCanceled = errors.New("admin auto-unlock: operator canceled")
 // Side effects on success: a fresh session daemon is forked and the
 // socket is reachable before this function returns.
 func autoUnlockPrompt(paths *config.Paths, title, body string) (*admin.Client, error) {
+	// rc6k — gate on GUI reachability BEFORE calling osascript. Avoids
+	// the pre-rc6k failure mode where osascript silently fails in agent
+	// subprocess contexts and the operator never sees the dialog nor
+	// learns why.
+	if ok, reason := canShowGUIDialog(); !ok {
+		return nil, fmt.Errorf("%w: %s", ErrAutoUnlockUnsupported, reason)
+	}
 	if title == "" {
 		title = "DOP admin unlock"
 	}
