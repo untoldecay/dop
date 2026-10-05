@@ -168,6 +168,16 @@ func (m *rootModel) refreshState() {
 
 func (m *rootModel) rebuildMenu() {
 	m.menu = m.menu[:0]
+	// rc6k-fix [S5] — always clear the groups surface on rebuild. The
+	// admin-unlocked branch below repopulates it; every other branch
+	// (locked, no-key, no-vault) needs it empty so Update() routes to
+	// the flat menu via the default key handler instead of the groups
+	// handler. Prior behavior: logout flipped session=locked and built
+	// a flat menu, but m.groups stayed populated → updateGroupsMenu
+	// took precedence → operator still inside admin "More" submenu
+	// until they pressed q + reopened.
+	m.groups = nil
+	m.inGroup = -1
 	switch {
 	case m.install == installNoKey:
 		// Setup mode: no section headers (per TUI_GUIDELINES.md).
