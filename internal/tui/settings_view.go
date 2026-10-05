@@ -64,6 +64,17 @@ func (v *settingsView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		v.flash = fmt.Sprintf("approval popup timeout → %ds", next)
+	case "h":
+		// rc7i — cycle the harness pref. The resolver reads this via
+		// DOP_HARNESS so trust-context cache hits land on whichever
+		// session id env var the operator's harness exposes.
+		next := userprefs.CycleHarness(v.prefs.Harness)
+		v.prefs.Harness = next
+		if err := SavePrefs(v.paths, v.prefs); err != nil {
+			v.err = err.Error()
+			return v, nil
+		}
+		v.flash = "harness → " + userprefs.HarnessLabel(next)
 	}
 	return v, nil
 }
@@ -104,12 +115,31 @@ func (v *settingsView) View() string {
 			"    faster-to-escalate for remote admins; longer gives you more\n"+
 			"    room when you're at the mac.") + "\n")
 
+	// rc7i — harness cycler.
+	harness := v.prefs.Harness
+	harnessLabel := userprefs.HarnessLabel(harness)
+	harnessState := okSt
+	if harness == "" {
+		harnessState = mutedSt
+	}
+	b.WriteString("\n")
+	b.WriteString("  " + lipgloss.NewStyle().Bold(true).Render("Harness") + "  ")
+	b.WriteString(harnessState.Render("["+harnessLabel+"]") + "  ")
+	b.WriteString(helpSt.Render("press h to cycle (Claude Code → Codex → opencode → manual → any → none)") + "\n")
+	b.WriteString(mutedSt.Render(
+		"    Tells DOP which session id env var your AI harness exposes so\n"+
+			"    `dop use` only pops the approval dialog once per conversation.\n"+
+			"    Claude Code: CLAUDE_CODE_SESSION_ID · Codex CLI: CODEX_THREAD_ID\n"+
+			"    opencode: OPENCODE_SESSION_ID · manual: you export DOP_SESSION_ID\n"+
+			"    yourself (Cursor / Zed / aider / custom shells). `any` tries all\n"+
+			"    three recognized adapters; `none` skips the harness branch.") + "\n")
+
 	if v.flash != "" {
 		b.WriteString("\n" + okSt.Render(v.flash) + "\n")
 	}
 	if v.err != "" {
 		b.WriteString("\n" + failSt.Render(v.err) + "\n")
 	}
-	b.WriteString("\n" + helpSt.Render("f file-keys · t timeout · esc back"))
+	b.WriteString("\n" + helpSt.Render("f file-keys · t timeout · h harness · esc back"))
 	return b.String()
 }

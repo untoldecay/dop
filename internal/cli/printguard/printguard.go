@@ -123,6 +123,13 @@ func Guard(req Request) error {
 	//   - KindUse / KindEnv only — mutations stay per-invocation
 	//   - daemon reachable
 	evalPatternSurface := req.Kind == KindUse || req.Kind == KindEnv
+	// rc7i — thread the operator's picked harness through to the
+	// resolver via DOP_HARNESS. Operators who set this via Settings
+	// get the right harness adapter without needing to export
+	// DOP_INFER_HARNESS_SESSION=1 themselves.
+	if prefs := userprefs.Load(req.Paths); prefs.Harness != "" {
+		os.Setenv("DOP_HARNESS", userprefs.DOPHarnessEnvValue(prefs.Harness))
+	}
 	tctx := sessiontrust.Resolve()
 	if !isTTY && evalPatternSurface && req.Client != nil {
 		if trusted, _ := req.Client.TrustContextCheck(string(tctx.Kind), tctx.Value, req.Subject); trusted {

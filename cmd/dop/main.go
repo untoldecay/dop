@@ -105,8 +105,12 @@ env:
   DOP_AUTO_PULL                 max staleness before dop exec auto-pulls (default 5m)
   DOP_SESSION_ID                v1.14.0-rc6i: explicit trust-context identifier so burst dop use/env calls in the same
                                 conversation / terminal / shell session share one approval (keep opaque, >=128 bits)
-  DOP_INFER_HARNESS_SESSION=1   v1.14.0-rc6i: opt in to using CLAUDE_CODE_SESSION_ID as the trust-context identifier
-                                when DOP_SESSION_ID is unset
+  DOP_HARNESS                   v1.14.0-rc7i: tells the trust-context resolver which harness env var to consult. Values:
+                                claude-code | codex | opencode | any | none. Normally set from Settings → Harness picker;
+                                exported here for one-shot overrides and headless/CI contexts.
+  DOP_INFER_HARNESS_SESSION=1   v1.14.0-rc6i, DEPRECATED (rc7i): legacy opt-in, now aliased to DOP_HARNESS=any. Prefer
+                                the Settings → Harness picker (or DOP_HARNESS directly) which also recognizes Codex and
+                                opencode. Still works for backward compat.
 `
 
 func main() {
