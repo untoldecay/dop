@@ -44,6 +44,13 @@ func runAdmin(args []string) int {
 	case "__session-daemon":
 		// Internal: fork target from `dop admin login`. Not shown in help.
 		return runAdminSessionDaemon(args[1:])
+	case "__gui-unlock":
+		// rc7h — hidden entrypoint. Called by the TUI when it detects a
+		// locked admin session mid-flow. Pops the osascript passphrase
+		// dialog (same shape as rc6k's auto-unlock on `dop use`), forks
+		// the session daemon, exits 0 on success / non-zero on cancel
+		// or dialog unavailable. Not shown in help.
+		return runAdminGUIUnlock(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop admin: unknown subcommand %q\n", args[0])
 		return 2
@@ -296,6 +303,33 @@ func performAdminLogin(paths *config.Paths, passphrase string) error {
 		fmt.Fprintf(os.Stderr, "dop admin login: swept %d expired legacy agent key(s).\n", n)
 	}
 	return nil
+}
+
+// runAdminGUIUnlock — rc7h hidden entrypoint. Called by the TUI when
+// it detects a locked admin session mid-flow. Delegates to
+// autoUnlockPrompt (same osascript dialog as rc6k's `dop use`
+// auto-unlock); exits 0 on success, non-zero on cancel or when the
+// dialog isn't reachable (non-darwin / headless / no GUI).
+//
+// The TUI shells out to this instead of calling autoUnlockPrompt
+// directly because internal/tui can't import cmd/dop.
+func runAdminGUIUnlock(args []string) int {
+	fs := flag.NewFlagSet("admin __gui-unlock", flag.ExitOnError)
+	title := fs.String("title", "DOP admin unlock", "dialog title")
+	body := fs.String("body", "Enter admin passphrase to unlock the session.", "dialog body")
+	_ = fs.Parse(args)
+	paths, _ := config.Resolve()
+	client := admin.NewClient(admin.SockPath(paths))
+	if client.SessionActive() {
+		// Nothing to do — session already active (race between TUI's
+		// check and this subprocess start).
+		return 0
+	}
+	if _, err := autoUnlockPrompt(paths, *title, *body); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
 }
 
 // runAdminLogout kills the session daemon via the socket.
