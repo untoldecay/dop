@@ -26,7 +26,7 @@ usage:
   dop                                            interactive TUI (default when on a TTY)
   dop version | -v | --version                   print version + commit + build date
   dop uninstall [--force]                        wipe DOP from this machine (alias for admin reset)
-  dop skill install [--force] [--path FILE]      install the DOP agent skill AND /dop-use slash command (default: ~/.claude/skills/dop/SKILL.md + ~/.claude/commands/dop-use.md; --path installs only the skill at that path)
+  dop skill install [--force] [--path FILE]      install the DOP agent skill AND /dop-use slash command — loose files at ~/.claude/skills/dop + ~/.claude/commands/dop-use.md AND a local-marketplace plugin at ~/.claude-local-plugins/dop-tools (registered via the claude CLI if available, for Orca and plugin-only Claude Code). --path installs only the skill at that path (loose file only, no plugin).
   dop skill show                                 print the embedded skill content to stdout (agent-agnostic install)
   dop skill show-command                         print the /dop-use slash command content to stdout
   dop help                                       this message

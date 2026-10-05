@@ -51,6 +51,7 @@ func runAdminReset(args []string) int {
 	fmt.Fprintln(os.Stderr, "  · pending PIN + remote claims + admin invites (local copies)")
 	fmt.Fprintln(os.Stderr, "  · this machine's audit log")
 	fmt.Fprintln(os.Stderr, "  · credential-map.yaml")
+	fmt.Fprintln(os.Stderr, "  · DOP Claude Code skill + /dop-use command (loose files + plugin)")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "The `dop` binary at "+binaryPath()+" is NOT removed.")
 	fmt.Fprintln(os.Stderr, "Nothing on any OTHER admin machine is affected. If you had an")
@@ -78,6 +79,11 @@ func runAdminReset(args []string) int {
 			return 1
 		}
 	}
+
+	// rc7e — tear down the Claude Code plugin bundle + loose files
+	// alongside the DOP state wipe. Best-effort; failures log but
+	// don't block the main wipe below.
+	uninstallPlugin()
 
 	// Do the wipe.
 	if err := os.RemoveAll(paths.Root); err != nil {

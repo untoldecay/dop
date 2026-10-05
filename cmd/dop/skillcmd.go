@@ -98,6 +98,12 @@ func runSkillInstall(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop skill install: wrote %s\n", cmdTarget)
 		fmt.Fprintln(os.Stderr, "  LLM agents on this machine will now follow the DOP safety protocol.")
 		fmt.Fprintln(os.Stderr, "  Operators can now run `/dop-use <subject> <task>` for leak-safe credentialed tasks.")
+
+		// rc7e — also build + register the local-marketplace plugin
+		// bundle so plugin-only harnesses (Orca) see DOP's skill +
+		// slash command. Best-effort — any failure logs to stderr and
+		// returns nil; loose files above are the reliable fallback.
+		_ = installPlugin(*force)
 	}
 	fmt.Fprintln(os.Stderr, "  Re-run `dop skill install` after upgrading dop to pick up any changes.")
 	fmt.Fprintln(os.Stderr, "  For non-Claude agents: pass `--path <where-your-agent-reads-skills>` OR")
