@@ -91,6 +91,10 @@ func (v *syncView) View() string {
 
 // --- clipboard helper (for bearer display) ---
 
+// clipboardCopy is the seam views call; tests swap it to avoid
+// touching the real clipboard.
+var clipboardCopy = copyToClipboard
+
 // copyToClipboard tries pbcopy (macOS), xclip / xsel (Linux). Silent
 // no-op on failure — bearer stays on screen either way.
 func copyToClipboard(s string) bool {

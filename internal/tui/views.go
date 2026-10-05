@@ -294,6 +294,14 @@ type issueView struct {
 	// Otherwise step 3 (portable) commits directly to issue(). The typed
 	// value is piped to the subprocess via --passphrase-stdin.
 	protectedPassBuf strings.Builder
+
+	// dop-9ms — success-screen guard. The bearer is shown once, so a
+	// stray key must not dismiss it: enter confirms "saved", esc needs
+	// a second press, c re-copies. copied/copyNote reflect the last
+	// clipboard attempt (done in Update, not on every View repaint).
+	copied     bool
+	copyNote   string
+	leaveArmed bool
 }
 
 type grantRow struct {
@@ -485,6 +493,7 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.bearer = mm.bearer
 			v.pin = mm.pin
 			v.step = 100 // success screen
+			v.copied = clipboardCopy(v.clipboardText())
 			// v1.13 — if allow-file-keys is on, kick off a background
 			// poller that watches the record for binding.pubkey to
 			// appear (= claim completed) and then runs reseal. Only
@@ -504,15 +513,12 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.resealFlash = mm.msg
 		return v, nil
 	case tea.KeyMsg:
+		if v.step == 100 {
+			return v.updateSuccessKey(mm.String())
+		}
 		switch mm.String() {
 		case "esc", "ctrl+c":
 			v.done = true
-			return v, nil
-		}
-		if v.step == 100 {
-			// Any key from bearer display → done
-			v.done = true
-			v.flash = "issue: bearer copied to clipboard? make sure — it's shown once"
 			return v, nil
 		}
 		// Grants step is a multi-select list when the vault has grants.
@@ -802,6 +808,44 @@ func looksLikePIN(s string) bool {
 	return true
 }
 
+// clipboardText is what the success screen puts on the clipboard: the
+// agent handoff for PIN-bound tokens, the bare bearer otherwise.
+func (v *issueView) clipboardText() string {
+	if v.pin != "" {
+		return buildHandoffText(v.bearer, v.pin, v.prefs.AllowFileKeys)
+	}
+	return v.bearer
+}
+
+// updateSuccessKey handles keys on the one-time bearer screen
+// (dop-9ms). Only enter, or esc pressed twice, leaves; c re-copies;
+// everything else is ignored so a stray keypress can't lose the bearer.
+func (v *issueView) updateSuccessKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "enter":
+		v.done = true
+		v.flash = "issue: token issued"
+	case "esc", "ctrl+c":
+		if v.leaveArmed {
+			v.done = true
+			v.flash = "issue: token issued — bearer will not be shown again"
+			return v, nil
+		}
+		v.leaveArmed = true
+	case "c":
+		v.copied = clipboardCopy(v.clipboardText())
+		if v.copied {
+			v.copyNote = "copied again"
+		} else {
+			v.copyNote = "copy failed — select the text above manually"
+		}
+		v.leaveArmed = false
+	default:
+		v.leaveArmed = false
+	}
+	return v, nil
+}
+
 func (v *issueView) View() string {
 	var b strings.Builder
 	b.WriteString(titleSt.Render("Issue token") + "\n\n")
@@ -826,9 +870,8 @@ func (v *issueView) View() string {
 			// _rules/_requirements/contracts/13_handoff_text_shape.md).
 			// Built via buildHandoffText so a unit test can grep-assert
 			// the shape (no forbidden phrases, exactly one claim command).
-			handoff := buildHandoffText(v.bearer, v.pin, v.prefs.AllowFileKeys)
-			b.WriteString(mutedSt.Render(handoff) + "\n\n")
-			if copyToClipboard(handoff) {
+			b.WriteString(mutedSt.Render(v.clipboardText()) + "\n\n")
+			if v.copied {
 				b.WriteString(okSt.Render("agent handoff copied to clipboard — paste into the agent chat") + "\n")
 			}
 			if v.prefs.AllowFileKeys {
@@ -843,12 +886,24 @@ func (v *issueView) View() string {
 		} else {
 			b.WriteString("Bearer (shown ONCE — copy now):\n")
 			b.WriteString("  " + lipgloss.NewStyle().Bold(true).Render(v.bearer) + "\n\n")
-			if copyToClipboard(v.bearer) {
+			if v.copied {
 				b.WriteString(okSt.Render("copied to clipboard") + "\n\n")
 			}
 			b.WriteString(mutedSt.Render("then: export DOP_TOKEN="+v.bearer) + "\n")
 		}
-		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
+		if v.copyNote != "" {
+			st := okSt
+			if !v.copied {
+				st = failSt
+			}
+			b.WriteString("\n" + st.Render(v.copyNote) + "\n")
+		}
+		if v.leaveArmed {
+			b.WriteString("\n" + failSt.Render("leave without saving? the bearer won't be shown again — esc again to leave"))
+			b.WriteString("\n" + helpSt.Render("c copy · enter I've saved it · esc leave"))
+		} else {
+			b.WriteString("\n" + helpSt.Render("c copy again · enter I've saved it — back to menu"))
+		}
 		return b.String()
 	}
 	portableLabel := "no"
