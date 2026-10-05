@@ -91,6 +91,9 @@ usage:
   dop credential-helper map|list|remove          manage host→grant map for dop-credential-git
   dop trust list                                 list active TrustContext grants (session approvals cached in the daemon)
   dop trust revoke [--all] [KIND VALUE SUBJECT]  drop a cached approval (or every one with --all)
+  dop update [--check-only] [--channel X] [--version TAG] [--rollback]
+                                                 in-place update from GitHub. Default channel: stable (--channel dev for pre-releases).
+                                                 --rollback reverts to the previous stored version. Keeps last 3 at ~/.local/share/dop/old-versions/.
 
 env:
   DOP_TOKEN                     bearer for exec/whoami/env
@@ -181,6 +184,11 @@ func main() {
 		// manage the per-(context, subject) approvals cached in the
 		// admin daemon.
 		os.Exit(runTrust(os.Args[2:]))
+	case "update":
+		// v1.14.0-rc7f — in-place updater. Fetches releases from
+		// GitHub, verifies checksum, atomic-renames. Keeps the last 3
+		// versions in ~/.local/share/dop/old-versions/ for rollback.
+		os.Exit(runUpdate(os.Args[2:]))
 	case "version", "-v", "--version":
 		fmt.Println(versionString())
 		return
