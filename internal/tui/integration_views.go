@@ -174,6 +174,14 @@ type addIntegrationView struct {
 	advFieldIdx        int   // which applicable sub-field is active
 	advBufs            [6]textField
 
+	// rc7n — true when the operator picked an existing service in the
+	// step-0 picker (vs "+ Create new…"). The integration-level fields
+	// (kind, description, kindSlot, probe, advanced) are locked for
+	// view-only in this case; shift+tab can't navigate back into them.
+	// Prevents silent mutation of an existing integration's params
+	// during the "add a new credential to it" flow.
+	existingIntegration bool
+
 	err   string
 	flash string
 	done  bool
@@ -610,9 +618,29 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// new credential to a service we already know about.
 				svc := v.existingServices[v.servicePickCursor-1]
 				v.nameBuf.SetString(svc)
+				// rc7n — lock integration-level fields so shift+tab can't
+				// navigate back into them (otherwise edits would silently
+				// mutate the existing integration). Also pre-fill the
+				// kind + the kind-slot + description from the existing
+				// integration so the display rows aren't blank.
+				v.existingIntegration = true
 				if vlt, _, err := loadVaultForListing(v.client, v.paths); err == nil && vlt != nil {
 					if integ, ok := vlt.Integrations[svc]; ok {
 						v.kindChoice = vault.IntegrationKindOf(integ)
+						v.descBuf.SetString(integ.Description)
+						// Pick the right metadata key per kind to seed urlBuf.
+						switch v.kindChoice {
+						case vault.IntegrationKindCLI:
+							v.urlBuf.SetString(integ.Metadata["cli_cmd"])
+						case vault.IntegrationKindMCP:
+							if integ.Metadata["mcp_url"] != "" {
+								v.urlBuf.SetString(integ.Metadata["mcp_url"])
+							} else {
+								v.urlBuf.SetString(integ.Metadata["mcp_cmd"])
+							}
+						default:
+							v.urlBuf.SetString(integ.Metadata["base_url"])
+						}
 					}
 				}
 				v.step = integAddStepCred
@@ -641,6 +669,14 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				v.prefillIfNeeded()
 			}
 		case "shift+tab", "up":
+			// rc7n — when operator picked an existing integration, the
+			// integration-level steps (Name/Kind/Desc/KindSlot/Probe)
+			// are display-only. shift+tab stops at integAddStepCred so
+			// those fields can't be edited into mutating the existing
+			// integration.
+			if v.existingIntegration && v.step <= integAddStepCred {
+				return v, nil
+			}
 			if v.step > integAddStepName {
 				v.step--
 			}
@@ -891,8 +927,18 @@ func (v *addIntegrationView) save() tea.Cmd {
 
 func (v *addIntegrationView) View() string {
 	var b strings.Builder
-	b.WriteString(titleSt.Render("Add integration") + "\n")
-	b.WriteString(mutedSt.Render("Register a service and one credential for it. You can add more credentials later from the integration list.") + "\n\n")
+	// rc7n — title + subtitle flip when operator picked an existing
+	// integration from the step-0 picker: the flow becomes "add
+	// credential to <service>" and the integration-level rows are
+	// locked for display only.
+	if v.existingIntegration {
+		b.WriteString(titleSt.Render("Add credential to "+v.nameBuf.String()) + "\n")
+		b.WriteString(mutedSt.Render("Integration-level fields (kind, description, URL) are locked for view.") + "\n")
+		b.WriteString(mutedSt.Render("To change those, use List → Integrations → "+v.nameBuf.String()+" → Edit.") + "\n\n")
+	} else {
+		b.WriteString(titleSt.Render("Add integration") + "\n")
+		b.WriteString(mutedSt.Render("Register a service and one credential for it. You can add more credentials later from the integration list.") + "\n\n")
+	}
 
 	if v.step == integAddStepDone {
 		b.WriteString(okSt.Render("✓ integration saved") + "\n\n")
@@ -1031,7 +1077,14 @@ func (v *addIntegrationView) View() string {
 		if i == v.step {
 			style = cursorSt
 		}
-		b.WriteString(style.Render(r.label) + ": ")
+		// rc7n — prefix integration-level rows with 🔒 when the operator
+		// picked an existing integration. Visual signal that the field
+		// is view-only; nav-blocked in the shift+tab handler.
+		rowPrefix := ""
+		if v.existingIntegration && i >= integAddStepName && i < integAddStepCred {
+			rowPrefix = mutedSt.Render("🔒 ")
+		}
+		b.WriteString(rowPrefix + style.Render(r.label) + ": ")
 		// rc6f — on the active text-field row, split the buffer at the
 		// cursor so the caret glyph renders in place. Non-text rows
 		// (pickers, status) still use the pre-rendered r.value.
