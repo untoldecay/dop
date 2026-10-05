@@ -1827,16 +1827,21 @@ func (v *integrationListView) viewIntEdit() string {
 		b.WriteString("    " + mutedSt.Render("changing the name renames every referring grant") + "\n")
 	}
 
-	// Kind picker (field 1).
+	// Kind picker (field intEditFieldKind). rc6m-fix: the literal `0`
+	// and `1` here predated the Name field (which took slot 0), so Kind
+	// highlighting + picker drew on Name focus, and Desc highlighting
+	// drew on Kind focus. The handler was always correct — only the
+	// renderer lied, so arrow keys silently adjusted the kind cursor
+	// behind an invisible picker.
 	kindLbl := "Kind"
 	kindVal := v.intEditKindChoice
-	if v.intEditField == 0 {
+	if v.intEditField == intEditFieldKind {
 		kindLbl = cursorSt.Render("Kind")
 	} else {
 		kindLbl = mutedSt.Render("Kind")
 	}
 	b.WriteString(kindLbl + ": " + kindVal + "\n")
-	if v.intEditField == 0 {
+	if v.intEditField == intEditFieldKind {
 		for i, p := range kindPresets {
 			prefix := "    "
 			label := p.label
@@ -1848,12 +1853,12 @@ func (v *integrationListView) viewIntEdit() string {
 		}
 	}
 
-	// Description (field 1).
+	// Description (field intEditFieldDesc).
 	descLbl := mutedSt.Render("What it's for")
-	if v.intEditField == 1 {
+	if v.intEditField == intEditFieldDesc {
 		descLbl = cursorSt.Render("What it's for")
 	}
-	if v.intEditField == 1 {
+	if v.intEditField == intEditFieldDesc {
 		before, after := v.intEditDescBuf.Split()
 		b.WriteString(descLbl + ": " + before + cursorSt.Render("▎") + after)
 	} else {
