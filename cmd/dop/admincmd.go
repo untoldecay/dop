@@ -19,6 +19,7 @@ import (
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/approval"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/userprefs"
 )
 
 func runAdmin(args []string) int {
@@ -264,6 +265,15 @@ func performAdminLogin(paths *config.Paths, passphrase string) error {
 	}
 	cmd := exec.Command(self, "admin", "__session-daemon", "--sock", admin.SockPath(paths))
 	cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+	// rc7l — thread the operator's AdminIdleTTL pref through to the
+	// daemon via DOP_ADMIN_TTL. The daemon reads env on startup; this
+	// is the only hook we have without changing the daemon RPC shape.
+	// Only override when the operator explicitly set a non-default; a
+	// zero AdminIdleTTLSeconds means "use whatever the daemon's own
+	// default is" so pre-rc7l configs continue to behave identically.
+	if prefs := userprefs.Load(paths); prefs.AdminIdleTTLSeconds != 0 {
+		cmd.Env = append(cmd.Env, "DOP_ADMIN_TTL="+prefs.EffectiveAdminIdleTTL().String())
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
