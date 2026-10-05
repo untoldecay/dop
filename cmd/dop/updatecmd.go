@@ -67,7 +67,16 @@ func runUpdate(args []string) int {
 	channel := fs.String("channel", "", "override the persisted update channel for this invocation (stable | dev)")
 	targetVersion := fs.String("version", "", "install this specific release tag (downgrade allowed; prompts for confirmation)")
 	rollback := fs.Bool("rollback", false, "revert to the most recently stored previous version (see ~/.local/share/dop/old-versions/)")
+	// v1.14.1 — skip the typed-CONFIRM prompt on downgrades / cross-
+	// major moves. The TUI's update view runs its own confirm screen
+	// before shelling out, so re-asking from the CLI leaves it stuck
+	// (TUI can't type into the subprocess). DOP_FROM_TUI=1 auto-sets
+	// this.
+	autoYes := fs.Bool("yes", false, "skip the typed CONFIRM prompt on downgrades / cross-major jumps")
 	_ = fs.Parse(args)
+	if os.Getenv("DOP_FROM_TUI") == "1" {
+		*autoYes = true
+	}
 
 	if *rollback {
 		return runUpdateRollback()
@@ -124,8 +133,9 @@ func runUpdate(args []string) int {
 
 	// Downgrade or cross-major → require typed confirmation. "dev" rc
 	// jumps between tags on the same release line are NOT prompted —
-	// that's the whole point of the channel.
-	if needsConfirmation(installed, rel.TagName) {
+	// that's the whole point of the channel. --yes (or DOP_FROM_TUI=1)
+	// skips the prompt entirely for callers who confirm upstream.
+	if !*autoYes && needsConfirmation(installed, rel.TagName) {
 		if !confirmTyped(fmt.Sprintf("You're about to switch %s → %s. Type CONFIRM to proceed: ", installed, rel.TagName), "CONFIRM") {
 			fmt.Fprintln(os.Stderr, "dop update: aborted (no confirmation).")
 			return 1
@@ -256,8 +266,9 @@ func githubGetJSON[T any](url string) (*T, error) {
 
 // needsConfirmation returns true for scary jumps that merit a typed
 // CONFIRM: downgrades on the same channel, or any cross-major move.
-// Simple string checks — we're not shipping a semver parser just for
-// this. "dev" rc→rc jumps within the same minor line never qualify.
+// Semver-aware: `v1.14.0-rc7-smoke` → `v1.14.0` is an UPGRADE (pre-
+// release to its stable), not a downgrade. "dev" rc→rc jumps within
+// the same minor line never qualify.
 func needsConfirmation(from, to string) bool {
 	if from == "dev" {
 		return false // local dev build; always safe to replace
@@ -267,12 +278,45 @@ func needsConfirmation(from, to string) bool {
 	if fromMajor != "" && toMajor != "" && fromMajor != toMajor {
 		return true
 	}
-	// Downgrade heuristic: lexically-smaller tag on the same major
-	// line probably means moving backward.
+	// Semver pre-release handling: within the same vX.Y.Z base,
+	//   -prerelease < stable (no suffix)
+	// Example: v1.14.0-rc7n-smoke < v1.14.0, so going from rc to
+	// stable is an upgrade and should NOT prompt.
+	fromBase, fromPre := splitBaseAndPrerelease(from)
+	toBase, toPre := splitBaseAndPrerelease(to)
+	if fromBase == toBase {
+		// Same vX.Y.Z — compare the pre-release part.
+		if fromPre != "" && toPre == "" {
+			// pre-release → stable: upgrade, no confirm.
+			return false
+		}
+		if fromPre == "" && toPre != "" {
+			// stable → pre-release: downgrade, confirm.
+			return true
+		}
+		// Both have pre-release OR both are stable → fall through to
+		// the lex comparison below.
+	}
+	// Lex-compare as a last-resort downgrade heuristic. OK for ordinary
+	// vX.Y.Z vs vX.Y.(Z+1) type moves on the same major-minor line.
 	if from > to {
 		return true
 	}
 	return false
+}
+
+// splitBaseAndPrerelease splits "v1.14.0-rc7n-smoke" into
+// ("v1.14.0", "rc7n-smoke"), or "v1.14.0" into ("v1.14.0", "").
+// Simplified: first `-` after the base version. Works for the DOP
+// tag conventions (vX.Y.Z or vX.Y.Z-anything).
+func splitBaseAndPrerelease(tag string) (base, prerelease string) {
+	// Find the first `-` after position 1 (allow leading `v` prefix).
+	for i := 1; i < len(tag); i++ {
+		if tag[i] == '-' {
+			return tag[:i], tag[i+1:]
+		}
+	}
+	return tag, ""
 }
 
 // extractMajorMinor returns "v1.14" from "v1.14.0-rc6m-smoke". Empty
