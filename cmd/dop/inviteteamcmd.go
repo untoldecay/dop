@@ -47,7 +47,13 @@ func runTeamInvite(args []string) int {
 	kind := fs.String("kind", "device", "\"device\" (another machine of yours) or \"team_member\"")
 	pfromStdin := fs.Bool("passphrase-stdin", false, "read passphrase(s) from stdin (testing only)")
 	timeoutStr := fs.String("timeout", "30m", "how long to wait for the response before giving up")
-	pinTTL := fs.String("pin-ttl", "30m", "invite validity window")
+	// rc7p — bumped from 30m to 7d. Pre-rc7o this matched the inline
+	// polling timeout; post-rc7o the invite is fire-and-forget so the
+	// window should be sized for "teammate joins when ready" (weekend-
+	// safe) not for "polling loop ends soon." Accepts d/w suffixes
+	// via parseDurationLoose so operators can type "7d" / "2w"
+	// without unit math.
+	pinTTL := fs.String("pin-ttl", "7d", "invite validity window — accepts d/w (default 7d; teammate can join anytime within this window)")
 	shareIdentity := fs.Bool("share-identity", false, "give the joining machine THIS machine's admin identity (Flavor Y — single revocation surface across devices)")
 	_ = fs.Parse(args)
 
@@ -60,7 +66,7 @@ func runTeamInvite(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop team invite: bad --timeout: %v\n", err)
 		return 2
 	}
-	pinDur, err := time.ParseDuration(*pinTTL)
+	pinDur, err := parseDurationLoose(*pinTTL)
 	if err != nil || pinDur <= 0 {
 		fmt.Fprintf(os.Stderr, "dop team invite: bad --pin-ttl: %v\n", err)
 		return 2
