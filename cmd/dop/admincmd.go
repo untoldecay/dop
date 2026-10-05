@@ -19,6 +19,7 @@ import (
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/approval"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/userprefs"
 )
 
 func runAdmin(args []string) int {
@@ -44,6 +45,13 @@ func runAdmin(args []string) int {
 	case "__session-daemon":
 		// Internal: fork target from `dop admin login`. Not shown in help.
 		return runAdminSessionDaemon(args[1:])
+	case "__gui-unlock":
+		// rc7h — hidden entrypoint. Called by the TUI when it detects a
+		// locked admin session mid-flow. Pops the osascript passphrase
+		// dialog (same shape as rc6k's auto-unlock on `dop use`), forks
+		// the session daemon, exits 0 on success / non-zero on cancel
+		// or dialog unavailable. Not shown in help.
+		return runAdminGUIUnlock(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop admin: unknown subcommand %q\n", args[0])
 		return 2
@@ -225,81 +233,111 @@ func runAdminLogin(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop admin login: %v\n", err)
 		return 1
 	}
-	keys, err := admin.LoadAndUnwrap(paths, pass)
-	if err != nil {
+	if err := performAdminLogin(paths, pass); err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin login: %v\n", err)
 		return 1
 	}
+	fmt.Fprintln(os.Stderr, "dop admin login: session started")
+	// autoPullVault + sweepLegacyGrace run inside performAdminLogin.
+	return 0
+}
 
-	// Serialize keys for the daemon via stdin.
+// performAdminLogin unwraps the admin keys with the given passphrase
+// and forks the session daemon. Returns once the daemon has signaled
+// `ready`. Factored out of runAdminLogin so the auto-unlock path can
+// reuse the same bootstrap without duplicating the fork/pipe dance.
+//
+// Zeroes the passphrase byte slice on exit — the caller's string
+// copy still exists but has no way to be scrubbed; we at least kill
+// our own.
+func performAdminLogin(paths *config.Paths, passphrase string) error {
+	keys, err := admin.LoadAndUnwrap(paths, passphrase)
+	if err != nil {
+		return err
+	}
 	daemonInput, err := encodeKeysForDaemon(keys)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop admin login: %v\n", err)
-		return 1
+		return err
 	}
-
 	self, err := os.Executable()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop admin login: %v\n", err)
-		return 1
+		return err
 	}
 	cmd := exec.Command(self, "admin", "__session-daemon", "--sock", admin.SockPath(paths))
 	cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+	// rc7l — thread the operator's AdminIdleTTL pref through to the
+	// daemon via DOP_ADMIN_TTL. The daemon reads env on startup; this
+	// is the only hook we have without changing the daemon RPC shape.
+	// Only override when the operator explicitly set a non-default; a
+	// zero AdminIdleTTLSeconds means "use whatever the daemon's own
+	// default is" so pre-rc7l configs continue to behave identically.
+	if prefs := userprefs.Load(paths); prefs.AdminIdleTTLSeconds != 0 {
+		cmd.Env = append(cmd.Env, "DOP_ADMIN_TTL="+prefs.EffectiveAdminIdleTTL().String())
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop admin login: %v\n", err)
-		return 1
+		return err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop admin login: %v\n", err)
-		return 1
+		return err
 	}
 	cmd.Stderr = os.Stderr
-	// Detach from parent's process group so it survives login exiting.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "dop admin login: fork: %v\n", err)
-		return 1
+		return fmt.Errorf("fork: %w", err)
 	}
 	if _, err := stdin.Write(daemonInput); err != nil {
-		fmt.Fprintf(os.Stderr, "dop admin login: write daemon input: %v\n", err)
-		return 1
+		return fmt.Errorf("write daemon input: %w", err)
 	}
 	stdin.Close()
-
-	// Wait for the daemon to print "ready\n".
 	buf := make([]byte, 64)
 	deadline := time.Now().Add(5 * time.Second)
 	stdout.(interface{ SetDeadline(time.Time) error }).SetDeadline(deadline)
 	n, err := stdout.Read(buf)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop admin login: daemon did not signal ready: %v\n", err)
 		cmd.Process.Kill()
-		return 1
+		return fmt.Errorf("daemon did not signal ready: %w", err)
 	}
 	if !strings.HasPrefix(string(buf[:n]), "ready") {
-		fmt.Fprintf(os.Stderr, "dop admin login: unexpected daemon output: %q\n", string(buf[:n]))
 		cmd.Process.Kill()
-		return 1
+		return fmt.Errorf("unexpected daemon output: %q", string(buf[:n]))
 	}
-	// Detach; the daemon is now on its own.
 	if err := cmd.Process.Release(); err != nil {
-		// Non-fatal.
+		// Non-fatal — daemon is already running; parent-side release failure
+		// just means the parent keeps a zombie child reference until exit.
 		fmt.Fprintf(os.Stderr, "dop admin login: release: %v\n", err)
 	}
-	fmt.Fprintln(os.Stderr, "dop admin login: session started")
-	// v1.10.3 — auto-sync: silently pull + auto-merge on login so the
-	// operator's next action sees the latest team state. Best-effort:
-	// any failure prints a one-liner and lets login succeed.
-	//   - opt out with DOP_NO_AUTO_PULL=1 (mirrors DOP_NO_AUTO_PUSH)
-	//   - skipped entirely if vault isn't a git repo yet
 	autoPullVault(paths)
-	// v1.11 — sweep expired 12h grace markers on legacy ed25519 keys
-	// that were migrated to P-256. Silent unless something got
-	// removed, so the login output stays quiet in the common case.
 	if n, err := sweepLegacyGrace(paths); err == nil && n > 0 {
 		fmt.Fprintf(os.Stderr, "dop admin login: swept %d expired legacy agent key(s).\n", n)
+	}
+	return nil
+}
+
+// runAdminGUIUnlock — rc7h hidden entrypoint. Called by the TUI when
+// it detects a locked admin session mid-flow. Delegates to
+// autoUnlockPrompt (same osascript dialog as rc6k's `dop use`
+// auto-unlock); exits 0 on success, non-zero on cancel or when the
+// dialog isn't reachable (non-darwin / headless / no GUI).
+//
+// The TUI shells out to this instead of calling autoUnlockPrompt
+// directly because internal/tui can't import cmd/dop.
+func runAdminGUIUnlock(args []string) int {
+	fs := flag.NewFlagSet("admin __gui-unlock", flag.ExitOnError)
+	title := fs.String("title", "DOP admin unlock", "dialog title")
+	body := fs.String("body", "Enter admin passphrase to unlock the session.", "dialog body")
+	_ = fs.Parse(args)
+	paths, _ := config.Resolve()
+	client := admin.NewClient(admin.SockPath(paths))
+	if client.SessionActive() {
+		// Nothing to do — session already active (race between TUI's
+		// check and this subprocess start).
+		return 0
+	}
+	if _, err := autoUnlockPrompt(paths, *title, *body); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
 	return 0
 }
@@ -400,8 +438,12 @@ func runAdminSessionDaemon(args []string) int {
 	// TTLs from env, with defaults.
 	idle := envDuration("DOP_ADMIN_TTL", admin.DefaultIdleTTL)
 	abs := envDuration("DOP_ADMIN_MAX_TTL", admin.DefaultAbsTTL)
+	// v1.14.0-rc4 — Paths needed for the approval-popup RPC (daemon
+	// reads approval.hash to verify the typed passphrase).
+	paths, _ := config.Resolve()
 	s, err := admin.StartSession(admin.SessionOpts{
 		Keys:     keys,
+		Paths:    paths,
 		SockPath: *sockPath,
 		IdleTTL:  idle,
 		AbsTTL:   abs,

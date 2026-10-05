@@ -19,6 +19,7 @@ export DOP_NO_TUI=1
 export DOP_NO_NOTIFY=1
 
 PASS="pass-word-long-enough"
+export DOP_APPROVAL_PASSPHRASE="$PASS-approve"
 CFG_ROOT="$HOME/Library/Application Support/dop"
 VAULT_DIR="$CFG_ROOT/vault"
 

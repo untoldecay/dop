@@ -10,10 +10,12 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/fray/dop/internal/admin"
+	"github.com/fray/dop/internal/admininvite"
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/vault"
@@ -137,7 +139,7 @@ func (v *revokeView) doRevoke() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "token", "revoke", target)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -303,7 +305,7 @@ func (v *teamAddView) save() tea.Cmd {
 			args = append(args, "--note", note)
 		}
 		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -339,6 +341,23 @@ func (v *teamAddView) View() string {
 
 // ---------- Team list ----------
 
+// rc7m — Team list grows a Members / Pending tab toggle. Pending shows
+// open admin invites with a delete action (shells out to the new
+// `dop team cancel-invite <id>` subcommand).
+const (
+	teamTabMembers = 0
+	teamTabPending = 1
+)
+
+const (
+	teamModeList         = 0
+	teamModeConfirm      = 1 // confirm "delete pending invite?" y/n
+	teamModeRunning      = 2 // subprocess in flight
+	teamModeDoneFlash    = 3
+	teamModeApprovePass  = 4 // rc7o — approval passphrase input for approve-invite
+	teamModeApproveRun   = 5 // rc7o — approve subprocess in flight
+)
+
 type teamListView struct {
 	client  *admin.Client
 	paths   *config.Paths
@@ -346,7 +365,23 @@ type teamListView struct {
 	loadErr string
 	admins  map[string]vault.Admin
 	names   []string
-	done    bool
+	pending []admininvite.Invite
+	tab     int
+	mode    int
+	cursor  int
+
+	// confirm/run state
+	pendingDeleteID string
+	actionErr       string
+	actionFlash     string
+
+	// rc7o — approve-invite state. passBuf collects the operator's
+	// approval passphrase (masked); pendingApproveID tracks which
+	// invite the running subprocess is approving.
+	pendingApproveID string
+	passBuf          strings.Builder
+
+	done bool
 }
 
 func newTeamListView(c *admin.Client, p *config.Paths) *teamListView {
@@ -356,8 +391,14 @@ func (v *teamListView) Init() tea.Cmd { return v.load }
 func (v *teamListView) Done() bool    { return v.done }
 
 type teamListLoadedMsg struct {
-	admins map[string]vault.Admin
-	err    string
+	admins  map[string]vault.Admin
+	pending []admininvite.Invite
+	err     string
+}
+
+type teamCancelDoneMsg struct {
+	id  string
+	err string
 }
 
 func (v *teamListView) load() tea.Msg {
@@ -371,7 +412,19 @@ func (v *teamListView) load() tea.Msg {
 		}
 		return teamListLoadedMsg{err: err.Error()}
 	}
-	return teamListLoadedMsg{admins: vlt.Admins}
+	// rc7m — also load pending invites. Best-effort: a missing /
+	// unreadable pending-admin-invites dir is normal on fresh installs,
+	// just means "no pending invites."
+	var pending []admininvite.Invite
+	if invs, err := admininvite.ListInvites(v.paths); err == nil {
+		for _, inv := range invs {
+			pending = append(pending, *inv)
+		}
+		sort.Slice(pending, func(i, j int) bool {
+			return pending[i].CreatedAt.After(pending[j].CreatedAt)
+		})
+	}
+	return teamListLoadedMsg{admins: vlt.Admins, pending: pending}
 }
 
 func (v *teamListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -380,29 +433,206 @@ func (v *teamListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.loaded = true
 		v.admins = mm.admins
 		v.loadErr = mm.err
+		v.pending = mm.pending
+		v.names = v.names[:0]
 		for n := range v.admins {
 			v.names = append(v.names, n)
 		}
 		sort.Strings(v.names)
+	case teamCancelDoneMsg:
+		if mm.err != "" {
+			v.actionErr = mm.err
+			v.mode = teamModeDoneFlash
+			return v, nil
+		}
+		v.actionFlash = "pending invite " + mm.id[:8] + " cancelled"
+		v.mode = teamModeList
+		// Reload so the pending list reflects the deletion.
+		v.loaded = false
+		return v, v.load
+	case teamApproveDoneMsg:
+		// rc7o — reply from approve-invite subprocess.
+		if mm.err != "" {
+			v.actionErr = mm.err
+			v.mode = teamModeDoneFlash
+			return v, nil
+		}
+		v.actionFlash = "invite " + mm.id[:8] + " approved — teammate is now an admin"
+		v.mode = teamModeList
+		v.loaded = false
+		return v, v.load
 	case tea.KeyMsg:
-		// v1.13.0-rc20 — tighten key handling to match other list views:
-		// only esc/q/ctrl+c closes. Previously any key closed; the help
-		// text already says "esc back" so the behavior now matches.
-		if v.loaded {
-			switch mm.String() {
-			case "esc", "q", "ctrl+c", "backspace":
-				v.done = true
+		return v.handleKey(mm)
+	}
+	return v, nil
+}
+
+func (v *teamListView) handleKey(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if !v.loaded {
+		return v, nil
+	}
+	switch v.mode {
+	case teamModeConfirm:
+		switch mm.String() {
+		case "y", "enter":
+			v.mode = teamModeRunning
+			return v, v.cancelInvite(v.pendingDeleteID)
+		case "n", "esc":
+			v.mode = teamModeList
+			v.pendingDeleteID = ""
+		}
+		return v, nil
+	case teamModeApprovePass:
+		switch mm.String() {
+		case "esc":
+			v.mode = teamModeList
+			v.pendingApproveID = ""
+			v.passBuf.Reset()
+			return v, nil
+		case "enter":
+			if v.passBuf.Len() == 0 {
+				v.actionErr = "approval passphrase required"
+				return v, nil
 			}
+			v.actionErr = ""
+			v.mode = teamModeApproveRun
+			return v, v.approveInvite(v.pendingApproveID, v.passBuf.String())
+		case "backspace":
+			s := v.passBuf.String()
+			if len(s) > 0 {
+				v.passBuf.Reset()
+				v.passBuf.WriteString(s[:len(s)-1])
+			}
+		default:
+			if len(mm.Runes) > 0 {
+				v.passBuf.WriteString(string(mm.Runes))
+			}
+		}
+		return v, nil
+	case teamModeRunning, teamModeApproveRun:
+		return v, nil
+	case teamModeDoneFlash:
+		if mm.String() != "" {
+			v.mode = teamModeList
+			v.actionErr = ""
+			v.actionFlash = ""
+		}
+		return v, nil
+	}
+	// list mode
+	switch mm.String() {
+	case "esc", "q", "ctrl+c", "backspace":
+		v.done = true
+	case "tab":
+		v.tab = (v.tab + 1) % 2
+		v.cursor = 0
+	case "1":
+		v.tab = teamTabMembers
+		v.cursor = 0
+	case "2":
+		v.tab = teamTabPending
+		v.cursor = 0
+	case "up", "k":
+		if v.cursor > 0 {
+			v.cursor--
+		}
+	case "down", "j":
+		n := v.rowCount()
+		if n > 0 && v.cursor < n-1 {
+			v.cursor++
+		}
+	case "d":
+		if v.tab == teamTabPending && v.cursor < len(v.pending) {
+			v.pendingDeleteID = v.pending[v.cursor].InviteID
+			v.mode = teamModeConfirm
+		}
+	case "a":
+		// rc7o — approve a pending invite. Opens the approval
+		// passphrase prompt; on enter, shells out to `dop team
+		// approve-invite <id> --passphrase-stdin`.
+		if v.tab == teamTabPending && v.cursor < len(v.pending) {
+			inv := v.pending[v.cursor]
+			if inv.ShareIdentity {
+				// Shared-identity: nothing to approve on this side.
+				v.actionFlash = "shared-identity invite — nothing to approve; join completes on teammate's machine"
+				return v, nil
+			}
+			v.pendingApproveID = inv.InviteID
+			v.passBuf.Reset()
+			v.actionErr = ""
+			v.mode = teamModeApprovePass
 		}
 	}
 	return v, nil
 }
 
+func (v *teamListView) rowCount() int {
+	if v.tab == teamTabMembers {
+		return len(v.names)
+	}
+	return len(v.pending)
+}
+
+type teamApproveDoneMsg struct {
+	id  string
+	err string
+}
+
+// approveInvite — rc7o. Pipes the approval passphrase on stdin and
+// shells out to `dop team approve-invite <id> --passphrase-stdin`.
+// Keeps the passphrase off the command line (same discipline as the
+// token-issue protected-grant flow).
+func (v *teamListView) approveInvite(id, pass string) tea.Cmd {
+	return func() tea.Msg {
+		self, err := os.Executable()
+		if err != nil {
+			return teamApproveDoneMsg{id: id, err: err.Error()}
+		}
+		cmd := exec.Command(self, "team", "approve-invite", "--passphrase-stdin", id)
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+		cmd.Stdin = strings.NewReader(pass + "\n")
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return teamApproveDoneMsg{id: id, err: strings.TrimSpace(stderr.String())}
+		}
+		return teamApproveDoneMsg{id: id}
+	}
+}
+
+// cancelInvite shells out to `dop team cancel-invite <id>` and
+// returns the result as a teamCancelDoneMsg.
+func (v *teamListView) cancelInvite(id string) tea.Cmd {
+	return func() tea.Msg {
+		self, err := os.Executable()
+		if err != nil {
+			return teamCancelDoneMsg{id: id, err: err.Error()}
+		}
+		cmd := exec.Command(self, "team", "cancel-invite", id)
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return teamCancelDoneMsg{id: id, err: strings.TrimSpace(stderr.String())}
+		}
+		return teamCancelDoneMsg{id: id}
+	}
+}
+
 func (v *teamListView) View() string {
 	var b strings.Builder
-	// v1.13.0-rc20 — Mole-style title + muted count subtitle.
-	b.WriteString(titleSt.Render("Team members") + "   " +
-		mutedSt.Render(fmt.Sprintf("%d admin(s)", len(v.names))) + "\n\n")
+	// Tab bar.
+	membersTab := fmt.Sprintf("[1] Members (%d)", len(v.names))
+	pendingTab := fmt.Sprintf("[2] Pending (%d)", len(v.pending))
+	if v.tab == teamTabMembers {
+		membersTab = cursorSt.Render(membersTab)
+		pendingTab = mutedSt.Render(pendingTab)
+	} else {
+		membersTab = mutedSt.Render(membersTab)
+		pendingTab = cursorSt.Render(pendingTab)
+	}
+	b.WriteString(titleSt.Render("Team") + "   " + membersTab + "   " + pendingTab + "\n\n")
+
 	if !v.loaded {
 		b.WriteString("loading…")
 		return b.String()
@@ -412,27 +642,148 @@ func (v *teamListView) View() string {
 		b.WriteString(helpSt.Render("esc back"))
 		return b.String()
 	}
-	if len(v.names) == 0 {
-		b.WriteString(mutedSt.Render("(no admins yet)"))
+	if v.mode == teamModeConfirm {
+		id := v.pendingDeleteID
+		if len(id) >= 8 {
+			id = id[:8]
+		}
+		b.WriteString(failSt.Render("Cancel pending invite "+id+"?") + "\n")
+		b.WriteString(mutedSt.Render("  the invite file and identity-blob (if any) will be removed from the vault + pushed.") + "\n\n")
+		b.WriteString(helpSt.Render("y/enter confirm · n/esc cancel"))
+		return b.String()
 	}
-	for _, n := range v.names {
+	if v.mode == teamModeApprovePass {
+		id := v.pendingApproveID
+		if len(id) >= 8 {
+			id = id[:8]
+		}
+		b.WriteString(cursorSt.Render("Approve invite "+id) + "\n")
+		b.WriteString(mutedSt.Render("  pulls vault, reads teammate's response, verifies, adds admin, pushes.") + "\n\n")
+		b.WriteString("Approval passphrase: " + strings.Repeat("•", v.passBuf.Len()) + cursorSt.Render("▎") + "\n")
+		if v.actionErr != "" {
+			b.WriteString("\n" + failSt.Render(v.actionErr) + "\n")
+		}
+		b.WriteString("\n" + helpSt.Render("enter approve · esc cancel"))
+		return b.String()
+	}
+	if v.mode == teamModeRunning {
+		b.WriteString(mutedSt.Render("cancelling pending invite…"))
+		return b.String()
+	}
+	if v.mode == teamModeApproveRun {
+		b.WriteString(mutedSt.Render("approving invite… (pulling vault, verifying response, pushing)"))
+		return b.String()
+	}
+	if v.mode == teamModeDoneFlash {
+		if v.actionErr != "" {
+			b.WriteString(failSt.Render("✗ cancel failed: "+v.actionErr) + "\n")
+		}
+		b.WriteString("\n" + helpSt.Render("any key to continue"))
+		return b.String()
+	}
+	switch v.tab {
+	case teamTabMembers:
+		b.WriteString(v.viewMembers())
+	case teamTabPending:
+		b.WriteString(v.viewPending())
+	}
+	if v.actionFlash != "" {
+		b.WriteString("\n" + okSt.Render(v.actionFlash) + "\n")
+	}
+	return b.String()
+}
+
+func (v *teamListView) viewMembers() string {
+	var b strings.Builder
+	if len(v.names) == 0 {
+		b.WriteString(mutedSt.Render("(no admins yet)") + "\n")
+	}
+	for i, n := range v.names {
 		a := v.admins[n]
 		note := a.Note
 		if note == "" {
 			note = "-"
 		}
-		b.WriteString(fmt.Sprintf("- %s\n    age:     %s\n    ed25519: %s\n    note:    %s\n",
-			n, a.AgeRecipient, a.Ed25519Pubkey, note))
+		prefix := "    "
+		nameSt := mutedSt
+		if i == v.cursor {
+			prefix = "  " + cursorSt.Render("➤ ")
+			nameSt = cursorSt
+		}
+		b.WriteString(prefix + nameSt.Render(n) + "\n")
+		b.WriteString("      age:     " + a.AgeRecipient + "\n")
+		b.WriteString("      ed25519: " + a.Ed25519Pubkey + "\n")
+		b.WriteString("      note:    " + note + "\n")
 	}
-	// v1.10.3 — quiet note explaining shared-identity's implication so
-	// people who used "same identity" on their Add-a-device don't
-	// wonder why the second machine isn't shown here.
-	b.WriteString("\n" + mutedSt.Render("This list shows distinct admin identities.") + "\n")
-	b.WriteString(mutedSt.Render("Devices you added with 'same identity' share one entry with the machine that invited them.") + "\n")
-	b.WriteString(mutedSt.Render("If you want two separate rows here, invite the second device with 'separate identity'.") + "\n")
-	// v1.13.0-rc20 — "any key to go back" → "esc back" for consistency.
-	b.WriteString("\n" + helpSt.Render("esc back"))
+	b.WriteString("\n" + mutedSt.Render("Distinct admin identities. Devices invited with 'same identity' share one entry.") + "\n")
+	b.WriteString("\n" + helpSt.Render("tab switch · ↑↓ move · esc back"))
 	return b.String()
+}
+
+func (v *teamListView) viewPending() string {
+	var b strings.Builder
+	if len(v.pending) == 0 {
+		b.WriteString(mutedSt.Render("(no pending invites)") + "\n")
+		b.WriteString(mutedSt.Render("Open one with Add → Device or Add → Team member.") + "\n")
+		b.WriteString("\n" + helpSt.Render("tab switch · esc back"))
+		return b.String()
+	}
+	now := timeNow()
+	for i, inv := range v.pending {
+		prefix := "    "
+		idSt := mutedSt
+		if i == v.cursor {
+			prefix = "  " + cursorSt.Render("➤ ")
+			idSt = cursorSt
+		}
+		// Status: expired / valid / invite kind
+		status := "valid"
+		remaining := inv.ExpiresAt.Sub(now)
+		if remaining <= 0 {
+			status = failSt.Render("EXPIRED")
+		} else {
+			status = mutedSt.Render(humanDuration(remaining) + " left")
+		}
+		kind := "device"
+		if inv.Kind == "team_member" {
+			kind = "team member"
+		}
+		if inv.ShareIdentity {
+			kind += " · same-identity"
+		}
+		// rc7o — "response ready" marker when the teammate's response
+		// file is present. Operator presses `a` on a ready row to
+		// complete the invite.
+		readyBadge := ""
+		if !inv.ShareIdentity {
+			if _, err := admininvite.ReadResponse(v.paths, inv.InviteID); err == nil {
+				readyBadge = "  " + okSt.Render("✓ ready to approve")
+			}
+		}
+		b.WriteString(prefix + idSt.Render(inv.InviteID[:8]) + "  " + inv.Name + "   " + status + readyBadge + "\n")
+		b.WriteString("      kind:       " + kind + "\n")
+		b.WriteString("      created:   " + inv.CreatedAt.Format(timeFmt) + "\n")
+		b.WriteString("      expires:   " + inv.ExpiresAt.Format(timeFmt) + "\n")
+	}
+	b.WriteString("\n" + helpSt.Render("tab switch · ↑↓ move · a approve selected · d delete selected · esc back"))
+	return b.String()
+}
+
+const timeFmt = "2006-01-02 15:04"
+
+func timeNow() time.Time { return time.Now().UTC() }
+
+func humanDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
 // ---------- Team remove ----------
@@ -552,7 +903,7 @@ func (v *teamRemoveView) doRemove() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "team", "remove", "--name", name, "--force")
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {

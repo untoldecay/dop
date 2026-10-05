@@ -23,7 +23,7 @@ import (
 // runIntegration is the subcommand dispatcher.
 func runIntegration(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop integration <add|list|remove|remove-token|set-token>")
+		fmt.Fprintln(os.Stderr, "usage: dop integration <add|list|remove|remove-token|set-token|rename>")
 		return 2
 	}
 	switch args[0] {
@@ -37,10 +37,105 @@ func runIntegration(args []string) int {
 		return runIntegrationRemoveToken(args[1:])
 	case "set-token":
 		return runIntegrationSetToken(args[1:])
+	case "rename":
+		return runIntegrationRename(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop integration: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+// runIntegrationRename — v1.14.0-rc3 Phase 5. Renames the map key for
+// an integration and rewrites every grant that references it. Must be
+// atomic from the operator's perspective: either both the integration
+// map AND every referring grant get the new name, or nothing changes.
+//
+// Caveat (documented, intentional): already-issued capability bundles
+// carry the old integration name baked into their bundle hash. The
+// bundle is cryptographically signed, so we can't rewrite it. Existing
+// bearers keep working (resolveBearer doesn't look up the integration
+// by name), but a `dop token show` on an old bearer will surface the
+// old reference. Operator can reissue to refresh.
+func runIntegrationRename(args []string) int {
+	fs := flag.NewFlagSet("integration rename", flag.ExitOnError)
+	from := fs.String("from", "", "current integration name (required)")
+	to := fs.String("to", "", "new integration name (required)")
+	_ = fs.Parse(args)
+	if *from == "" || *to == "" {
+		fmt.Fprintln(os.Stderr, "usage: dop integration rename --from <old> --to <new>")
+		return 2
+	}
+
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration rename: %v\n", err)
+		return 1
+	}
+	v, vp, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration rename: %v\n", err)
+		return 1
+	}
+
+	// Resolve the current key via the same slug normalizer that
+	// `integration add` uses so operators can call this with any surface
+	// form of the old name.
+	oldKey, ok := v.FindIntegrationKey(*from)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "dop integration rename: unknown integration %q\n", *from)
+		return 1
+	}
+	newKey := vault.NormalizeIntegrationName(*to)
+	if newKey == "" {
+		fmt.Fprintf(os.Stderr, "dop integration rename: --to normalizes to empty, pick a different name\n")
+		return 1
+	}
+	if newKey == oldKey {
+		fmt.Fprintf(os.Stderr, "dop integration rename: %q and %q normalize to the same key %q — nothing to do\n", *from, *to, oldKey)
+		return 0
+	}
+	if _, exists := v.Integrations[newKey]; exists {
+		fmt.Fprintf(os.Stderr, "dop integration rename: target name %q (normalized: %q) already exists — remove or pick a different name first\n", *to, newKey)
+		return 1
+	}
+	existing := v.Integrations[oldKey]
+	// Protection check: only the owner can rename a protected integration.
+	if err := requireProtectionOwner(client, "integration "+oldKey, existing.Protected, existing.Owner); err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration rename: %v\n", err)
+		return 1
+	}
+
+	// Rewrite the integration map.
+	v.Integrations[newKey] = existing
+	delete(v.Integrations, oldKey)
+
+	// Rewrite every grant that references the old name.
+	referrers := 0
+	for id, g := range v.Grants {
+		if g.Integration == oldKey {
+			g.Integration = newKey
+			v.Grants[id] = g
+			referrers++
+		}
+	}
+
+	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
+		fmt.Fprintf(os.Stderr, "dop integration rename: %v\n", err)
+		return 1
+	}
+	audit.Append(paths, audit.Event{
+		Kind:    audit.EventIntegrationRenamed,
+		Subject: newKey,
+		Extra: map[string]string{
+			"old_name":  oldKey,
+			"new_name":  newKey,
+			"referrers": fmt.Sprintf("%d", referrers),
+		},
+	})
+	fmt.Fprintf(os.Stderr, "dop integration rename: %q → %q (updated %d grant reference(s))\n", oldKey, newKey, referrers)
+	fmt.Fprintln(os.Stderr, "  note: existing bearers keep the old integration name in their bundle. Reissue to refresh.")
+	return 0
 }
 
 func runIntegrationList(args []string) int {
@@ -472,6 +567,10 @@ func runIntegrationAdd(args []string) int {
 	fs.Var(&tokens, "token", "upstream token in the form NAME=VALUE:SCOPE_NOTE (repeatable)")
 	var metadata stringSliceFlag
 	fs.Var(&metadata, "metadata", "extra metadata KEY=VALUE (repeatable)")
+	// v1.14.0-rc3 — grouping metadata (symmetric with Grant). No
+	// inheritance to grants; purely cosmetic for the integration list.
+	projectsCSV := fs.String("projects", "", "comma-separated project tags on the integration (grouping only, no inheritance)")
+	tagsCSV := fs.String("tags", "", "comma-separated free-form tags on the integration (grouping only, no inheritance)")
 	// v1.13.0-rc12 — protected credentials. Admin passphrase required
 	// at save when set. Owner locked to current admin pubkey.
 	protected := fs.Bool("protected", false, "mark this integration as owner-locked — only the current admin can modify it (requires approval passphrase)")
@@ -647,13 +746,27 @@ func runIntegrationAdd(args []string) int {
 	}
 
 	// v1.13.0-rc12 — protection claim path.
-	// `--protected` on an EXISTING, already-protected (and owned-by-us)
-	// integration is a no-op flag preservation; on a non-protected one
-	// it's a flip. In both cases we gate on the approval passphrase
-	// and stamp Owner = current admin pubkey.
-	protect := *protected || existing.Protected
+	// v1.14.0-rc3 — tri-state semantic for --protected:
+	//   flag unset             → inherit existing.Protected
+	//   --protected / =true    → set true (prompts passphrase; stamps owner)
+	//   --protected=false      → set false (owner-only unlock path)
+	// Previously the OR expression made --protected=false a no-op because
+	// the Go flag parser can't distinguish "unset" from "set to false" on
+	// a plain Bool. We walk fs.Visit to recover that distinction.
+	protectedSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "protected" {
+			protectedSet = true
+		}
+	})
+	protect := existing.Protected
+	if protectedSet {
+		protect = *protected
+	}
 	owner := existing.Owner
-	if protect {
+	switch {
+	case protect && !existing.Protected:
+		// New lock or re-lock after unlock. Prompt passphrase + stamp owner.
 		if err := promptProtectionPassphrase(paths, "approval passphrase (protect integration "+key+"): ", *passphraseStdin); err != nil {
 			fmt.Fprintf(os.Stderr, "dop integration add: %v\n", err)
 			return 1
@@ -663,13 +776,15 @@ func runIntegrationAdd(args []string) int {
 			fmt.Fprintf(os.Stderr, "dop integration add: session: %v\n", err)
 			return 1
 		}
-		// A flip-to-protected (or brand-new protected) always claims
-		// the CURRENT admin as owner. Previously-set Owner on an
-		// already-protected resource stays — enforcePathOnSave would
-		// have refused us upstream if it belonged to someone else.
-		if owner == "" {
-			owner = st.AdminPubkey
-		}
+		owner = st.AdminPubkey
+	case protect && existing.Protected:
+		// Already-protected no-op (owner stays). enforceProtectedOnSave
+		// would have refused us upstream if we weren't the owner.
+	case !protect && existing.Protected:
+		// Explicit unlock. enforceProtectedOnSave gates on ownership —
+		// a non-owner's save attempt reverts and audits as bypass. Clear
+		// the owner field so no stale pointer survives the flip.
+		owner = ""
 	}
 	// v1.13.0-rc13 — mutable kind: explicit --kind wins; else keep the
 	// existing stored kind; else fall through to empty, which readers
@@ -688,6 +803,19 @@ func runIntegrationAdd(args []string) int {
 	if *probeEndpoints {
 		runProbe(paths, &meta, effectiveKind, key)
 	}
+	// v1.14.0-rc3 — projects/tags: pass-through means "unset flag keeps
+	// existing"; empty-string flag means "clear"; nonempty means "replace".
+	// Mirrors how metadata handles updates.
+	integProjects := existing.Projects
+	integTags := existing.Tags
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "projects":
+			integProjects = splitCSV(*projectsCSV)
+		case "tags":
+			integTags = splitCSV(*tagsCSV)
+		}
+	})
 	v.Integrations[key] = vault.Integration{
 		Description: *desc,
 		Metadata:    meta,
@@ -695,6 +823,8 @@ func runIntegrationAdd(args []string) int {
 		Protected:   protect,
 		Owner:       owner,
 		Kind:        effectiveKind,
+		Projects:    integProjects,
+		Tags:        integTags,
 	}
 
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
@@ -704,6 +834,20 @@ func runIntegrationAdd(args []string) int {
 	// Audit the protection claim (only on flip or new-protected).
 	if protect && !existing.Protected {
 		logProtectedCreate(paths, "integration", key, owner)
+	}
+	// v1.14.0-rc3 — audit the inverse flip (unlock) so operators have
+	// a trail. Fires only on an actual existing.Protected → false
+	// transition, not on repeated --protected=false against an already
+	// unprotected integration.
+	if !protect && existing.Protected {
+		audit.Append(paths, audit.Event{
+			Kind:    audit.EventProtectedUnlock,
+			Subject: key,
+			Extra: map[string]string{
+				"kind":        "integration",
+				"prior_owner": existing.Owner,
+			},
+		})
 	}
 	// Surface the normalized key so operators learn the saved form.
 	if key != *name {
@@ -1091,6 +1235,11 @@ func runGrantAdd(args []string) int {
 	envPrefix := fs.String("env-prefix", "", "env var prefix (defaults to <INTEGRATION>_<TOKEN>, sanitized)")
 	projectsCSV := fs.String("projects", "", "comma-separated project tags (cosmetic grouping; a grant can belong to multiple)")
 	tagsCSV := fs.String("tags", "", "comma-separated free-form tags (e.g. read,write,admin)")
+	// v1.14.0-rc3 — tri-state --protected, parallel to integration add.
+	// Pins grant-level protection explicitly instead of relying only on
+	// integration-level inheritance. See _rules/_plans/rc3-plan.md Phase 3.
+	protected := fs.Bool("protected", false, "mark this grant as owner-locked — only the current admin can modify or issue tokens on it (requires approval passphrase)")
+	passphraseStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin instead of the tty (used by scripts and TUI)")
 	_ = fs.Parse(args)
 
 	if *id == "" || *integration == "" || *token == "" {
@@ -1168,15 +1317,59 @@ func runGrantAdd(args []string) int {
 	if normalizedPrefix != "" {
 		normalizedPrefix = vault.SanitizeEnvKey(normalizedPrefix)
 	}
-	// v1.13.0-rc12 — grants inherit protection from the parent
-	// integration. If the parent is protected, the grant is too, and
-	// its Owner matches. Preserves any existing grant-level protection
-	// on update (shouldn't happen in practice — the integration path
-	// is the only source — but keeps the invariant stable).
-	protected := integ.Protected || existingGrant.Protected
-	owner := integ.Owner
+	// Protection resolution — grant-level is now independently settable
+	// (v1.14.0-rc3), with integration-level inheritance kept as the
+	// *default* for a new grant whose parent is protected.
+	//
+	// Rules:
+	//   flag unset, new grant       → inherit from parent integration
+	//   flag unset, existing grant  → preserve existing grant.Protected
+	//   --protected / =true         → set true (prompts passphrase, stamps owner)
+	//   --protected=false           → set false (owner-only unlock path)
+	protectedSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "protected" {
+			protectedSet = true
+		}
+	})
+	var protect bool
+	switch {
+	case protectedSet:
+		protect = *protected
+	case action == "updated":
+		protect = existingGrant.Protected
+	default: // new grant, flag unset → inherit from integration
+		protect = integ.Protected
+	}
+	owner := existingGrant.Owner
 	if owner == "" {
-		owner = existingGrant.Owner
+		owner = integ.Owner
+	}
+	// Distinguish two "new lock" shapes:
+	//   - Inheriting from a protected parent integration on create:
+	//     owner is already proven at integration-level, no new passphrase.
+	//   - Operator explicitly flipped grant to protected (--protected on
+	//     an unprotected-integration grant, or on an existing grant with
+	//     no prior lock): prompt passphrase + stamp current admin as owner.
+	isNewLock := protect && !existingGrant.Protected
+	inherited := isNewLock && integ.Protected && !protectedSet
+	if isNewLock && !inherited {
+		if err := promptProtectionPassphrase(paths, "approval passphrase (protect grant "+*id+"): ", *passphraseStdin); err != nil {
+			fmt.Fprintf(os.Stderr, "dop grant add: %v\n", err)
+			return 1
+		}
+		st, err := client.Status()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop grant add: session: %v\n", err)
+			return 1
+		}
+		owner = st.AdminPubkey
+	}
+	// Explicit unlock: clear owner so no stale pointer survives the flip.
+	// enforceProtectedOnSave upstream still gates on ownership for the
+	// save itself, so non-owners can't reach this path.
+	if !protect && existingGrant.Protected {
+		owner = ""
 	}
 	v.Grants[*id] = vault.Grant{
 		Integration: *integration,
@@ -1184,12 +1377,27 @@ func runGrantAdd(args []string) int {
 		EnvPrefix:   normalizedPrefix,
 		Projects:    projects,
 		Tags:        tags,
-		Protected:   protected,
+		Protected:   protect,
 		Owner:       owner,
 	}
 	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
 		fmt.Fprintf(os.Stderr, "dop grant add: %v\n", err)
 		return 1
+	}
+	// v1.14.0-rc3 — audit grant protection transitions symmetrically
+	// with integration (contract 15, mirrors runIntegrationAdd).
+	if protect && !existingGrant.Protected {
+		logProtectedCreate(paths, "grant", *id, owner)
+	}
+	if !protect && existingGrant.Protected {
+		audit.Append(paths, audit.Event{
+			Kind:    audit.EventProtectedUnlock,
+			Subject: *id,
+			Extra: map[string]string{
+				"kind":        "grant",
+				"prior_owner": existingGrant.Owner,
+			},
+		})
 	}
 	// Preview what the child env will actually look like.
 	effective := v.Grants[*id].EffectivePrefix()

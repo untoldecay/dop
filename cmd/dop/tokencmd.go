@@ -30,6 +30,7 @@ import (
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
+	"github.com/fray/dop/internal/cli/printguard"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/envseal"
 	"github.com/fray/dop/internal/trust"
@@ -230,8 +231,25 @@ func runTokenIssue(args []string) int {
 	// v1.13.0-rc12 — issuing a bearer that contains protected grants
 	// requires the admin passphrase (same gate as creating one).
 	passphraseStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin instead of the tty (used when any of --grants is protected; TUI passes this)")
+	// v1.14.0-rc1 — opt-in portable stash. When set, DOP additionally
+	// age-wraps the fresh bearer value with the issuing admin's age
+	// recipient and stores the ciphertext on the capability record.
+	// `dop use <subject>` later unwraps via the admin daemon to make
+	// the bearer available in a shell. Only the issuing admin can
+	// unwrap. Opt-in because the normal flow is "bearer leaves admin,
+	// lives only with agent"; this is specifically for bearers the
+	// admin itself will use across their own shells.
+	portable := fs.Bool("portable", false, "also wrap the bearer to the issuing admin's age recipient and stash it on the capability record, so the admin can later `dop use <subject>` from any shell on any of their machines (vault pull carries the stash)")
+	// v1.14.0-rc4 — Tier 2 opt-in to printing bearer+PIN on a non-tty.
+	// rc6h — --print-bearer retired (no-op since rc5 Option A, same as
+	// --print-export). Accepted silently for backward-compat with a
+	// one-line deprecation warning if set.
+	legacyPrintBearer := fs.Bool("print-bearer", false, "DEPRECATED (rc6h): no-op, accepted for backward-compat.")
 	_ = fs.Parse(args)
 	_ = note
+	if *legacyPrintBearer {
+		fmt.Fprintln(os.Stderr, "dop token issue: --print-bearer is deprecated and has no effect (removed in rc6h).")
+	}
 
 	if strings.TrimSpace(*grantsCSV) == "" && strings.TrimSpace(*projectFilter) == "" {
 		fmt.Fprintln(os.Stderr, "dop token issue: one of --grants or --project is required")
@@ -498,7 +516,30 @@ func runTokenIssue(args []string) int {
 	if v.Capabilities == nil {
 		v.Capabilities = map[string]vault.Capability{}
 	}
-	v.Capabilities[capIDHex] = capability2VaultCapability(rec)
+	stored := capability2VaultCapability(rec)
+	// v1.14.0-rc1 — opt-in portable stash. Wrap the fresh bearer with
+	// the issuing admin's age recipient (fetched from the session
+	// Status) and store the ciphertext on the capability so `dop use`
+	// can later retrieve it. Encryption uses only the recipient
+	// (public key); unwrapping requires the identity (daemon-held).
+	if *portable {
+		st, err := client.Status()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop token issue: session status for --portable: %v\n", err)
+			return 1
+		}
+		if st.AgeRecipient == "" {
+			fmt.Fprintln(os.Stderr, "dop token issue: --portable requires an active admin session with an age recipient")
+			return 1
+		}
+		wrapped, err := admin.WrapToRecipient([]byte(bearer), st.AgeRecipient)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop token issue: wrap bearer for admin use: %v\n", err)
+			return 1
+		}
+		stored.PortableWrapped = wrapped
+	}
+	v.Capabilities[capIDHex] = stored
 
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
 		// v1.6.4: clean the orphan bundle so the on-disk state stays
@@ -533,6 +574,19 @@ func runTokenIssue(args []string) int {
 		logProtectedTokenIssue(paths, subject, protectedGrants)
 	}
 	fmt.Fprintf(os.Stderr, "dop token issue: issued %s (grants: %v, expires: %s)\n", subject, grants, tokenExpiryDisplay(expiresAt))
+	// rc5 Option A: approval runs for every print surface. The capability
+	// is already written to the vault; if approval is denied the mutation
+	// stays intact — only the stdout print is suppressed.
+	if err := printguard.Guard(printguard.Request{
+		Kind:    printguard.KindTokenIssue,
+		Subject: subject,
+		Out:     os.Stdout,
+		Paths:   paths,
+		Client:  client,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "  (capability was created in the vault; bearer NOT printed. Revoke + reissue if you need a visible bearer at a terminal.)\n")
+		return 0
+	}
 	if pin != "" {
 		fmt.Fprintln(os.Stderr, "  bearer + PIN (shown ONCE — copy now):")
 		fmt.Println(bearer)
@@ -854,6 +908,58 @@ func requireAdminSession(paths *config.Paths) (*admin.Client, error) {
 		return nil, fmt.Errorf("no active admin session — run `dop admin login` first")
 	}
 	return client, nil
+}
+
+// requireAdminSessionOrUnlock is the operator-friendly variant used
+// by surfaces like `dop use` that are triggered from a shell eval. If
+// no session is active it pops a native passphrase dialog (osascript
+// on macOS) and runs the login dance in-process, so the operator never
+// has to switch to a terminal just to re-enter their passphrase.
+//
+// On platforms / environments where the native dialog isn't available
+// (non-darwin, SSH session with no $DISPLAY-equivalent, osascript
+// disabled by MDM) the function falls back to the standard
+// requireAdminSession behavior — the operator gets the normal error
+// and can run `dop admin login` themselves.
+//
+// titleHint shows up in the dialog title (e.g. "DOP · use notion") so
+// operators juggling multiple vaults know which install is asking.
+func requireAdminSessionOrUnlock(paths *config.Paths, titleHint string) (*admin.Client, error) {
+	client := admin.NewClient(admin.SockPath(paths))
+	if client.SessionActive() {
+		return client, nil
+	}
+	// Opt-out: DOP_NO_AUTO_UNLOCK=1 keeps the old behavior for scripts.
+	if os.Getenv("DOP_NO_AUTO_UNLOCK") != "" {
+		return nil, fmt.Errorf("no active admin session — run `dop admin login` first")
+	}
+	// Opt-out: when invoked from inside the TUI (DOP_FROM_TUI=1) we must
+	// NOT race the TUI by stealing focus with a passphrase dialog — the
+	// TUI has its own login flow.
+	if os.Getenv("DOP_FROM_TUI") != "" {
+		return nil, fmt.Errorf("no active admin session — run `dop admin login` first")
+	}
+	title := "DOP admin unlock"
+	if titleHint != "" {
+		title = "DOP · " + titleHint
+	}
+	c, err := autoUnlockPrompt(paths, title, "Enter admin passphrase to unlock the session.")
+	if err != nil {
+		// Operator cancelled → generic error (they said no).
+		if errors.Is(err, ErrAutoUnlockCanceled) {
+			return nil, fmt.Errorf("no active admin session — run `dop admin login` first")
+		}
+		// Dialog unavailable → surface the specific reason to stderr so
+		// operators debugging "why didn't the dialog pop" see the actual
+		// cause (no Aqua session, wrong console user, osascript missing,
+		// etc.) instead of just the generic fallback. rc6k fix.
+		if errors.Is(err, ErrAutoUnlockUnsupported) {
+			fmt.Fprintf(os.Stderr, "dop: auto-unlock skipped: %v\n", err)
+			return nil, fmt.Errorf("no active admin session — run `dop admin login` first")
+		}
+		return nil, err
+	}
+	return c, nil
 }
 
 // vaultFilePath returns the vault.yaml path, bootstrapping empty if missing.
@@ -1252,8 +1358,15 @@ func syncSidecars(client *admin.Client, paths *config.Paths, v *vault.Vault) err
 			return fmt.Errorf("resign %s: %w", c.LookupID, err)
 		}
 		// Reflect the new signature back into the vault map so the two
-		// stay coherent.
-		v.Capabilities[capID] = capability2VaultCapability(rec)
+		// stay coherent. v1.14.0-rc1 — preserve PortableWrapped across
+		// the record round-trip; it's admin-only and doesn't live on
+		// capability.Record (unlike EnvWrapped/BearerWrapped which do).
+		preservedStash := c.PortableWrapped
+		updated := capability2VaultCapability(rec)
+		if preservedStash != "" {
+			updated.PortableWrapped = preservedStash
+		}
+		v.Capabilities[capID] = updated
 		if err := writeRecordSidecar(paths, rec); err != nil {
 			return fmt.Errorf("write sidecar %s: %w", c.LookupID, err)
 		}
@@ -1919,27 +2032,38 @@ func runTokenGrantMutation(args []string, mode string) int {
 	}
 	match := v.Capabilities[matchID]
 
-	// Direct-availability requires a P-256 SE key on the agent's side —
-	// nothing to encrypt the fresh env to on ed25519 bearers. Error
-	// clearly so operators know their options.
-	if match.Binding == nil || match.Binding.Pubkey == "" {
+	// rc6d — three refresh paths depending on how the bearer surfaces env:
+	//   a) bound P-256 → reseal EnvWrapped (direct-availability)
+	//   b) unbound + portable stash → unwrap bearer, rewrite bundle in place
+	//   c) unbound + no stash → cannot refresh env; direct operator to claim
+	//      or revoke+reissue.
+	// Ed25519 bound bearers still fall out as "migrate first" since they
+	// can't do ECDH to seal EnvWrapped.
+	isUnbound := match.Binding == nil || match.Binding.Pubkey == ""
+	hasPortableStash := match.PortableWrapped != ""
+	if isUnbound && !hasPortableStash {
 		fmt.Fprintf(os.Stderr,
-			"dop token %s-grant: this bearer is not yet claimed (no bound pubkey) — reserve grant edits until after `dop claim`\n",
-			mode)
-		return 1
-	}
-	kt := match.Binding.KeyType
-	if kt == "" {
-		kt = vault.KeyTypeEd25519
-	}
-	if kt != vault.KeyTypeP256 {
-		fmt.Fprintf(os.Stderr,
-			"dop token %s-grant: bearer is bound to %s key — direct grant edits require P-256\n"+
+			"dop token %s-grant: this bearer has no bound pubkey and no portable stash — bundle env can't be refreshed in place.\n"+
 				"  Options:\n"+
-				"    1) run `dop agent migrate %s` on the agent's machine (upgrades to P-256, keeps bearer)\n"+
-				"    2) revoke this bearer and issue a fresh one with the wider/narrower grant set\n",
-			mode, kt, match.LookupID)
+				"    1) run `dop claim` on the agent to bind a pubkey, then re-run this command\n"+
+				"    2) revoke this bearer and issue a fresh one (`dop token revoke %s` + `dop token issue --name %s --grants ...`)\n",
+			mode, match.Subject, match.Subject)
 		return 1
+	}
+	if !isUnbound {
+		kt := match.Binding.KeyType
+		if kt == "" {
+			kt = vault.KeyTypeEd25519
+		}
+		if kt != vault.KeyTypeP256 {
+			fmt.Fprintf(os.Stderr,
+				"dop token %s-grant: bearer is bound to %s key — direct grant edits require P-256\n"+
+					"  Options:\n"+
+					"    1) run `dop agent migrate %s` on the agent's machine (upgrades to P-256, keeps bearer)\n"+
+					"    2) revoke this bearer and issue a fresh one with the wider/narrower grant set\n",
+				mode, kt, match.LookupID)
+			return 1
+		}
 	}
 
 	// Validate the grant argument.
@@ -2006,16 +2130,68 @@ func runTokenGrantMutation(args []string, mode string) int {
 	// mutation state).
 	match.Generation = v.BumpGeneration(match.Subject)
 
-	// Reseal EnvWrapped to reflect the new grants (env resolved fresh
-	// from the current vault → bearer's env changes take effect on the
-	// agent's next dop exec, no re-claim required).
+	// Refresh the env the agent will see.
+	//   Bound P-256   → reseal EnvWrapped (bundle untouched; agent decrypts
+	//                   via ECDH on next `dop exec`).
+	//   Portable stash → unwrap bearer, rewrite the bundle at the same lookup
+	//                   id with the new env sealed to the (recovered) bearer
+	//                   at the bumped generation; EnvWrapped stays nil.
 	rec := vaultCapability2Record(match, matchID)
-	wrapped, err := sealEnvWrapped(v, &rec)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop token %s-grant: reseal: %v\n", mode, err)
-		return 1
+	if isUnbound {
+		bearerBytes, uerr := client.UnwrapPortable(match.PortableWrapped)
+		if uerr != nil {
+			fmt.Fprintf(os.Stderr, "dop token %s-grant: unwrap portable stash: %v\n", mode, uerr)
+			return 1
+		}
+		bearer := string(bearerBytes)
+		if bearer == "" {
+			fmt.Fprintln(os.Stderr, "dop token "+mode+"-grant: unwrap returned empty bearer — stash may be corrupted")
+			return 1
+		}
+		capIDBytes, derr := hex.DecodeString(rec.CapabilityID)
+		if derr != nil || len(capIDBytes) != capability.CapabilityIDBytes {
+			fmt.Fprintf(os.Stderr, "dop token %s-grant: bad capability id on record: %v\n", mode, derr)
+			return 1
+		}
+		var capIDArr [capability.CapabilityIDBytes]byte
+		copy(capIDArr[:], capIDBytes)
+		envBundle := resolveGrantsToEnv(v, rec.Grants)
+		if len(envBundle) == 0 {
+			fmt.Fprintln(os.Stderr, "dop token "+mode+"-grant: resolved env bundle is empty after mutation — grants may not be wired to integrations")
+			return 1
+		}
+		bundlePath := filepath.Join(paths.Vault, "capabilities", rec.LookupID+".bundle")
+		f, cerr := os.Create(bundlePath)
+		if cerr != nil {
+			fmt.Fprintf(os.Stderr, "dop token %s-grant: rewrite bundle: %v\n", mode, cerr)
+			return 1
+		}
+		bundleBytes, werr := capability.Write(f, capability.WriteOpts{
+			CapabilityID: capIDArr,
+			Bearer:       bearer,
+			Generation:   rec.Generation,
+			ExpiresAt:    rec.ExpiresAt,
+			Subject:      rec.Subject,
+			Env:          envBundle,
+			Binding: &capability.EnvelopeBinding{
+				Kind: vault.BindingKindNone,
+			},
+		})
+		f.Close()
+		if werr != nil {
+			fmt.Fprintf(os.Stderr, "dop token %s-grant: write bundle: %v\n", mode, werr)
+			return 1
+		}
+		rec.BundleHash = capability.HashBundle(bundleBytes)
+		rec.EnvWrapped = nil
+	} else {
+		wrapped, err := sealEnvWrapped(v, &rec)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop token %s-grant: reseal: %v\n", mode, err)
+			return 1
+		}
+		rec.EnvWrapped = wrapped
 	}
-	rec.EnvWrapped = wrapped
 
 	if err := signRecordViaDaemon(client, &rec); err != nil {
 		fmt.Fprintf(os.Stderr, "dop token %s-grant: sign: %v\n", mode, err)
@@ -2037,9 +2213,13 @@ func runTokenGrantMutation(args []string, mode string) int {
 		verb = "removed"
 		prep = "from"
 	}
+	refreshNote := "env resealed — agent's next `dop exec` picks it up"
+	if isUnbound {
+		refreshNote = "bundle rewritten — next `dop use` surfaces the fresh env"
+	}
 	fmt.Fprintf(os.Stderr,
-		"dop token %s-grant: %s %s %s %s (gen bumped to %d, env resealed — agent's next `dop exec` picks it up)\n",
-		mode, verb, grantID, prep, match.Subject, rec.Generation)
+		"dop token %s-grant: %s %s %s %s (gen bumped to %d, %s)\n",
+		mode, verb, grantID, prep, match.Subject, rec.Generation, refreshNote)
 	return 0
 }
 

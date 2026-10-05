@@ -46,9 +46,93 @@ func runTeam(args []string) int {
 		return runTeamList(args[1:])
 	case "invite":
 		return runTeamInvite(args[1:])
+	case "cancel-invite":
+		// rc7m — delete a pending admin invite (invite file + identity
+		// blob for shared-identity, and the response file if present).
+		// Pushes a cleanup commit. The hint has been in the invite-
+		// timeout output since v1.9 but the command was never actually
+		// wired up until rc7m.
+		return runTeamCancelInvite(args[1:])
+	case "approve-invite":
+		// rc7o — complete a pending invite after the teammate has
+		// responded. Replaces the inline polling loop in pre-rc7o
+		// runTeamInvite. `dop team invite` now exits immediately after
+		// staging; this is the fire-and-forget completion step.
+		return runTeamApproveInvite(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop team: unknown subcommand %q\n", args[0])
 		return 2
+	}
+}
+
+// runTeamCancelInvite deletes the pending invite files for the given
+// invite id and pushes the cleanup commit.
+func runTeamCancelInvite(args []string) int {
+	fs := flag.NewFlagSet("team cancel-invite", flag.ExitOnError)
+	_ = fs.Parse(args)
+	rest := fs.Args()
+	if len(rest) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: dop team cancel-invite <invite-id>")
+		fmt.Fprintln(os.Stderr, "  invite id is the hex prefix shown in `dop team list` pending output,")
+		fmt.Fprintln(os.Stderr, "  or the full id from a prior `dop team invite` run.")
+		return 2
+	}
+	id := rest[0]
+
+	paths, err := config.Resolve()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team cancel-invite: %v\n", err)
+		return 1
+	}
+	// Resolve an id prefix (12 hex chars is enough) to the full id so
+	// operators don't need to type the whole thing.
+	full, err := resolveInviteID(paths, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop team cancel-invite: %v\n", err)
+		return 1
+	}
+	// Also wipe the identity blob when it exists (shared-identity invites).
+	blob := admininvite.IdentityBlobPath(paths, full)
+	if _, err := os.Stat(blob); err == nil {
+		_ = os.Remove(blob)
+	}
+	if err := admininvite.Delete(paths, full); err != nil {
+		fmt.Fprintf(os.Stderr, "dop team cancel-invite: delete: %v\n", err)
+		return 1
+	}
+	if err := gitAddCommitPush(paths.Vault, "pending-admin-invites",
+		fmt.Sprintf("dop: cancel admin invite %s", full[:8])); err != nil {
+		fmt.Fprintf(os.Stderr, "dop team cancel-invite: push: %v — run `dop push` manually\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "dop team cancel-invite: deleted invite %s\n", full[:8])
+	return 0
+}
+
+// resolveInviteID accepts a short prefix (>= 8 hex) and returns the
+// full invite id. Errors on no match / multi-match.
+func resolveInviteID(paths *config.Paths, prefix string) (string, error) {
+	prefix = strings.TrimSpace(prefix)
+	if len(prefix) < 8 {
+		return "", fmt.Errorf("invite id must be at least 8 hex characters")
+	}
+	all, err := admininvite.ListInvites(paths)
+	if err != nil {
+		return "", err
+	}
+	var hits []string
+	for _, inv := range all {
+		if strings.HasPrefix(inv.InviteID, prefix) {
+			hits = append(hits, inv.InviteID)
+		}
+	}
+	switch len(hits) {
+	case 0:
+		return "", fmt.Errorf("no matching pending invite for %q", prefix)
+	case 1:
+		return hits[0], nil
+	default:
+		return "", fmt.Errorf("%d pending invites match %q — use more characters", len(hits), prefix)
 	}
 }
 

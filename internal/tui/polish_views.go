@@ -42,7 +42,7 @@ func (v *syncView) run() tea.Cmd {
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, action)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr

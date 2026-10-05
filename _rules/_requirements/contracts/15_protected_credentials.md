@@ -9,9 +9,17 @@
 ## Invariants
 - When `Protected == true`, `Owner` MUST be a non-empty ed25519 pubkey hex of a known admin in `vault.Admins`.
 - When `Protected == false`, `Owner` MUST be empty.
-- A grant on a protected integration MUST inherit `Protected == true` and MUST inherit the same `Owner`.
+- A grant on a protected integration inherits `Protected == true` + `Owner` AT CREATION only. v1.14.0-rc3 makes grant-level protection independently settable; after creation, a grant can be locked or unlocked without changing its parent integration. See "Grant-first (v1.14.0-rc3)" below.
 - Protected is NOT a cryptographic boundary. Any admin can decrypt the SOPS vault with their key and commit a hand-edited yaml OUTSIDE DOP. The guard only enforces for DOP-mediated writes.
 - Every protected-resource bypass MUST produce an `EventProtectedBypassAttempt` audit event.
+- v1.14.0-rc3 — every owner-initiated unlock (true→false flip on an integration OR grant) MUST produce an `EventProtectedUnlock` audit event with `extra.kind` + `extra.prior_owner`. The lock/unlock trail is symmetric with `EventProtectedCreate`.
+
+## Grant-first (v1.14.0-rc3)
+- Protection is independently settable at the grant level via `dop grant add --protected` (tri-state through `fs.Visit`: unset / `=true` / `=false`). Grants on an unprotected integration can be independently locked; grants on a protected integration can be unlocked independently of their parent.
+- Operator intent "lock this one credential" maps to a grant-level lock, not an integration-level lock. Integration-level protection remains available for the rarer "lock the whole catalog" case.
+- Flip-to-protected on a grant whose parent integration is NOT already protected (OR whose parent is protected but the operator explicitly set `--protected`): prompts the approval passphrase and stamps the current admin as owner. The inherited case (new grant, parent protected, no explicit flag) uses the parent's owner directly — no new passphrase.
+- `dop integration add --protected=false` on a currently-protected integration (owner-only) explicitly unlocks it. Clears `Owner`. Emits `EventProtectedUnlock`. Fixes the pre-rc3 "orphan lock" trap where removing the last protected child left an integration locked with no CLI/TUI path to unlock.
+- TUI integration edit + grant edit each expose a Protection row + conditional passphrase row (field only renders when flipping unprotected → protected).
 
 ## Mandatory Behaviors
 
