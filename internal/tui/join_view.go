@@ -19,6 +19,7 @@ import (
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/userprefs"
 )
 
 // Join steps. Identity is only shown when this machine has no admin
@@ -32,7 +33,8 @@ const (
 	joinStepNewAdmin    = 4 // separate-identity fresh install
 	joinStepNewApproval = 5 // separate-identity fresh install
 	joinStepRunning     = 6
-	joinStepDone        = 7
+	joinStepHarness     = 7 // rc7k-join — first-start harness picker on successful join
+	joinStepDone        = 8
 )
 
 type joinView struct {
@@ -43,15 +45,16 @@ type joinView struct {
 	keyExists     bool
 	shareIdentity bool // v1.9.8 — chosen at joinStepIdentity, only for fresh install
 
-	step        int
-	urlBuf      strings.Builder
-	pinBuf      strings.Builder
-	adminPass   strings.Builder
-	newAdmin1   strings.Builder // if creating fresh + separate identity: admin passphrase
-	newApproval strings.Builder // if creating fresh + separate identity: approval passphrase
-	err         string
-	done        bool
-	flash       string
+	step          int
+	urlBuf        strings.Builder
+	pinBuf        strings.Builder
+	adminPass     strings.Builder
+	newAdmin1     strings.Builder // if creating fresh + separate identity: admin passphrase
+	newApproval   strings.Builder // if creating fresh + separate identity: approval passphrase
+	harnessCursor int             // rc7k-join — cursor into userprefs.HarnessChoices
+	err           string
+	done          bool
+	flash         string
 
 	cmd      *exec.Cmd
 	lineCh   chan inviteLine
@@ -82,12 +85,17 @@ func (v *joinView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.linesMu.Unlock()
 		return v, v.waitForLine()
 	case inviteDone:
-		v.step = joinStepDone
 		v.finalRC = mm.rc
 		v.finalErr = mm.err
 		if mm.rc == 0 {
-			v.flash = "joined — this machine is now an admin · synced with team"
+			// rc7k-join — on successful join, prompt for harness pick
+			// before marking done. Mirrors the setupAdminView post-login
+			// transition. On failure, go straight to done so the user
+			// sees the error.
+			v.step = joinStepHarness
+			return v, nil
 		}
+		v.step = joinStepDone
 		return v, nil
 	case tea.KeyMsg:
 		switch mm.String() {
@@ -95,8 +103,19 @@ func (v *joinView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if v.step == joinStepRunning && v.cmd != nil && v.cmd.Process != nil {
 				_ = v.cmd.Process.Kill()
 			}
+			if v.step == joinStepHarness {
+				// rc7k-join — esc on the picker skips (operator can set
+				// via Settings → Harness later).
+				v.flash = "joined — harness pick skipped; set it in Settings → Harness"
+				v.done = true
+				return v, nil
+			}
 			v.done = true
 			return v, nil
+		}
+		// rc7k-join — harness picker owns its own key routing.
+		if v.step == joinStepHarness {
+			return v.updateHarnessStep(mm)
 		}
 		if v.step == joinStepDone {
 			v.done = true
@@ -121,6 +140,32 @@ func (v *joinView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				v.currentBuf().WriteString(string(mm.Runes))
 			}
 		}
+	}
+	return v, nil
+}
+
+// updateHarnessStep — rc7k-join. Mirrors setupAdminView's picker.
+func (v *joinView) updateHarnessStep(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch mm.String() {
+	case "up", "k":
+		if v.harnessCursor > 0 {
+			v.harnessCursor--
+		}
+	case "down", "j":
+		if v.harnessCursor < len(userprefs.HarnessChoices)-1 {
+			v.harnessCursor++
+		}
+	case "enter":
+		pick := userprefs.HarnessChoices[v.harnessCursor]
+		prefs := userprefs.Load(v.paths)
+		prefs.Harness = pick
+		if err := userprefs.Save(v.paths, prefs); err != nil {
+			v.err = "save prefs: " + err.Error()
+			return v, nil
+		}
+		v.flash = "joined — harness set to " + userprefs.HarnessLabel(pick)
+		v.done = true
+		return v, nil
 	}
 	return v, nil
 }
@@ -360,6 +405,24 @@ func (v *joinView) View() string {
 		}
 		v.linesMu.Unlock()
 	}
+	// rc7k-join — harness picker step. Appears after a successful join
+	// so new team members / new devices get the same first-start wizard
+	// as `dop admin init`.
+	if v.step == joinStepHarness {
+		b.WriteString("\n" + okSt.Render("✓ joined — this machine is now an admin.") + "\n\n")
+		b.WriteString("One last step: " + cursorSt.Render("which AI harness do you primarily use?") + "\n")
+		b.WriteString(mutedSt.Render("DOP's trust-context cache uses this to consult the right session env var") + "\n")
+		b.WriteString(mutedSt.Render("so `dop use` only pops the approval dialog once per conversation.") + "\n\n")
+		for i, choice := range userprefs.HarnessChoices {
+			prefix := "    "
+			label := userprefs.HarnessLabel(choice)
+			if i == v.harnessCursor {
+				prefix = "  " + cursorSt.Render("➤ ")
+				label = cursorSt.Render(label)
+			}
+			b.WriteString(prefix + label + "\n")
+		}
+	}
 	if v.step == joinStepDone {
 		b.WriteString("\n")
 		if v.finalRC == 0 {
@@ -378,6 +441,8 @@ func (v *joinView) View() string {
 		b.WriteString("\n" + helpSt.Render("← → toggle | enter confirm | esc cancel"))
 	case joinStepRunning:
 		b.WriteString("\n" + helpSt.Render("esc kill | (auto-completes when admin approves)"))
+	case joinStepHarness:
+		b.WriteString("\n" + helpSt.Render("↑↓ pick | enter confirm | esc skip (change later in Settings → Harness)"))
 	case joinStepDone:
 		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
 	default:
