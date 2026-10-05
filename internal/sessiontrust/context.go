@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -82,7 +83,16 @@ func (c Context) Describe() string {
 	case KindExplicit:
 		return "explicit session id (DOP_SESSION_ID)"
 	case KindHarness:
-		return "harness session (CLAUDE_CODE_SESSION_ID)"
+		switch {
+		case strings.HasPrefix(c.Value, "claude:"):
+			return "harness session (CLAUDE_CODE_SESSION_ID)"
+		case strings.HasPrefix(c.Value, "codex:"):
+			return "harness session (CODEX_THREAD_ID)"
+		case strings.HasPrefix(c.Value, "opencode:"):
+			return "harness session (OPENCODE_SESSION_ID)"
+		default:
+			return "harness session"
+		}
 	case KindTTY:
 		return "tty " + c.Value
 	case KindSID:
@@ -120,14 +130,26 @@ func resolveWith(e resolverEnv) Context {
 	if v := e.getenv("DOP_SESSION_ID"); isValidSessionID(v) {
 		return Context{Kind: KindExplicit, Value: v}
 	}
-	// Harness adapter — opt-in. The counselor recommended holding this
-	// behind a flag until the Claude Code variable semantics are
-	// understood through at least one release cycle in the wild. Flip
-	// the default to "on" once we're confident.
-	if e.getenv("DOP_INFER_HARNESS_SESSION") == "1" {
-		if v := e.getenv("CLAUDE_CODE_SESSION_ID"); isValidSessionID(v) {
-			return Context{Kind: KindHarness, Value: "claude:" + v}
-		}
+	// rc7i — multi-harness adapter. Precedence inside the harness
+	// branch is determined by DOP_HARNESS:
+	//
+	//   claude-code → try CLAUDE_CODE_SESSION_ID only
+	//   codex       → try CODEX_THREAD_ID only
+	//   opencode    → try OPENCODE_SESSION_ID only
+	//   any         → try all three in Claude → Codex → opencode order
+	//   none / unset → fall through to tty/sid/ppid
+	//
+	// Legacy DOP_INFER_HARNESS_SESSION=1 is treated as DOP_HARNESS=any
+	// so pre-rc7i configs keep working without changes. The CLI entry
+	// points (printguard, trust context) set DOP_HARNESS from
+	// userprefs.Harness before calling Resolve, so operators who
+	// picked a harness in Settings never need to touch an env var.
+	harness := strings.ToLower(strings.TrimSpace(e.getenv("DOP_HARNESS")))
+	if harness == "" && e.getenv("DOP_INFER_HARNESS_SESSION") == "1" {
+		harness = "any"
+	}
+	if h := harnessContext(e, harness); h.Kind != "" {
+		return h
 	}
 	if tty, ok := e.readTTY(); ok {
 		return Context{Kind: KindTTY, Value: tty}
@@ -136,6 +158,43 @@ func resolveWith(e resolverEnv) Context {
 		return Context{Kind: KindSID, Value: strconv.Itoa(sid)}
 	}
 	return Context{Kind: KindPPID, Value: strconv.Itoa(e.getppid())}
+}
+
+// harnessContext consults the harness env vars according to the
+// requested harness mode and returns the first viable match. Returns
+// a zero-Kind Context when nothing matches (caller falls through to
+// tty/sid/ppid).
+func harnessContext(e resolverEnv, mode string) Context {
+	type adapter struct {
+		mode   string // DOP_HARNESS value that selects THIS adapter alone
+		envVar string
+		prefix string // namespace prefix in Context.Value
+	}
+	all := []adapter{
+		{mode: "claude-code", envVar: "CLAUDE_CODE_SESSION_ID", prefix: "claude:"},
+		{mode: "codex", envVar: "CODEX_THREAD_ID", prefix: "codex:"},
+		{mode: "opencode", envVar: "OPENCODE_SESSION_ID", prefix: "opencode:"},
+	}
+	switch mode {
+	case "", "none":
+		return Context{}
+	case "any":
+		for _, a := range all {
+			if v := e.getenv(a.envVar); isValidSessionID(v) {
+				return Context{Kind: KindHarness, Value: a.prefix + v}
+			}
+		}
+	default:
+		for _, a := range all {
+			if a.mode != mode {
+				continue
+			}
+			if v := e.getenv(a.envVar); isValidSessionID(v) {
+				return Context{Kind: KindHarness, Value: a.prefix + v}
+			}
+		}
+	}
+	return Context{}
 }
 
 // isValidSessionID enforces the "opaque, bounded, no control chars"

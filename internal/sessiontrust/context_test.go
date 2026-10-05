@@ -85,6 +85,85 @@ func TestResolve_HarnessOptedIn(t *testing.T) {
 	}
 }
 
+func TestResolve_HarnessCodex(t *testing.T) {
+	// DOP_HARNESS=codex → only consult CODEX_THREAD_ID, ignore the
+	// Claude var even though it's present.
+	ctx := resolveWith(stubEnv{
+		env: map[string]string{
+			"DOP_HARNESS":            "codex",
+			"CLAUDE_CODE_SESSION_ID": "claude-xyz",
+			"CODEX_THREAD_ID":        "codex-abc",
+		},
+		ppid: 1,
+	}.toResolverEnv())
+	if ctx.Kind != KindHarness || !strings.HasPrefix(ctx.Value, "codex:") {
+		t.Fatalf("expected codex:, got %v", ctx)
+	}
+}
+
+func TestResolve_HarnessOpencode(t *testing.T) {
+	ctx := resolveWith(stubEnv{
+		env: map[string]string{
+			"DOP_HARNESS":           "opencode",
+			"OPENCODE_SESSION_ID":   "oc-def",
+		},
+		ppid: 1,
+	}.toResolverEnv())
+	if ctx.Kind != KindHarness || !strings.HasPrefix(ctx.Value, "opencode:") {
+		t.Fatalf("expected opencode:, got %v", ctx)
+	}
+}
+
+func TestResolve_HarnessAny_Precedence(t *testing.T) {
+	// With DOP_HARNESS=any and multiple harness vars set, Claude wins
+	// (first in the precedence stack).
+	ctx := resolveWith(stubEnv{
+		env: map[string]string{
+			"DOP_HARNESS":            "any",
+			"CLAUDE_CODE_SESSION_ID": "claude-xyz",
+			"CODEX_THREAD_ID":        "codex-abc",
+			"OPENCODE_SESSION_ID":    "oc-def",
+		},
+		ppid: 1,
+	}.toResolverEnv())
+	if !strings.HasPrefix(ctx.Value, "claude:") {
+		t.Fatalf("expected claude: wins under any, got %v", ctx)
+	}
+}
+
+func TestResolve_HarnessNone_SkipsEvenIfVarSet(t *testing.T) {
+	// DOP_HARNESS=none → never consult harness vars.
+	ctx := resolveWith(stubEnv{
+		env: map[string]string{
+			"DOP_HARNESS":            "none",
+			"CLAUDE_CODE_SESSION_ID": "claude-xyz",
+		},
+		tty:  "/dev/pts/4",
+		ppid: 1,
+	}.toResolverEnv())
+	if ctx.Kind == KindHarness {
+		t.Fatalf("harness should be skipped under none, got %v", ctx)
+	}
+	if ctx.Kind != KindTTY {
+		t.Fatalf("expected tty fallback, got %v", ctx)
+	}
+}
+
+func TestResolve_LegacyEnvInferAliasesToAny(t *testing.T) {
+	// Legacy DOP_INFER_HARNESS_SESSION=1 behaves exactly like
+	// DOP_HARNESS=any (backward compat for pre-rc7i configs).
+	ctx := resolveWith(stubEnv{
+		env: map[string]string{
+			"DOP_INFER_HARNESS_SESSION": "1",
+			"CODEX_THREAD_ID":           "codex-abc",
+		},
+		ppid: 1,
+	}.toResolverEnv())
+	if !strings.HasPrefix(ctx.Value, "codex:") {
+		t.Fatalf("expected codex: (legacy infer → any → codex when Claude missing), got %v", ctx)
+	}
+}
+
 func TestResolve_TTYBeforeSID(t *testing.T) {
 	ctx := resolveWith(stubEnv{
 		env:  map[string]string{},

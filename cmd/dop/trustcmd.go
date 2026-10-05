@@ -23,6 +23,7 @@ import (
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/sessiontrust"
+	"github.com/fray/dop/internal/userprefs"
 )
 
 func runTrust(args []string) int {
@@ -139,6 +140,12 @@ func runTrustRevoke(args []string) int {
 // current invocation. Useful for operators debugging "why does my
 // approval keep re-prompting" without having to grep source.
 func runTrustContext(args []string) int {
+	// rc7i — thread userprefs.Harness through to the resolver so the
+	// diagnostic matches what printguard sees.
+	paths, _ := config.Resolve()
+	if prefs := userprefs.Load(paths); prefs.Harness != "" {
+		os.Setenv("DOP_HARNESS", userprefs.DOPHarnessEnvValue(prefs.Harness))
+	}
 	ctx := sessiontrust.Resolve()
 	fmt.Fprintln(os.Stderr, "dop trust context (what this shell looks like to the trust cache):")
 	fmt.Fprintf(os.Stderr, "  kind:        %s\n", ctx.Kind)

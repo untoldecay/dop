@@ -30,6 +30,82 @@ type Prefs struct {
 	// supported choices in the TUI settings view: 15 / 30 / 60.
 	// 0 (unset in YAML) → use default.
 	ApprovalPopupTimeoutSeconds int `yaml:"approval_popup_timeout_seconds,omitempty"`
+	// Harness — rc7i. Which AI coding harness the operator primarily
+	// uses, so DOP's trust-context cache can consult the right session
+	// env var without an explicit DOP_INFER_HARNESS_SESSION=1 opt-in.
+	// Supported choices: HarnessNone / HarnessClaudeCode / HarnessCodex /
+	// HarnessOpencode / HarnessManual / HarnessAny. See HarnessChoices.
+	Harness string `yaml:"harness,omitempty"`
+}
+
+// Harness choices. HarnessManual means "my harness doesn't expose a
+// session id env var — I'll export DOP_SESSION_ID myself" (Cursor,
+// Zed, aider, custom shells). HarnessAny tries all recognized adapters
+// in Claude → Codex → opencode order.
+const (
+	HarnessNone       = ""
+	HarnessClaudeCode = "claude-code"
+	HarnessCodex      = "codex"
+	HarnessOpencode   = "opencode"
+	HarnessManual     = "manual"
+	HarnessAny        = "any"
+)
+
+// HarnessChoices lists the values the TUI settings cycler offers.
+// Order mirrors adoption: Claude Code first since it's the most
+// common; "none" last as the opt-out.
+var HarnessChoices = []string{
+	HarnessClaudeCode,
+	HarnessCodex,
+	HarnessOpencode,
+	HarnessManual,
+	HarnessAny,
+	HarnessNone,
+}
+
+// HarnessLabel returns the operator-facing short label for a harness
+// choice (used by the TUI settings view).
+func HarnessLabel(h string) string {
+	switch h {
+	case HarnessClaudeCode:
+		return "Claude Code"
+	case HarnessCodex:
+		return "Codex CLI"
+	case HarnessOpencode:
+		return "opencode"
+	case HarnessManual:
+		return "manual (set DOP_SESSION_ID yourself)"
+	case HarnessAny:
+		return "any (try all recognized adapters)"
+	case HarnessNone:
+		return "none / skip"
+	default:
+		return "unknown"
+	}
+}
+
+// CycleHarness returns the next supported choice, wrapping around.
+// Unknown current → HarnessClaudeCode (sensible default for new picks).
+func CycleHarness(current string) string {
+	for i, c := range HarnessChoices {
+		if current == c {
+			return HarnessChoices[(i+1)%len(HarnessChoices)]
+		}
+	}
+	return HarnessClaudeCode
+}
+
+// DOPHarnessEnvValue returns the DOP_HARNESS value that corresponds
+// to this pref — the thing to pass to the sessiontrust resolver via
+// os.Setenv. For HarnessManual and HarnessNone this returns "none"
+// since the resolver should not auto-consult any harness var.
+func DOPHarnessEnvValue(h string) string {
+	switch h {
+	case HarnessClaudeCode, HarnessCodex, HarnessOpencode, HarnessAny:
+		return h
+	default:
+		return "none"
+	}
 }
 
 // Supported timeout choices (also what the TUI settings cycler offers).
