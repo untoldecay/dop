@@ -945,7 +945,16 @@ func requireAdminSessionOrUnlock(paths *config.Paths, titleHint string) (*admin.
 	}
 	c, err := autoUnlockPrompt(paths, title, "Enter admin passphrase to unlock the session.")
 	if err != nil {
-		if errors.Is(err, ErrAutoUnlockUnsupported) || errors.Is(err, ErrAutoUnlockCanceled) {
+		// Operator cancelled → generic error (they said no).
+		if errors.Is(err, ErrAutoUnlockCanceled) {
+			return nil, fmt.Errorf("no active admin session — run `dop admin login` first")
+		}
+		// Dialog unavailable → surface the specific reason to stderr so
+		// operators debugging "why didn't the dialog pop" see the actual
+		// cause (no Aqua session, wrong console user, osascript missing,
+		// etc.) instead of just the generic fallback. rc6k fix.
+		if errors.Is(err, ErrAutoUnlockUnsupported) {
+			fmt.Fprintf(os.Stderr, "dop: auto-unlock skipped: %v\n", err)
 			return nil, fmt.Errorf("no active admin session — run `dop admin login` first")
 		}
 		return nil, err
