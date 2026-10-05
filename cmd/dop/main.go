@@ -39,7 +39,9 @@ usage:
   dop admin set-approval                         (re)set the approval passphrase
   dop admin join <VAULT-URL> <PIN>               join a vault as a new admin device (v1.9)
   dop admin reset [--force]                      wipe local DOP state (v1.9.2)
-  dop team invite --name <label>                 open an admin invite (v1.9)
+  dop team invite --name <label>                 open an admin invite (rc7o: stages + exits; approve later)
+  dop team approve-invite <id>                   complete a pending invite after the teammate joined (rc7o)
+  dop team cancel-invite <id>                    delete a pending invite from the vault (rc7m)
   dop init --vault <url|path>                    attach vault (admin-required for first attach)
   dop token issue --grants CSV --name L [flags]  mint a capability + bearer (admin-required)
   dop token list                                 list capabilities (admin-required)
