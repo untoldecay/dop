@@ -53,14 +53,12 @@ func useGuidance(harness, subject string, portable bool, handoff string) []strin
 	var g []string
 	if harness == userprefs.HarnessClaudeCode {
 		if !skillInstalled() {
-			g = append(g, "install the DOP skill once: dop skill install", "then in Claude Code: /dop-use "+subject+" <task>")
-		} else {
-			g = append(g, "in Claude Code: /dop-use "+subject+" <task>")
+			g = append(g, "install the DOP skill once: dop skill install")
 		}
-	} else {
-		g = append(g, `in your shell before running the agent: eval "$(dop use `+subject+`)"`)
+		g = append(g, "in Claude Code: /dop-use "+subject+" <task>")
 	}
-	g = append(g, "dop use "+subject+" works from any of your shells")
+	// the eval line is always there, whatever the harness: it works from any shell
+	g = append(g, `in any shell: eval "$(dop use `+subject+`)"`)
 	for i := range g {
 		g[i] = ansi.Truncate(g[i], 76, "…")
 	}
