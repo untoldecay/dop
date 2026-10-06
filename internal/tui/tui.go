@@ -328,6 +328,9 @@ func (m *rootModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = sz.Width, sz.Height
 	case guiUnlockResultMsg:
+		if m.child != nil && m.pendingUnlockFn == nil {
+			break // a view's sessionGuard save
+		}
 		// rc7h — session-guard result handler. On success refresh state
 		// so the daemon's new session is visible, then invoke the stashed
 		// leaf fn. On failure print the specific error to stderr (so it
@@ -447,6 +450,45 @@ func runGUIUnlock() tea.Cmd {
 		}
 		return guiUnlockResultMsg{success: true}
 	}
+}
+
+// lockedNote is a view's status line while the GUI unlock is open.
+const lockedNote = "admin session locked, unlock prompt opening…"
+
+// sessionGuard re-checks the admin session right before a view shells
+// out to the CLI for a mutation (embedded in wiz and the list views).
+type sessionGuard struct {
+	retry tea.Msg // the key that started the save, replayed after the unlock
+	errp  *string // the view's status-line error
+}
+
+// locked is nil when the session is unlocked: run the save now. When it
+// is locked the view stays where it is with lockedNote on its status
+// line and the GUI unlock opens; once that succeeds key is replayed, so
+// the save runs again from the same place.
+func (g *sessionGuard) locked(key tea.Msg, errp *string) tea.Cmd {
+	paths, err := config.Resolve()
+	if err != nil || admin.NewClient(admin.SockPath(paths)).SessionActive() {
+		return nil
+	}
+	g.retry, g.errp, *errp = key, errp, lockedNote
+	return runGUIUnlock()
+}
+
+// unlocked consumes the GUI unlock result of a locked() save.
+func (g *sessionGuard) unlocked(msg tea.Msg) (bool, tea.Cmd) {
+	r, ok := msg.(guiUnlockResultMsg)
+	if !ok || g.errp == nil {
+		return false, nil
+	}
+	errp, key := g.errp, g.retry
+	*g = sessionGuard{}
+	if !r.success {
+		*errp = "Admin session locked: " + displayOr(r.stderr, "unlock failed")
+		return true, nil
+	}
+	*errp = ""
+	return true, func() tea.Msg { return key }
 }
 
 // updateGroupsMenu handles key routing for the v1.13.0-rc19 hierarchical
@@ -626,22 +668,25 @@ func (m *rootModel) stateLine() string {
 	case m.install == installAdmin && m.session == sessionLocked:
 		return "locked"
 	case m.install == installAdmin && m.session == sessionUnlocked:
-		if m.adminClient != nil {
-			if st, _ := m.adminClient.Status(); st != nil {
-				return fmt.Sprintf("unlocked · %s idle", remainingHuman(st.IdleTTLSeconds, st.LastActivityUnix))
-			}
+		if m.adminClient == nil {
+			return "unlocked"
 		}
-		return "unlocked"
+		st, _ := m.adminClient.Status()
+		if st == nil || !st.Unlocked {
+			return "locked" // expired since the last refreshState
+		}
+		left := min(timeLeft(st.IdleTTLSeconds, st.LastActivityUnix), timeLeft(st.AbsTTLSeconds, st.StartedAtUnix))
+		if left > 10*365*24*time.Hour {
+			return "unlocked · until logout" // ponytail: idle never sets both TTLs to 100 years
+		}
+		return "unlocked · " + shortDuration(left) + " left"
 	}
 	return ""
 }
 
-// remainingHuman is a small helper used by the state line (mirrors what
-// views.go's `remaining` does — kept separate here to avoid circular type
-// concerns).
-func remainingHuman(ttl int64, ref int64) string {
-	r := time.Until(time.Unix(ref, 0).Add(time.Duration(ttl) * time.Second))
-	return shortDuration(max(r, 0))
+// timeLeft is how long until ref + ttl seconds, never negative.
+func timeLeft(ttl int64, ref int64) time.Duration {
+	return max(time.Until(time.Unix(ref, 0).Add(time.Duration(ttl)*time.Second)), 0)
 }
 
 // shortDuration: 45s, 30m, 1h30m, 2h, 7d — no seconds from 1m up, whole

@@ -66,7 +66,7 @@ func (v *statusView) View() string {
 
 // remaining is the time left as 30m / 7h50m / 45s.
 func remaining(ttl int64, refUnix int64) string {
-	return shortDuration(max(time.Until(time.Unix(refUnix, 0).Add(time.Duration(ttl)*time.Second)), 0))
+	return shortDuration(timeLeft(ttl, refUnix))
 }
 
 // expiresDisplay renders a token ExpiresAt for the TUI. The CLI uses the
@@ -551,6 +551,9 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (v *issueView) advance() (tea.Model, tea.Cmd) {
 	switch v.step {
 	case issueStepReview:
+		if cmd := v.locked(tea.KeyMsg{Type: tea.KeyEnter}, &v.err); cmd != nil {
+			return v, cmd
+		}
 		v.issuing, v.err = true, ""
 		return v, tea.Batch(v.spinStart(), v.issue())
 	case issueStepGrants:
@@ -855,6 +858,7 @@ func loadGrantsForList(client *admin.Client, paths *config.Paths) ([]string, map
 // ---------- List ----------
 
 type listView struct {
+	sessionGuard
 	client       *admin.Client
 	paths        *config.Paths
 	loaded       bool
@@ -1057,6 +1061,9 @@ type listAction struct {
 }
 
 func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.unlocked(msg); ok {
+		return v, cmd
+	}
 	switch mm := msg.(type) {
 	case tea.WindowSizeMsg:
 		v.width, v.height = mm.Width, mm.Height
@@ -1241,6 +1248,9 @@ func (v *listView) runAction(a listAction) (tea.Model, tea.Cmd) {
 		v.pendingAction = "revoke"
 	case "s":
 		// reseal doesn't need confirmation (non-destructive).
+		if cmd := v.locked(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")}, &v.err); cmd != nil {
+			return v, cmd
+		}
 		v.mode = listModeRun
 		v.pendingAction = "reseal"
 		return v, v.doReseal()
@@ -1382,6 +1392,9 @@ func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 				v.err = "The approval passphrase is required for protected grants."
 				return v, nil
 			}
+			if cmd := v.locked(mm, &v.err); cmd != nil {
+				return v, cmd
+			}
 			v.err = ""
 			v.mode = listModeRun
 			return v, v.doGrantMutation()
@@ -1407,6 +1420,9 @@ func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.grantPickPassPhase = true
 			v.grantPickPassBuf.Reset()
 			return v, nil
+		}
+		if cmd := v.locked(mm, &v.err); cmd != nil {
+			return v, cmd
 		}
 		v.mode = listModeRun
 		return v, v.doGrantMutation()
@@ -1465,6 +1481,9 @@ func (v *listView) updateRepinMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		stepCursor(&v.repinTTLCursor, len(repinTTLPresets), 1)
 	case "enter":
+		if cmd := v.locked(mm, &v.err); cmd != nil {
+			return v, cmd
+		}
 		v.mode = listModeRun
 		return v, v.doRepin()
 	}
@@ -1556,6 +1575,9 @@ func (v *listView) updateConfirmMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if needPass && v.grantPickPassBuf.Len() == 0 {
 			v.err = "The approval passphrase is required for protected grants."
 			return v, nil
+		}
+		if cmd := v.locked(mm, &v.err); cmd != nil {
+			return v, cmd
 		}
 		v.mode, v.err = listModeRun, ""
 		if v.pendingAction == "revoke" {
@@ -1844,9 +1866,18 @@ func (v *listView) viewDetail(width, height int) string {
 	if exp != "never" {
 		exp = relDate(c.ExpiresAt) + " · " + exp
 	}
-	bind := "none"
+	// A portable bearer skips the binding check in its issuing admin's
+	// shells (skipBindingAsPortableOwner); it can still be PIN-bound for
+	// an agent.
+	bind, portableNote := "none", c.PortableWrapped != ""
+	if portableNote {
+		bind = "none · portable bearer, no PIN or claim needed"
+	}
 	if c.Binding != nil && c.Binding.Kind == vault.BindingKindPIN && c.Binding.Pubkey == "" {
 		bind = "PIN · unclaimed, the agent has not run dop claim"
+		if portableNote {
+			bind = "PIN · unclaimed · portable, its issuer needs no claim"
+		}
 	} else if b := binding(c.Binding); b != "" {
 		bind = strings.Replace(b, ", ", " · ", 1)
 		if !c.Binding.ClaimedAt.IsZero() {

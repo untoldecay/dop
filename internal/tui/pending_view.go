@@ -146,6 +146,9 @@ func (v *pendingView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case pendingStepReject:
 			switch k {
 			case "enter", "y":
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
 				v.step = pendingStepRun
 				return v, tea.Batch(v.spinStart(), v.run(true))
 			case "esc", "n":
@@ -159,6 +162,9 @@ func (v *pendingView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if v.pass.Value() == "" {
 					v.err = "Approval passphrase is required"
 					return v, nil
+				}
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
 				}
 				v.step = pendingStepRun
 				return v, tea.Batch(v.spinStart(), v.run(false))

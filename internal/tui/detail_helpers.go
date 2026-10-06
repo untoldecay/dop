@@ -171,12 +171,16 @@ type wiz struct {
 	width, height int
 	help          bool
 	spin          spinner.Model
+	sessionGuard
 }
 
 // wizMsg handles size, spinner ticks and the ? toggle. typing: the
 // focused input holds text, so ? is a character there, not help.
 // Reports whether msg was consumed.
 func (w *wiz) wizMsg(msg tea.Msg, typing bool) (bool, tea.Cmd) {
+	if ok, cmd := w.unlocked(msg); ok {
+		return true, cmd
+	}
 	switch mm := msg.(type) {
 	case tea.WindowSizeMsg:
 		w.width, w.height = mm.Width, mm.Height

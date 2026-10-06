@@ -273,6 +273,10 @@ func performAdminLogin(paths *config.Paths, passphrase string) error {
 	// default is" so pre-rc7l configs continue to behave identically.
 	if prefs := userprefs.Load(paths); prefs.AdminIdleTTLSeconds != 0 {
 		cmd.Env = append(cmd.Env, "DOP_ADMIN_TTL="+prefs.EffectiveAdminIdleTTL().String())
+		// Idle never: lift the absolute cap too, so only logout ends it.
+		if prefs.AdminIdleTTLSeconds == userprefs.AdminIdleTTLNever {
+			cmd.Env = append(cmd.Env, "DOP_ADMIN_MAX_TTL="+prefs.EffectiveAdminIdleTTL().String())
+		}
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -346,7 +350,7 @@ func runAdminGUIUnlock(args []string) int {
 func runAdminLogout(args []string) int {
 	paths, _ := config.Resolve()
 	client := admin.NewClient(admin.SockPath(paths))
-	if !client.SessionActive() {
+	if _, err := client.Status(); err != nil { // stop a locked daemon too
 		fmt.Fprintln(os.Stderr, "dop admin logout: no active session")
 		return 0
 	}

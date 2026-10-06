@@ -128,6 +128,9 @@ func (v *revokeView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case 1:
 			switch k {
 			case "y", "Y", "enter":
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
 				v.step = 2
 				return v, tea.Batch(v.spinStart(), v.doRevoke())
 			case "n", "N":
@@ -279,6 +282,9 @@ func (v *teamAddView) advance() (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 	case teamAddStepReview:
+		if cmd := v.locked(tea.KeyMsg{Type: tea.KeyEnter}, &v.err); cmd != nil {
+			return v, cmd
+		}
 		v.err, v.step = "", teamAddStepRun
 		return v, tea.Batch(v.spinStart(), v.save())
 	}
@@ -464,6 +470,9 @@ func (v *teamListView) handleKey(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case teamModeConfirm:
 		switch mm.String() {
 		case "y", "enter":
+			if cmd := v.locked(mm, &v.actionErr); cmd != nil {
+				return v, cmd
+			}
 			v.mode = teamModeRunning
 			return v, tea.Batch(v.spinStart(), v.cancelInvite(v.pendingDeleteID))
 		case "n", "esc":
@@ -481,6 +490,9 @@ func (v *teamListView) handleKey(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if v.pass.Value() == "" {
 				v.actionErr = "Approval passphrase is required"
 				return v, nil
+			}
+			if cmd := v.locked(mm, &v.actionErr); cmd != nil {
+				return v, cmd
 			}
 			v.mode = teamModeApproveRun
 			return v, tea.Batch(v.spinStart(), v.approveInvite(v.pendingApproveID, v.pass.Value()))
@@ -802,6 +814,9 @@ func (v *teamRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case 1:
 			switch k {
 			case "y", "Y", "enter":
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
 				v.step = 2
 				return v, tea.Batch(v.spinStart(), v.doRemove())
 			case "n", "N":
