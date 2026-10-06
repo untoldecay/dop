@@ -2,13 +2,13 @@
 
 **1Password Teams, but every member is an AI agent and the credentials are scoped tokens.**
 
-Current release: **v1.14.1** ([changelog](https://github.com/untoldecay/dop/releases)).
+Current release: **v1.16.0** ([changelog](https://github.com/untoldecay/dop/releases)).
 
 ## In practice
 
 Alice adds Notion and Linear to the shared vault; Bob adds GitHub. Any admin can now grant any agent — Alice's research-agent, Bob's deploy-agent — a slice of any of those credentials, and revoke it anytime. **Raw tokens stay in the vault; scopes move.**
 
-A **scope** is a named permission on an integration — `notion.read`, `github.write` (DOP calls these *grants* in the CLI). The agent uses it by running `dop exec --agent-name X -- <command>`: DOP injects the scoped env into that one child process — the env values never land on disk, and every call is appended to the audit log.
+Three words cover the model. A **credential** is a raw secret stored in the vault under an integration (Notion's API key). A **grant** is a named slice of it that agents can be given — `notion.read`, `github.write`. A **bearer** is what an agent actually holds: a token minted from one or more grants, bound to that agent's key. The agent uses it by running `dop exec --agent-name X -- <command>`: DOP injects the scoped env into that one child process — the env values never land on disk, and every call is appended to the audit log.
 
 ## How it works
 
@@ -32,13 +32,15 @@ brew install git sops cloudflared
 curl -fsSL https://raw.githubusercontent.com/untoldecay/dop/main/scripts/install.sh | bash
 ```
 
-Then run `dop` to launch the TUI. For every other command, see the [CLI reference](docs/07-cli-reference.md) below.
+Then run `dop` to launch the TUI. On any screen, `?` shows every key and `esc` goes back one level; that is the whole learning curve. For every other command, see the [CLI reference](docs/07-cli-reference.md) below.
 
 **Keeping it updated:** after your first install, run `dop update` (checks GitHub, verifies SHA256, atomic-replaces the binary). `More › Update` in the TUI is the same thing with a confirmation screen. Switch to pre-releases with `dop update --channel dev`. Last 3 versions kept at `~/.local/share/dop/old-versions/`; roll back with `dop update --rollback`.
 
 ## Working with AI harnesses
 
 DOP ships a Claude Code skill + `/dop-use` slash command via `dop skill install`. The install writes BOTH loose files (`~/.claude/skills/dop/SKILL.md`, `~/.claude/commands/dop-use.md`) AND a local-marketplace plugin bundle (`~/.claude-local-plugins/dop-tools/`) auto-registered via `claude plugin install` — covers plugin-only Claude Code builds like Orca.
+
+**Your own agents.** Issue a bearer as *portable* and `dop use <subject>` hands it to any of your shells (`eval "$(dop use <subject>)"`, or `/dop-use <subject> <task>` inside Claude Code). The issue screen tells you which one applies.
 
 **Burst-use friction.** DOP caches operator approval across repeat `dop use` calls in the same session. On first run, pick your harness in the TUI setup wizard (or `More › Settings › Harness`): Claude Code / Codex CLI / opencode have built-in adapters that read the harness's own session env var; Cursor / Zed / aider / custom shells need you to `export DOP_SESSION_ID=$(uuidgen)` in your shell profile. One approval per conversation; auto-expires after 30min idle.
 
