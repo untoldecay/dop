@@ -38,6 +38,7 @@ import (
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/pendingclaim"
+	"github.com/fray/dop/internal/userprefs"
 )
 
 const walkPubkey = "9f2c4e6a8b0d1f3e5a7c9e1b3d5f7a9c2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a1b"
@@ -147,6 +148,18 @@ capabilities:
       key_type: p256
       pubkey: 04d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4
       claimed_at: 2026-09-20T08:05:00Z
+  c3d4e5f6a7b8c9d0e1f2a3b4:
+    subject: finance-agent
+    grants: [acme-billing-reconciliation-readonly-reporting-grant-for-finance-agents]
+    created_at: 2026-10-02T09:00:00Z
+    expires_at: 2026-11-01T09:00:00Z
+    generation: 1
+    lookup_id: d4e5f60718293a4b5c6d7e8f
+    issued_by: ` + walkPubkey + `
+    status: active
+    binding:
+      kind: pin
+      pin_expiry: 2026-10-07T09:00:00Z
   c2c3d4e5f6a7b8c9d0e1f2a3:
     subject: old-notion-agent
     grants: [notion-write]
@@ -1201,21 +1214,36 @@ func walkBearers(w *walker) {
 	w.keys("approve-me-please", "enter")
 	w.send("listActionMsg", listActionMsg{})
 	w.dump("bearer-portable-off-done", "Bearers · portable copy removed")
-	// Portable: make portable (codex-ci-runner has none).
+	// Portable: make portable re-issues. codex-ci-runner is claimed: rotated in place.
 	open()
 	w.keys("down", "enter", "down", "enter")
-	w.dump("bearer-portable-on-paste", "Bearers · make portable · paste bearer", "key")
-	w.keys("tok_7Hq2xWalkFixtureBearer0c1d2e3f", "enter")
-	w.dump("bearer-portable-on-pass", "Bearers · make portable · passphrase")
-	w.keys("approve-me-please", "enter")
-	w.dump("bearer-portable-on-review", "Bearers · make portable · review")
+	w.dump("bearer-portable-on-confirm", "Bearers · re-issue as portable · claimed", "key")
 	w.keys("enter")
-	w.dump("bearer-portable-on-running", "Bearers · storing portable copy")
-	w.send("listActionMsg", listActionMsg{err: "dop token portable: bearer does not match this subject"})
-	w.dump("bearer-portable-on-mismatch", "Bearers · make portable · bearer mismatch", "edge")
-	w.keys("tok_7Hq2xWalkFixtureBearer0c1d2e3f", "enter", "approve-me-please", "enter", "enter")
-	w.send("listActionMsg", listActionMsg{})
-	w.dump("bearer-portable-on-done", "Bearers · bearer is portable")
+	w.dump("bearer-portable-on-running", "Bearers · re-issuing")
+	w.send("issueResultMsg", issueResultMsg{err: "dop token portable: save vault: vault push rejected (non-fast-forward)"})
+	w.dump("bearer-portable-on-error", "Bearers · re-issue failed", "edge")
+	w.keys("enter")
+	w.send("issueResultMsg", issueResultMsg{})
+	prefs := LoadPrefs(w.paths)
+	for _, h := range []string{userprefs.HarnessClaudeCode, userprefs.HarnessCodex} {
+		p := prefs
+		p.Harness = h
+		must(w.t, SavePrefs(w.paths, p))
+		w.dump("bearer-portable-on-done-"+h, "Bearers · bearer is portable · "+userprefs.HarnessLabel(h))
+	}
+	// finance-agent is unclaimed and holds a protected grant: passphrase,
+	// then a new bearer + PIN shown once.
+	open()
+	w.keys("down", "down", "enter", "down", "down", "enter")
+	w.dump("bearer-portable-on-unclaimed-confirm", "Bearers · re-issue as portable · unclaimed")
+	w.keys("enter")
+	w.dump("bearer-portable-on-pass", "Bearers · re-issue as portable · passphrase (protected grant)")
+	w.keys("approve-me-please", "enter")
+	w.send("issueResultMsg", issueResultMsg{bearer: "tok_3Rt8vWalkFixtureReissued5e6f7a8b", pin: "QR-ST-UV"})
+	w.dump("bearer-portable-on-reissued", "Bearers · re-issued, bearer + PIN shown once", "key")
+	w.keys("esc")
+	w.dump("bearer-portable-on-reissued-esc-armed", "Bearers · re-issued · first esc arms leave", "edge")
+	must(w.t, SavePrefs(w.paths, prefs))
 	act()
 	w.keys("down", "down", "down", "enter")
 	w.dump("bearer-revoke-confirm", "Bearers · revoke confirm", "key")

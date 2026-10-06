@@ -685,19 +685,24 @@ func (v *issueView) issue() tea.Cmd {
 		if err := cmd.Run(); err != nil {
 			return issueResultMsg{err: strings.TrimSpace(stderr.String())}
 		}
-		// stdout: bearer on line 1, PIN on line 2 (when --bind is default).
-		bearer, pin := "", ""
-		for _, ln := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
-			ln = strings.TrimSpace(ln)
-			switch {
-			case strings.HasPrefix(ln, "tok_"):
-				bearer = ln
-			case looksLikePIN(ln):
-				pin = ln
-			}
-		}
-		return issueResultMsg{bearer: bearer, pin: pin}
+		return parseIssueOut(stdout.String())
 	}
+}
+
+// parseIssueOut reads dop token issue's stdout (also token portable --on
+// for an unclaimed bearer): bearer on line 1, PIN on line 2 when PIN-bound.
+func parseIssueOut(stdout string) issueResultMsg {
+	var r issueResultMsg
+	for _, ln := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		ln = strings.TrimSpace(ln)
+		switch {
+		case strings.HasPrefix(ln, "tok_"):
+			r.bearer = ln
+		case looksLikePIN(ln):
+			r.pin = ln
+		}
+	}
+	return r
 }
 
 // looksLikePIN matches the `XX-XX-XX` alpha PIN format.
@@ -718,32 +723,17 @@ func looksLikePIN(s string) bool {
 
 // handoff is the clipboard text for the agent (contract 13 shape).
 func (v *issueView) handoff() string {
-	if v.pin == "" {
-		return v.bearer
-	}
-	return buildHandoffText(v.bearer, v.pin, v.prefs.AllowFileKeys)
+	return bearerHandoff(v.bearer, v.pin, v.prefs.AllowFileKeys)
 }
 
 // bearerKey handles the one-time bearer screen: a stray key must not
 // lose the bearer. enter leaves, esc needs a second press, c re-copies,
 // anything else is ignored (and disarms esc).
 func (v *issueView) bearerKey(k string) (tea.Model, tea.Cmd) {
-	switch k {
-	case "enter":
-		v.done = true
-	case "esc", "ctrl+c":
-		if !v.leaveArmed {
-			v.leaveArmed = true
-			return v, nil
-		}
-		v.done = true
-	case "c":
-		v.copied = clipboardCopy(v.handoff())
-		fallthrough
-	default:
-		v.leaveArmed = false
+	if !onceKey(k, &v.leaveArmed, &v.copied, v.handoff()) {
 		return v, nil
 	}
+	v.done = true
 	v.flash = "bearer issued · shown once, make sure it was copied"
 	return v, nil
 }
@@ -753,26 +743,16 @@ func (v *issueView) View() string {
 	subject := strings.TrimSpace(v.subject.Value())
 	switch {
 	case v.bearer != "":
-		rows := [][2]string{{"subject", subject}, {"bearer", v.bearer}}
 		cmd := "export DOP_TOKEN=" + v.bearer
 		if v.pin != "" {
-			rows = append(rows, [2]string{"PIN", v.pin})
 			h := strings.Split(v.handoff(), "\n")
 			cmd = "run " + strings.TrimSpace(h[len(h)-1])
 		}
-		body := append(strings.Split(strings.TrimRight(kv(rows...), "\n"), "\n"), "", mutedSt.Render("  "+cmd))
-		if v.prefs.AllowFileKeys && v.pin != "" {
-			body = append(body, mutedSt.Render("  "+displayOr(v.resealFlash, "Auto-reseal runs once the agent claims.")))
+		after := useGuidance(v.prefs.Harness, subject, v.portable(), cmd)
+		if v.prefs.AllowFileKeys && v.pin != "" && !v.portable() {
+			after = append(after, displayOr(v.resealFlash, "Auto-reseal runs once the agent claims."))
 		}
-		st := status{}
-		switch {
-		case v.leaveArmed:
-			st.setHint("press esc again to leave, the bearer will not be shown again")
-		case v.copied:
-			st.setFlash("copied to clipboard")
-		}
-		return frame(v.width, v.height, "✓ Bearer issued", nil, "shown once, c copies again", body, st.String(),
-			footer(v.width, hint("enter", "done"), hint("c", "copy")))
+		return onceScreen(v.width, v.height, "✓ Bearer issued", subject, v.bearer, v.pin, after, v.leaveArmed, v.copied)
 	case v.issuing:
 		return v.running(title, "Issuing a bearer for "+subject)
 	case v.step == issueStepReview:
@@ -899,11 +879,15 @@ type listView struct {
 	repinNewPin     string
 	repinNewExpires string
 
-	// Portable toggle: on = bearer paste (0), passphrase (1), review (2);
-	// off = confirm (0), passphrase (1).
+	// Portable toggle: confirm (0), passphrase (1, off always, on only
+	// for protected grants). on re-issues: an unclaimed bearer comes back
+	// as a new bearer + PIN, shown once.
 	portStep   int
-	portBearer textField
 	portPass   textField
+	portNew    string
+	portPin    string
+	portArmed  bool // first esc on the shown-once screen
+	portCopied bool
 
 	adminNames map[string]string // ed25519 pubkey → admin name, for "by alex"
 	doneSubj   string            // subject the done screen reports on
@@ -1058,7 +1042,7 @@ func (v *listView) currentActions() []listAction {
 		acts = append(acts, listAction{label: "Repin", key: "p", desc: "new PIN for a bearer the agent has not claimed yet"})
 	}
 	if c.PortableWrapped == "" {
-		acts = append(acts, listAction{label: "Portable: make portable", key: "o", desc: "store a copy so dop use works from your shells"})
+		acts = append(acts, listAction{label: "Portable: make portable", key: "o", desc: "re-issue it so dop use works from your shells"})
 	} else {
 		acts = append(acts, listAction{label: "Portable: remove copy", key: "o", desc: "dop use stops working for this bearer"})
 	}
@@ -1090,12 +1074,7 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.cursor = max(min(v.cursor, len(v.visible())-1), 0)
 	case listActionMsg:
 		if mm.err != "" && v.mode == listModeRun && strings.HasPrefix(v.pendingAction, "portable") {
-			// Errors land back in the wizard: a mismatch on the paste, the rest on the passphrase.
-			v.mode, v.portStep, v.err = listModePortable, 1, "Portable copy failed: "+cliErr(mm.err)
-			if strings.Contains(mm.err, "does not match") {
-				v.portStep, v.err = 0, "that bearer does not match "+v.doneSubj
-			}
-			v.portPass.Reset()
+			v.portableErr("Portable copy failed: " + cliErr(mm.err))
 			return v, nil
 		}
 		if mm.err != "" {
@@ -1107,6 +1086,18 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		v.doneNote = mm.flash
+		v.mode = listModeDone
+		return v, nil
+	case issueResultMsg: // portable --on
+		if mm.err != "" {
+			v.portableErr("Re-issue failed: " + cliErr(mm.err))
+			return v, nil
+		}
+		v.portNew, v.portPin, v.portArmed = mm.bearer, mm.pin, false
+		if v.portNew != "" {
+			// Copy once here, not in View (which repaints on every msg).
+			v.portCopied = clipboardCopy(v.portHandoff())
+		}
 		v.mode = listModeDone
 		return v, nil
 	case repinSuccessMsg:
@@ -1148,14 +1139,18 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				v.flash = "PIN copied to clipboard"
 				return v, nil
 			}
-			if mm.String() != "enter" {
+			if v.portNew != "" {
+				if !onceKey(mm.String(), &v.portArmed, &v.portCopied, v.portHandoff()) {
+					return v, nil
+				}
+			} else if mm.String() != "enter" {
 				return v, nil // done screens leave on enter only
 			}
-			v.mode = listModeList
-			if strings.HasPrefix(v.pendingAction, "portable") {
+			v.mode = listModeList // a re-issued bearer has a new record: back to the list
+			if v.pendingAction == "portable-off" {
 				v.mode = listModeAction // back to the Info tab, reloaded
 			}
-			v.pendingAction, v.doneNote, v.repinNewPin = "", "", ""
+			v.pendingAction, v.doneNote, v.repinNewPin, v.portNew, v.portPin = "", "", "", "", ""
 			return v, v.load
 		}
 	}
@@ -1291,7 +1286,6 @@ func (v *listView) runAction(a listAction) (tea.Model, tea.Cmd) {
 		if c := v.capabilities[v.selectedIndex()]; c.PortableWrapped != "" {
 			v.pendingAction = "portable-off"
 		}
-		v.portBearer.Reset()
 		v.portPass.Reset()
 	case "+":
 		// vault grants minus the ones already on this bearer.
@@ -1526,73 +1520,108 @@ func (v *listView) updateRepinMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 // updatePortableMode drives the portable wizard; esc steps back, then
 // to the detail.
 func (v *listView) updatePortableMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
-	on, k := v.pendingAction == "portable-on", mm.String()
-	if on && v.portStep == 2 && toggleHelp(&v.help, mm) {
-		return v, nil
-	}
+	k := mm.String()
 	if k == "esc" {
-		v.err, v.help = "", false
+		v.err = ""
 		if v.portStep == 0 {
 			v.mode, v.pendingAction = listModeAction, ""
-			v.portBearer.Reset()
 			v.portPass.Reset()
 		}
 		v.portStep = max(v.portStep-1, 0)
 		return v, nil
 	}
+	if v.portStep == 0 && (k == "y" || k == "Y") {
+		k = "enter"
+	}
 	if k != "enter" {
-		switch {
-		case on && v.portStep == 0:
-			passKey(&v.portBearer, mm)
-		case v.portStep == 1:
+		if v.portStep == 1 {
 			passKey(&v.portPass, mm)
-		case !on && (k == "y" || k == "Y"):
-			v.portStep = 1
 		}
 		v.err = ""
 		return v, nil
 	}
 	switch {
-	case on && v.portStep == 0 && strings.TrimSpace(v.portBearer.String()) == "":
-		v.err = "Paste the current bearer."
+	case v.portStep == 0 && v.portNeedsPass():
+		v.portStep, v.err = 1, ""
+		return v, nil
 	case v.portStep == 1 && v.portPass.Len() == 0:
 		v.err = "The approval passphrase is required."
-	case v.portStep == 0 || (on && v.portStep == 1):
-		v.portStep, v.err = v.portStep+1, ""
-	default:
-		if cmd := v.locked(mm, &v.err); cmd != nil {
-			return v, cmd
-		}
-		v.mode, v.err = listModeRun, ""
-		return v, v.doPortable()
+		return v, nil
 	}
-	return v, nil
+	if cmd := v.locked(mm, &v.err); cmd != nil {
+		return v, cmd
+	}
+	v.mode, v.err = listModeRun, ""
+	return v, v.doPortable()
 }
 
-// doPortable shells out to dop token portable; bearer and passphrase go
-// on stdin (one line each), never in argv.
+// portableErr puts a failed portable run back in the wizard, on the
+// passphrase when there is one.
+func (v *listView) portableErr(e string) {
+	v.mode, v.portStep, v.err = listModePortable, 0, e
+	if v.portNeedsPass() {
+		v.portStep = 1
+	}
+	v.portPass.Reset()
+}
+
+// portClaimed: the cursor bearer is bound to the agent's key, so make
+// portable rotates it in place (no new PIN).
+func (v *listView) portClaimed() bool {
+	i := v.selectedIndex()
+	return i >= 0 && v.capabilities[i].Binding != nil && v.capabilities[i].Binding.Pubkey != ""
+}
+
+// portNeedsPass: remove always asks the approval passphrase; make
+// portable only when the bearer holds a protected grant.
+func (v *listView) portNeedsPass() bool {
+	if v.pendingAction == "portable-off" {
+		return true
+	}
+	for _, g := range v.bearerGrants() {
+		if v.vgrants[g].Protected {
+			return true
+		}
+	}
+	return false
+}
+
+func (v *listView) portHandoff() string {
+	return bearerHandoff(v.portNew, v.portPin, LoadPrefs(v.paths).AllowFileKeys)
+}
+
+// doPortable shells out to dop token portable; the passphrase goes on
+// stdin, never in argv. --on answers with an issueResultMsg (bearer and
+// PIN when the bearer was re-issued unclaimed).
 func (v *listView) doPortable() tea.Cmd {
 	subject, on := v.doneSubj, v.pendingAction == "portable-on"
-	args := []string{"token", "portable", "--subject", subject, "--off", "--passphrase-stdin"}
-	stdin := v.portPass.String() + "\n"
+	args := []string{"token", "portable", "--subject", subject, "--off"}
 	if on {
 		args[4] = "--on"
-		args = append(args, "--token-stdin")
-		stdin = strings.TrimSpace(v.portBearer.String()) + "\n" + stdin
 	}
-	v.portBearer.Reset()
+	stdin := ""
+	if v.portNeedsPass() {
+		args = append(args, "--passphrase-stdin")
+		stdin = v.portPass.String() + "\n"
+	}
 	v.portPass.Reset()
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, args...)
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		cmd.Stdin = strings.NewReader(stdin)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		switch {
+		case !on && err != nil:
 			return listActionMsg{err: strings.TrimSpace(stderr.String())}
+		case !on:
+			return listActionMsg{}
+		case err != nil:
+			return issueResultMsg{err: strings.TrimSpace(stderr.String())}
 		}
-		return listActionMsg{}
+		return parseIssueOut(stdout.String())
 	}
 }
 
@@ -2056,7 +2085,7 @@ func (v *listView) viewConfirm(width, height int) string {
 func (v *listView) viewRun(width, height int) string {
 	verb := map[string]string{"revoke": "Revoking %s…", "reseal": "Resealing the env of %s…",
 		"add": "Adding grants to %s…", "remove": "Removing grants from %s…", "repin": "Repinning %s…",
-		"portable-on": "Storing portable copy…", "portable-off": "Removing portable copy…"}[v.pendingAction]
+		"portable-on": "Re-issuing %s…", "portable-off": "Removing portable copy…"}[v.pendingAction]
 	if verb == "" {
 		verb = "Working on %s…"
 	}
@@ -2085,7 +2114,11 @@ func (v *listView) viewDone(width, height int) string {
 		rows = append(rows, [2]string{"grants", v.doneNote})
 		note = "Env resealed; the agent picks it up on its next exec."
 	case "portable-on":
-		title, note = "✓ Bearer is portable", "dop use "+v.doneSubj+" works from any of your shells"
+		g := useGuidance(LoadPrefs(v.paths).Harness, v.doneSubj, true, "")
+		if v.portNew != "" {
+			return onceScreen(width, height, "✓ Bearer re-issued", v.doneSubj, v.portNew, v.portPin, g, v.portArmed, v.portCopied)
+		}
+		title, note = "✓ Bearer is portable", strings.Join(g, "\n")
 	case "portable-off":
 		title, note = "✓ Portable copy removed", "dop use no longer works for this bearer."
 	default: // repin
@@ -2136,30 +2169,33 @@ func (v *listView) viewRepin(width, height int) string {
 	return frame(width, height, "Repin "+v.doneSubj, nil, "", body, status{err: v.err}.String(), foot)
 }
 
-// viewPortable is the portable wizard: make portable (paste, passphrase,
-// review) or remove copy (confirm, passphrase).
+// viewPortable is the portable wizard: confirm, then the approval
+// passphrase when one is needed.
 func (v *listView) viewPortable(width, height int) string {
 	w := wiz{width: width, height: height, help: v.help}
-	field := func(f *textField) []string {
-		before, after := f.SplitMasked("•")
-		return []string{focusSt.Render("› ") + before + focusSt.Render("▎") + after}
-	}
-	if v.pendingAction == "portable-off" {
-		title := "Remove the portable copy of " + v.doneSubj + "?"
-		if v.portStep == 0 {
-			return w.confirmScreen(title, []string{mutedSt.Render("  dop use will stop working for this bearer")}, "remove", v.err)
+	title, verb := "Remove the portable copy of "+v.doneSubj+"?", "remove"
+	lines := []string{"dop use will stop working for this bearer"}
+	if v.pendingAction == "portable-on" {
+		title, verb = "Re-issue "+v.doneSubj+" as portable?", "re-issue"
+		lines = []string{"a new bearer and PIN are shown once, the old ones stop working"}
+		if v.portClaimed() {
+			lines = []string{"the agent keeps working, it picks up the new bearer on its next run"}
 		}
-		return w.screen(title, "", "Approval passphrase", field(&v.portPass), "", v.err, "", wizKeys("remove"))
+		lines = append(lines, "same grants and expiry; dop use then works from your shells")
 	}
-	title := "Make " + v.doneSubj + " portable"
-	switch v.portStep {
-	case 0:
-		return w.screen(title, counter(0, 2), "Paste the current bearer", field(&v.portBearer), "must match this bearer's record", v.err, "", wizKeys("next"))
-	case 1:
-		return w.screen(title, counter(1, 2), "Approval passphrase", field(&v.portPass), "", v.err, "", wizKeys("next"))
+	if v.portStep == 0 {
+		for i, l := range lines {
+			lines[i] = mutedSt.Render("  " + l)
+		}
+		return w.confirmScreen(title, lines, verb, v.err)
 	}
-	return w.review(title, "Store a portable copy of "+v.doneSubj+"?",
-		[][2]string{{"bearer", v.doneSubj}, {"copy", "wrapped to your admin age key"}}, "store", false, v.err)
+	helper := ""
+	if v.pendingAction == "portable-on" {
+		helper = "The bearer holds protected grants."
+	}
+	before, after := v.portPass.SplitMasked("•")
+	return w.screen(title, "", "Approval passphrase", []string{focusSt.Render("› ") + before + focusSt.Render("▎") + after},
+		helper, v.err, "", wizKeys(verb))
 }
 
 // viewGrantPick is the add-grant multi-select picker, plus the approval
