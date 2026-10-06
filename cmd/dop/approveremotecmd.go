@@ -169,7 +169,7 @@ func runApproveRemote(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop approve-remote: sign: %v\n", err)
 		return 1
 	}
-	v.Capabilities[match.CapabilityID] = capability2VaultCapability(rec)
+	putCapability(v, match.CapabilityID, rec)
 
 	// Swap the bundle into place.
 	finalBundle := filepath.Join(paths.Vault, "capabilities", match.LookupID+".bundle")

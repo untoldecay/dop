@@ -58,6 +58,9 @@ const (
 	// stores grants with CreatedAt + LastUsedAt metadata; grants expire
 	// after idle TTL (default 30m). Logout clears everything.
 	OpTrustContext = "trust_context"
+	// set_ttl — change the running session's idle/absolute TTLs (TUI
+	// settings), so a new idle choice applies without a re-login.
+	OpSetTTL = "set_ttl"
 )
 
 // StatusResp is the payload of an `OpStatus` response.
@@ -69,6 +72,12 @@ type StatusResp struct {
 	AgeRecipient      string `json:"age_recipient"`
 	StartedAtUnix     int64  `json:"started_at_unix"`
 	LastActivityUnix  int64  `json:"last_activity_unix"`
+}
+
+// SetTTLReq is the payload of an `OpSetTTL` request. Response is plain ok.
+type SetTTLReq struct {
+	IdleTTLSeconds int64 `json:"idle_ttl_seconds"`
+	AbsTTLSeconds  int64 `json:"abs_ttl_seconds"`
 }
 
 // SignReq is the payload of an `OpSign` request.

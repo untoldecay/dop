@@ -134,7 +134,7 @@ func cascadeGrantRemoval(
 			if err := signRecordViaDaemon(client, &rec); err != nil {
 				return out, fmt.Errorf("sign revoke %s: %w", c.LookupID, err)
 			}
-			v.Capabilities[capID] = capability2VaultCapability(rec)
+			putCapability(v, capID, rec)
 			// Clean the on-disk sidecar + bundle.
 			_ = os.Remove(paths.Vault + "/capabilities/" + c.LookupID + ".bundle")
 			_ = os.Remove(paths.Vault + "/capabilities/" + c.LookupID + ".record")
@@ -159,7 +159,7 @@ func cascadeGrantRemoval(
 			if err := signRecordViaDaemon(client, &rec); err != nil {
 				return out, fmt.Errorf("sign %s: %w", c.LookupID, err)
 			}
-			v.Capabilities[capID] = capability2VaultCapability(rec)
+			putCapability(v, capID, rec)
 			if err := writeRecordSidecar(paths, rec); err != nil {
 				return out, fmt.Errorf("write sidecar %s: %w", c.LookupID, err)
 			}
@@ -172,7 +172,7 @@ func cascadeGrantRemoval(
 				if err := signRecordViaDaemon(client, &rec); err != nil {
 					return out, fmt.Errorf("sign ed25519 revoke %s: %w", c.LookupID, err)
 				}
-				v.Capabilities[capID] = capability2VaultCapability(rec)
+				putCapability(v, capID, rec)
 				_ = os.Remove(paths.Vault + "/capabilities/" + c.LookupID + ".bundle")
 				_ = os.Remove(paths.Vault + "/capabilities/" + c.LookupID + ".record")
 				out.Ed25519Revoked = append(out.Ed25519Revoked, c.Subject)
@@ -185,7 +185,7 @@ func cascadeGrantRemoval(
 				if err := signRecordViaDaemon(client, &rec); err != nil {
 					return out, fmt.Errorf("sign %s: %w", c.LookupID, err)
 				}
-				v.Capabilities[capID] = capability2VaultCapability(rec)
+				putCapability(v, capID, rec)
 				if err := writeRecordSidecar(paths, rec); err != nil {
 					return out, fmt.Errorf("write sidecar %s: %w", c.LookupID, err)
 				}

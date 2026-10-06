@@ -75,6 +75,13 @@ func (c *Client) KeepAlive() error {
 	return err
 }
 
+// SetTTL changes the running session's idle and absolute TTLs.
+func (c *Client) SetTTL(idle, abs time.Duration) error {
+	req, _ := json.Marshal(SetTTLReq{IdleTTLSeconds: int64(idle / time.Second), AbsTTLSeconds: int64(abs / time.Second)})
+	_, err := c.call(Request{Op: OpSetTTL, Data: req})
+	return err
+}
+
 // Logout kills the session.
 func (c *Client) Logout() error {
 	_, err := c.call(Request{Op: OpLogout})

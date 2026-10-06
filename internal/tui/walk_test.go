@@ -1421,6 +1421,10 @@ func walkMore(w *walker) {
 	w.dump("settings-idle-custom-error", "Settings · custom idle timeout too short", "edge")
 	w.keys("backspace", "backspace", "backspace", "90m", "enter")
 	w.dump("settings-idle-flash", "Settings · idle timeout changed (flash)")
+	set(2)
+	w.keys("down", "down", "down", "down", "down", "enter")
+	w.dump("settings-idle-never-applied", "Settings · idle never applied to the live session")
+	walkTTL.Store(0) // back to the default fake TTLs for later screens
 	set(3)
 	w.dump("settings-harness-picker", "Settings · harness picker")
 	w.keys("down", "enter")
@@ -1610,6 +1614,9 @@ func walkKey(s string) tea.KeyMsg {
 // walkLocked makes the fake daemon report a locked session.
 var walkLocked atomic.Bool
 
+// walkTTL holds the TTL (seconds, both idle and abs) set via set_ttl; 0 = defaults.
+var walkTTL atomic.Int64
+
 // walkDaemon answers the admin socket: status → unlocked session,
 // logout → ok, anything else → error (so no decrypt/sign path pretends
 // to succeed).
@@ -1632,14 +1639,23 @@ func walkDaemon(t *testing.T, sock string) {
 				switch req.Op {
 				case admin.OpStatus:
 					now := time.Now().Unix()
+					idle, abs := int64(1800), int64(8*3600)
+					if t := walkTTL.Load(); t > 0 {
+						idle, abs = t, t
+					}
 					data, _ := json.Marshal(admin.StatusResp{
 						Unlocked: !walkLocked.Load(), AdminPubkey: walkPubkey,
 						AgeRecipient:   "age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3290gq",
-						IdleTTLSeconds: 1800, AbsTTLSeconds: 8 * 3600,
+						IdleTTLSeconds: idle, AbsTTLSeconds: abs,
 						StartedAtUnix: now - 600, LastActivityUnix: now,
 					})
 					resp = admin.Response{OK: true, Data: data}
 				case admin.OpLogout:
+					resp = admin.Response{OK: true}
+				case admin.OpSetTTL:
+					var r admin.SetTTLReq
+					_ = json.Unmarshal(req.Data, &r)
+					walkTTL.Store(r.IdleTTLSeconds) // ponytail: idle stands in for both; walk only sets never
 					resp = admin.Response{OK: true}
 				}
 			}

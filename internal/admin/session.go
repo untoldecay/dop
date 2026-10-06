@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -193,8 +194,9 @@ func (s *Session) ttlLoop() {
 			s.mu.Lock()
 			idleFor := s.now().Sub(s.lastActivity)
 			absFor := s.now().Sub(s.startedAt)
+			expired := idleFor > s.idleTTL || absFor > s.absTTL
 			s.mu.Unlock()
-			if idleFor > s.idleTTL || absFor > s.absTTL {
+			if expired {
 				s.Shutdown()
 				return
 			}
@@ -256,6 +258,8 @@ func (s *Session) dispatch(req Request) Response {
 		return s.opShellTrust(req.Data)
 	case OpTrustContext:
 		return s.opTrustContext(req.Data)
+	case OpSetTTL:
+		return s.opSetTTL(req.Data)
 	default:
 		return Response{Error: "unknown op: " + req.Op}
 	}
@@ -423,6 +427,24 @@ func (s *Session) opUnwrapPortable(payload []byte) Response {
 		PlaintextB64: base64.StdEncoding.EncodeToString(plaintext),
 	})
 	return okResp(body)
+}
+
+// opSetTTL replaces both TTLs under the mutex. Reached only through
+// handleConn, so the same peer-uid check as every other op applies.
+func (s *Session) opSetTTL(payload []byte) Response {
+	var req SetTTLReq
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return Response{Error: "set_ttl: bad payload"}
+	}
+	const maxSec = math.MaxInt64 / int64(time.Second)
+	if req.IdleTTLSeconds <= 0 || req.AbsTTLSeconds <= 0 || req.IdleTTLSeconds > maxSec || req.AbsTTLSeconds > maxSec {
+		return Response{Error: "set_ttl: ttl out of range"}
+	}
+	s.mu.Lock()
+	s.idleTTL = time.Duration(req.IdleTTLSeconds) * time.Second
+	s.absTTL = time.Duration(req.AbsTTLSeconds) * time.Second
+	s.mu.Unlock()
+	return okResp(nil)
 }
 
 func okResp(data []byte) Response {
