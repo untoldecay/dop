@@ -65,6 +65,19 @@ func TestTokenPortable(t *testing.T) {
 		t.Fatalf("new claimed record: gen=%d lookup=%s", n.Generation, n.LookupID)
 	}
 
+	// Plain rotate carries the stash to the new record and audits it.
+	if rc := runTokenRotate([]string{"agent"}); rc != 0 {
+		t.Fatalf("rotate: rc=%d", rc)
+	}
+	v = load()
+	r2 := active(v, "agent")
+	if r2.LookupID == n.LookupID || r2.PortableWrapped == "" || capability.LookupID(ctx, unwrap(r2)) != r2.LookupID {
+		t.Fatalf("rotate lost the portable copy: lookup=%s stash=%q", r2.LookupID, r2.PortableWrapped)
+	}
+	if b, _ := os.ReadFile(filepath.Join(paths.Logs, "audit.jsonl")); !strings.Contains(string(b), `"event":"rotate"`) {
+		t.Fatalf("no rotate audit event: %s", b)
+	}
+
 	// Unclaimed: re-issued with a new PIN, old revoked; bearer + PIN on stdout.
 	r, w, _ = os.Pipe()
 	stdout := os.Stdout

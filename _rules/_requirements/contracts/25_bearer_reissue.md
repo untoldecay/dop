@@ -36,6 +36,7 @@
 ### Output
 - Unclaimed re-issue: bearer (+ PIN) once on stdout through `printguard.Guard` (contract 13 handoff); stderr status lines.
 - Claimed portable --on: stderr `rotated <subject> to gen <n>; the agent picks up the new bearer on its next run`, stdout `portable copy stored for <subject>`; the bearer is never printed.
+- Plain `dop token rotate` MUST carry an existing portable copy to the new record (re-wrapped from the fresh bearer) and MUST emit the `rotate` audit event (`extra.replaces`, `old_gen`, `new_gen`).
 - `token rotate`: old and new lookup prefixes on stderr; no bearer printed.
 - TUI: unclaimed results land on a shown-once screen (`onceScreen`, contract 14); claimed portable --on lands on `✓ Bearer is portable`; both show `useGuidance` (contract 13).
 
@@ -72,5 +73,3 @@
 - Grep `cmd/dop` for `v.Capabilities[...] = capability2VaultCapability(` outside `issueBearer` — expect none.
 
 ## Open Questions
-- `dop token rotate` (`portableTo == ""`) does not carry an existing stash to the new record, so `dop use` stops working after a plain rotate. The invariant above says it should; code finding.
-- `dop token rotate` emits no audit event; should it emit `rotate` (or `issue` + `revoke`)?

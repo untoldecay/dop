@@ -105,6 +105,7 @@ func runTeamCancelInvite(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop team cancel-invite: push: %v — run `dop push` manually\n", err)
 		return 1
 	}
+	audit.Append(paths, audit.Event{Kind: audit.EventInviteCancel, Extra: map[string]string{"invite_id": full}})
 	fmt.Fprintf(os.Stderr, "dop team cancel-invite: deleted invite %s\n", full[:8])
 	return 0
 }

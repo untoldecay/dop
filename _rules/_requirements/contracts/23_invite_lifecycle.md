@@ -45,7 +45,7 @@
   - stderr: `invite_id`, `PIN`, `vault URL`, approve-later hint, operator-facing success/failure messages
   - vault: `pending-admin-invites/<id>.invite.json`, `.response.json` (M2), `.identity-blob` (shared-identity)
   - git: cleanup commit on cancel
-- Events: `invite` (open), `invite_response` (M2 join), `invite_complete` (approve), `invite_cancel` (cancel; not emitted today, see Open Questions)
+- Events: `invite` (open), `invite_response` (M2 join), `invite_complete` (approve), `invite_cancel` (cancel; `extra.invite_id`)
 - Dependencies: `admininvite` package, `approval.Verify`, daemon admin session
 
 ## State & Data Rules
@@ -72,4 +72,3 @@
 ## Open Questions
 - Add `dop team sweep-expired` to auto-cancel pending invites past their TTL? Not shipped — operators clear via `d` in the TUI.
 - Should the TUI auto-detect "response ready" and offer a one-key approve from the waiting screen (bypassing the Team Pending navigation)? Current flow is Team → Pending → `a`.
-- `dop team cancel-invite` (`cmd/dop/stubs.go::runTeamCancelInvite`) emits no audit event and `internal/audit` has no `invite_cancel` constant. Contract kept; code finding.

@@ -291,7 +291,7 @@ func (v *addIntegrationView) rows() []*formField {
 			r = append(r, v.url)
 		case vault.IntegrationKindMCP:
 			v.url.label, v.url.in.Placeholder = "URL or launcher", "https://mcp.example.com/sse or npx my-mcp"
-			r = append(r, v.url)
+			r = append(r, v.url, v.scan)
 		}
 		return r
 	case integStageCred:
@@ -513,7 +513,7 @@ func (v *addIntegrationView) integArgs() []string {
 				args = append(args, "--base-url", u)
 			}
 		}
-		if v.kindVal() == vault.IntegrationKindAPI && v.scan.pick == 1 {
+		if (v.kindVal() == vault.IntegrationKindAPI || v.kindVal() == vault.IntegrationKindMCP) && v.scan.pick == 1 {
 			args = append(args, "--probe-endpoints")
 		}
 		for _, i := range advFieldsForKind(v.kindVal()) {
@@ -571,7 +571,7 @@ func (v *addIntegrationView) summaryRows() [][2]string {
 		if u := v.url.val(); u != "" && v.kindVal() != vault.IntegrationKindOther {
 			rows = append(rows, [2]string{v.url.label, u})
 		}
-		if v.kindVal() == vault.IntegrationKindAPI {
+		if k := v.kindVal(); k == vault.IntegrationKindAPI || k == vault.IntegrationKindMCP {
 			rows = append(rows, [2]string{"scan for docs", v.scan.val()})
 		}
 		for _, i := range advFieldsForKind(v.kindVal()) {

@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -33,6 +34,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
 	"github.com/fray/dop/internal/admin"
@@ -397,6 +399,13 @@ func TestWalkScreens(t *testing.T) {
 	walkPending(w) // last: the claim banner sticks to every later menu
 
 	must(t, os.WriteFile(filepath.Join(out, "index.txt"), []byte(w.index.String()), 0o644))
+	for _, l := range strings.Split(strings.TrimSpace(w.index.String()), "\n") {
+		if name := strings.Split(l, "\t")[0]; strings.Contains(name, "80x24") {
+			b, err := os.ReadFile(filepath.Join(out, name))
+			must(t, err)
+			checkScreen(t, name, string(b))
+		}
+	}
 
 	// Sanity: colour forced, enough screens.
 	b, err := os.ReadFile(filepath.Join(out, "001-menu-fresh-80x24.ans"))
@@ -646,6 +655,9 @@ func walkIntegrationAdd(w *walker) {
 		w.keys("enter")
 		w.dump("integration-add-rows-"+kind, "Add integration · rows for kind="+kind)
 	}
+	toKind()
+	w.keys("enter", "down", "down", "enter", "enter", "Mirror over MCP", "enter", "enter", "https://mcp.example.com/sse", "enter")
+	w.dump("integration-add-scan-row-mcp", "Add integration · mcp · cursor on scan")
 	toKind()
 	w.keys("enter", "enter", "enter", "Read-only mirror of the docs space", "enter", "enter", "https://api.notion.com/v1", "enter")
 	w.dump("integration-add-scan-row", "Add integration · cursor on scan")
@@ -1730,5 +1742,71 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+var (
+	walkEsc    = regexp.MustCompile(`\x1b\[([0-9;]*)m`)
+	walkTokRe  = regexp.MustCompile(`(?:^|[^A-Za-z_])token`)
+	walkDurRe  = regexp.MustCompile(`\d+m\d+s|\d+[mh]0s\b`)
+	walkReset  = regexp.MustCompile(`Reset`)
+	walkFooter = regexp.MustCompile(`^\s*(enter|esc|tab|\?|any|space)\b`)
+)
+
+// checkScreen asserts contract 24 on one 80x24 dump (mirrors the old
+// checkw5.py rules, allowances included).
+func checkScreen(t *testing.T, name, text string) {
+	t.Helper()
+	fail := func(rule string) { t.Errorf("%s: %s", name, rule) }
+	lines := strings.Split(text, "\n")
+	if len(lines) != 24 {
+		fail(fmt.Sprintf("rows=%d", len(lines)))
+	}
+	bold := 0
+	for i, l := range lines {
+		plain := walkEsc.ReplaceAllString(l, "")
+		if w := ansi.StringWidth(plain); w > 80 {
+			fail(fmt.Sprintf("row%d width=%d", i+1, w))
+		}
+		for _, m := range walkEsc.FindAllStringSubmatch(l, -1) {
+			switch strings.Split(m[1], ";")[0] {
+			case "3":
+				if !strings.HasPrefix(plain, "› ") {
+					fail(fmt.Sprintf("italic outside input row%d", i+1))
+				}
+			case "1":
+				bold++
+			}
+		}
+	}
+	if bold != 1 {
+		fail(fmt.Sprintf("bold=%d", bold))
+	}
+	plain := walkEsc.ReplaceAllString(text, "")
+	for _, g := range "➤⚠✗🔒👤─←→" {
+		if strings.ContainsRune(plain, g) {
+			fail("glyph " + string(g))
+		}
+	}
+	if walkTokRe.MatchString(plain) {
+		fail("lowercase token")
+	}
+	for rule, bad := range map[string]bool{
+		"(s)": strings.Contains(plain, "(s)"), "Reset": walkReset.MatchString(plain),
+		"go duration": walkDurRe.MatchString(plain), "backtick": strings.Contains(plain, "`"),
+	} {
+		if bad {
+			fail(rule)
+		}
+	}
+	ft := ""
+	for _, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			ft = l
+		}
+	}
+	ft = walkEsc.ReplaceAllString(ft, "")
+	if strings.Contains(ft, " · ") && walkFooter.MatchString(ft) && len(strings.Split(ft, " · ")) > 5 {
+		fail("footer>5")
 	}
 }
