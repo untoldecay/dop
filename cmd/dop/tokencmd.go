@@ -701,7 +701,7 @@ func runTokenRevoke(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop token revoke: %v\n", err)
 		return 1
 	}
-	v.Capabilities[matched] = capability2VaultCapability(rec)
+	putCapability(v, matched, rec)
 
 	// Delete the bundle + record files.
 	bundlePath := filepath.Join(paths.Vault, "capabilities", c.LookupID+".bundle")
@@ -873,7 +873,7 @@ func runTokenRepin(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop token repin: sign: %v\n", err)
 		return 1
 	}
-	v.Capabilities[capIDHex] = capability2VaultCapability(rec)
+	putCapability(v, capIDHex, rec)
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
 		os.Remove(tmpPath)
 		fmt.Fprintf(os.Stderr, "dop token repin: save vault: %v\n", err)
@@ -1357,16 +1357,8 @@ func syncSidecars(client *admin.Client, paths *config.Paths, v *vault.Vault) err
 		if err := signRecordViaDaemon(client, &rec); err != nil {
 			return fmt.Errorf("resign %s: %w", c.LookupID, err)
 		}
-		// Reflect the new signature back into the vault map so the two
-		// stay coherent. v1.14.0-rc1 — preserve PortableWrapped across
-		// the record round-trip; it's admin-only and doesn't live on
-		// capability.Record (unlike EnvWrapped/BearerWrapped which do).
-		preservedStash := c.PortableWrapped
-		updated := capability2VaultCapability(rec)
-		if preservedStash != "" {
-			updated.PortableWrapped = preservedStash
-		}
-		v.Capabilities[capID] = updated
+		// Reflect the new signature back into the vault map (stash preserved).
+		putCapability(v, capID, rec)
 		if err := writeRecordSidecar(paths, rec); err != nil {
 			return fmt.Errorf("write sidecar %s: %w", c.LookupID, err)
 		}
@@ -1563,6 +1555,18 @@ func capability2VaultCapability(r capability.Record) vault.Capability {
 		}
 	}
 	return c
+}
+
+// putCapability writes rec into v.Capabilities[id], carrying over vault-only
+// fields (the PortableWrapped stash) from any existing entry; capability.Record
+// has no stash field, so a bare conversion would drop the only copy.
+func putCapability(v *vault.Vault, id string, rec capability.Record) {
+	c := capability2VaultCapability(rec)
+	if v.Capabilities == nil {
+		v.Capabilities = map[string]vault.Capability{}
+	}
+	c.PortableWrapped = v.Capabilities[id].PortableWrapped
+	v.Capabilities[id] = c
 }
 
 func vaultCapability2Record(c vault.Capability, capIDHex string) capability.Record {
@@ -1951,7 +1955,7 @@ func runTokenReseal(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop token reseal: sign: %v\n", err)
 		return 1
 	}
-	v.Capabilities[matchID] = capability2VaultCapability(rec)
+	putCapability(v, matchID, rec)
 	if err := writeRecordSidecar(paths, rec); err != nil {
 		fmt.Fprintf(os.Stderr, "dop token reseal: write sidecar: %v\n", err)
 		return 1
@@ -2197,7 +2201,7 @@ func runTokenGrantMutation(args []string, mode string) int {
 		fmt.Fprintf(os.Stderr, "dop token %s-grant: sign: %v\n", mode, err)
 		return 1
 	}
-	v.Capabilities[matchID] = capability2VaultCapability(rec)
+	putCapability(v, matchID, rec)
 	if err := writeRecordSidecar(paths, rec); err != nil {
 		fmt.Fprintf(os.Stderr, "dop token %s-grant: write sidecar: %v\n", mode, err)
 		return 1
@@ -2435,8 +2439,8 @@ func runTokenRotate(args []string) int {
 	if v.Capabilities == nil {
 		v.Capabilities = map[string]vault.Capability{}
 	}
-	v.Capabilities[oldCapID] = capability2VaultCapability(oldRec)
-	v.Capabilities[newCapIDHex] = capability2VaultCapability(newRec)
+	putCapability(v, oldCapID, oldRec)
+	putCapability(v, newCapIDHex, newRec)
 
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
 		_ = os.Remove(newBundlePath)

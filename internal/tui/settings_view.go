@@ -30,6 +30,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -188,7 +189,7 @@ func (v *settingsView) updateCustom(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.customErr = "save: " + err.Error()
 			return v, nil
 		}
-		v.flash = "Admin idle timeout set to " + shortDur(userprefs.AdminIdleTTLLabel(secs))
+		v.flash = "Idle timeout set to " + shortDur(userprefs.AdminIdleTTLLabel(secs)) + ", " + v.applyIdleTTL()
 		v.mode = settingsModeList
 		return v, nil
 	default:
@@ -325,7 +326,7 @@ func (v *settingsView) applyPick(row int, pick settingChoice) {
 					v.err = err.Error()
 					return
 				}
-				v.flash = "Admin idle timeout set to " + shortDur(pick.value) + ", effective at the next login"
+				v.flash = "Idle timeout set to " + shortDur(pick.value) + ", " + v.applyIdleTTL()
 				return
 			}
 		}
@@ -337,6 +338,26 @@ func (v *settingsView) applyPick(row int, pick settingChoice) {
 		}
 		v.flash = "Harness set to " + harnessShort(pick.value)
 	}
+}
+
+// applyIdleTTL pushes the saved idle pref into a running session (never →
+// both TTLs 100 years; finite → abs stays the daemon default or
+// DOP_ADMIN_MAX_TTL) and says where the change took effect.
+func (v *settingsView) applyIdleTTL() string {
+	c := admin.NewClient(admin.SockPath(v.paths))
+	if !c.SessionActive() {
+		return "applies at next login"
+	}
+	idle, abs := v.prefs.EffectiveAdminIdleTTL(), admin.DefaultAbsTTL
+	if v.prefs.AdminIdleTTLSeconds == userprefs.AdminIdleTTLNever {
+		abs = idle
+	} else if d, err := time.ParseDuration(os.Getenv("DOP_ADMIN_MAX_TTL")); err == nil {
+		abs = d
+	}
+	if err := c.SetTTL(idle, abs); err != nil {
+		return "applies at next login"
+	}
+	return "applied to the current session"
 }
 
 func approvalTimeoutLabel(s int) string {

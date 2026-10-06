@@ -340,3 +340,28 @@ func shortSock(t *testing.T) string {
 	return filepath.Join(d, "s")
 }
 
+
+func TestSession_SetTTL(t *testing.T) {
+	sock := shortSock(t)
+	k, _ := Generate()
+	s, err := StartSession(SessionOpts{Keys: k, SockPath: sock, IdleTTL: 30 * time.Second, AbsTTL: 60 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Shutdown)
+	c := NewClient(sock)
+	century := 100 * 365 * 24 * time.Hour
+	if err := c.SetTTL(century, century); err != nil {
+		t.Fatal(err)
+	}
+	st, err := c.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.IdleTTLSeconds != int64(century.Seconds()) || st.AbsTTLSeconds != int64(century.Seconds()) {
+		t.Fatalf("ttl not applied: %+v", st)
+	}
+	if err := c.SetTTL(0, time.Hour); err == nil {
+		t.Fatal("zero idle accepted")
+	}
+}
