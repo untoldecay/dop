@@ -7,7 +7,7 @@ Every `dop` command, grouped by what you're trying to do. Bare `dop` launches th
 - [Top-level](#top-level) — `dop`, `version`, `help`, `uninstall`
 - [Admin session](#admin-session) — `init`, `login`, `logout`, `status`, `set-approval`, `join`, `reset`
 - [Vault attach + sync](#vault-attach--sync) — `init`, `pull`, `push`, `vault edit`, `doctor`
-- [Integrations](#integrations) — `add`, `list`, `remove`, `remove-token`, `set-token`
+- [Integrations](#integrations) — `add`, `list`, `remove`, `remove-token`, `set-token`, `rename-token`
 - [Grants](#grants) — `add`, `list`, `show`, `remove`
 - [Tokens](#tokens-bearers) — `issue`, `list`, `show`, `revoke`, `prune`, `repin`, `reseal`, `add-grant`, `remove-grant`, `rotate`
 - [Claim + approval](#claim--approval) — `claim`, `pending`, `approve`, `reject`, `approve-remote`
@@ -299,6 +299,23 @@ dop integration set-token --name <N> --token-name <T>
 | `--scope-note` | "" | New scope note. |
 
 P-256 bearers see the new value on next `dop exec`. ed25519 bearers need `dop token reseal <subject>`.
+
+### `dop integration rename-token`
+
+Rename a credential on an integration. Every grant on that integration that uses the old name is rewritten to the new one, in the same save. Refuses when the new name already exists. A protected integration takes its owner's session and the approval passphrase.
+
+```
+dop integration rename-token --integration <N> --from <OLD> --to <NEW> [--passphrase-stdin]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--integration` | "" | Integration (required). |
+| `--from` | "" | Current credential name (required). |
+| `--to` | "" | New credential name (required). |
+| `--passphrase-stdin` | false | Read the approval passphrase from stdin (protected integrations). |
+
+Prints `dop integration rename-token: <integration>: "<old>" → "<new>" (updated <n> grant reference(s))` on stderr and logs a `token_rename` audit event. Bearers keep working: they resolve the credential through the grant at exec.
 
 ---
 

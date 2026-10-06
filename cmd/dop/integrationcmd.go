@@ -23,7 +23,7 @@ import (
 // runIntegration is the subcommand dispatcher.
 func runIntegration(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop integration <add|list|remove|remove-token|set-token|rename>")
+		fmt.Fprintln(os.Stderr, "usage: dop integration <add|list|remove|remove-token|set-token|rename|rename-token>")
 		return 2
 	}
 	switch args[0] {
@@ -39,6 +39,8 @@ func runIntegration(args []string) int {
 		return runIntegrationSetToken(args[1:])
 	case "rename":
 		return runIntegrationRename(args[1:])
+	case "rename-token":
+		return runIntegrationRenameToken(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop integration: unknown subcommand %q\n", args[0])
 		return 2
@@ -279,12 +281,84 @@ func runIntegrationRemove(args []string) int {
 // tokens (and every active capability whose Grants list touched those
 // grants). Shape:
 //
-//   dop integration remove-token --name boiler --token pensieve --token writes
-//     [--force-revoke-ed25519]
+//	dop integration remove-token --name boiler --token pensieve --token writes
+//	  [--force-revoke-ed25519]
 //
 // If removing the selected tokens empties the integration, the
 // integration is deleted too — a service entry with no credentials
 // is useless.
+// runIntegrationRenameToken renames a credential (a key of
+// Integration.Tokens) and rewrites every grant on that integration that
+// references it, in one save. A protected integration takes its owner
+// and the approval passphrase.
+func runIntegrationRenameToken(args []string) int {
+	fs := flag.NewFlagSet("integration rename-token", flag.ExitOnError)
+	name := fs.String("integration", "", "integration name (required)")
+	from := fs.String("from", "", "current credential name (required)")
+	to := fs.String("to", "", "new credential name (required)")
+	passphraseStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin (protected integrations; used by scripts and TUI)")
+	_ = fs.Parse(args)
+	*to = strings.TrimSpace(*to)
+	if *name == "" || *from == "" || *to == "" {
+		fmt.Fprintln(os.Stderr, "usage: dop integration rename-token --integration <name> --from <old> --to <new> [--passphrase-stdin]")
+		return 2
+	}
+	fail := func(err error) int {
+		fmt.Fprintf(os.Stderr, "dop integration rename-token: %v\n", err)
+		return 1
+	}
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		return fail(err)
+	}
+	v, vp, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		return fail(err)
+	}
+	key, ok := v.FindIntegrationKey(*name)
+	if !ok {
+		return fail(fmt.Errorf("no integration named %q", *name))
+	}
+	integ := v.Integrations[key]
+	if err := requireProtectionOwner(client, "integration "+key, integ.Protected, integ.Owner); err != nil {
+		return fail(err)
+	}
+	tok, ok := integ.Tokens[*from]
+	if !ok {
+		return fail(fmt.Errorf("integration %q has no credential %q", key, *from))
+	}
+	if _, exists := integ.Tokens[*to]; exists {
+		return fail(fmt.Errorf("integration %q already has a credential %q", key, *to))
+	}
+	if integ.Protected {
+		if err := promptProtectionPassphrase(paths, "approval passphrase (rename credential on "+key+"): ", *passphraseStdin); err != nil {
+			return fail(err)
+		}
+	}
+	delete(integ.Tokens, *from)
+	integ.Tokens[*to] = tok
+	v.Integrations[key] = integ
+	n := 0
+	for id, g := range v.Grants {
+		if g.Integration == key && g.Token == *from {
+			g.Token = *to
+			v.Grants[id] = g
+			n++
+		}
+	}
+	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
+		return fail(err)
+	}
+	audit.Append(paths, audit.Event{
+		Kind:    audit.EventTokenRename,
+		Subject: key,
+		Extra:   map[string]string{"from": *from, "to": *to, "grants": fmt.Sprint(n)},
+	})
+	fmt.Fprintf(os.Stderr, "dop integration rename-token: %s: %q → %q (updated %d grant reference(s))\n", key, *from, *to, n)
+	return 0
+}
+
 func runIntegrationRemoveToken(args []string) int {
 	fs := flag.NewFlagSet("integration remove-token", flag.ExitOnError)
 	name := fs.String("name", "", "integration name (required)")
@@ -1490,4 +1564,3 @@ func bearerIntegrationSet(v *vault.Vault, bearerLookup string) map[string]bool {
 	}
 	return out
 }
-

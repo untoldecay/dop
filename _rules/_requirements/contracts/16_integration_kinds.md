@@ -66,13 +66,26 @@
 - The kind slot MUST route to `--base-url` (api), `--cmd` (cli), `--mcp-url` when it starts with `http(s)://` else `--mcp-cmd` (mcp) (`integArgs`).
 - A name that already exists MUST be refused at the Integration step ("pick it on the first screen to add a credential").
 - Credential step, Normal tab: credential (prefilled with the integration name once), value (masked), scope note (`scopePresets` + `other…`), and for a new integration protection (+ passphrase when protected).
-- Credential step, Advanced tab (new integrations only, `tab` switches): `advFieldSpecs` filtered by kind (`advFieldsForKind`): auth env template `--cli-auth-env` (cli), server root `--server-root`, allowed scope hint `--allowed`, auth style `--auth-style` (api), install hint `--cli-install` (cli), help entry `--cli-help` (cli).
+- Credential step, Advanced tab (new integrations only, `tab` switches): `advFieldSpecs` filtered by kind (`advFieldsForKind`). Mapping (row → flag → metadata key, kinds):
+
+  | Row | Flag | Metadata key | Kinds |
+  |---|---|---|---|
+  | auth env template | `--cli-auth-env` | `cli_auth_env` | cli |
+  | server root | `--server-root` | `server_root` | all |
+  | allowed scope hint | `--allowed` | `allowed` | all |
+  | auth style | `--auth-style` | `auth_style` | api |
+  | install hint | `--cli-install` | `cli_install` | cli |
+  | help entry | `--cli-help` | `cli_help` | cli |
+  | endpoints URL | `--endpoints-url` | `endpoints_url` | api |
+  | auth header | `--auth-header` | `auth_header` | api |
+  | args hint | `--args-hint` | `cli_args_hint` | cli |
 - Every Advanced field MUST be integration-level metadata. A credential stores only `value` and `scope_note` (`vault.Token`); the TUI sends it as `--token <cred>=<value>:<scope|->`.
 - An existing credential name on the integration MUST be refused ("already has a credential"); `integration add` would overwrite it.
 - Grant step is mandatory for a new credential: grant id (default `<integration>.<scope>` for read-only / read-write / admin, else `<integration>`, `-2`, `-3`… when taken), integration + credential fixed, env prefix default `vault.SanitizeEnvKey(<integration>_<credential>)` (= `Grant.EffectivePrefix`), projects, tags.
 - An env prefix equal to the default MUST NOT be sent (`--env-prefix` omitted, record stays empty).
 - Save runs `dop integration add` then `dop grant add`; if the second fails the retry only re-runs the grant (`integSaved`).
-- The integration Info tab MUST show `kind` as its first row (`infoBody`); the integration edit form (`e`) MUST allow changing kind, description, kind slot, projects, tags, protection.
+- The integration Info tab MUST show `kind` as its first row (`infoBody`); the integration edit form (`e`, dense form, contract 14) MUST allow changing name, kind, description, kind slot, scan for docs, projects, tags, protection, and on its Advanced tab every `advFieldSpecs` row for the kind, prefilled from `Integration.Metadata[metaKey]`.
+- The edit form reuses the add flow's row builders (`integRows`, `slotRows`, `slotArgs`, `advRows`). Save sends every Normal row to `dop integration add`; an Advanced row only when changed (the CLI merges and keeps metadata it is not given); a cleared Advanced row is sent as `--metadata <key>=` (stored empty, treated as not set).
 
 ### Protection interaction
 - `cmd/dop/protected.go::integrationEqual` MUST compare Kind so a non-owner flipping Kind on a protected integration gets reverted by `enforceProtectedOnSave`.

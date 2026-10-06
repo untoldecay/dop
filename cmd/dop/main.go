@@ -57,6 +57,7 @@ usage:
   dop integration add --name N --token N=V:NOTE  add/update an integration (admin-required)
   dop integration list                           list integrations (admin-required)
   dop integration remove --name N [--force]      remove an integration (admin-required)
+  dop integration rename-token --integration N --from A --to B  rename a credential; its grants follow (admin-required)
   dop grant add --id ID --integration N --token T   add a grant (admin-required)
   dop grant list                                 list grants (admin-required)
   dop grant show <id> [--all] [--json]           detail view: grant details + tokens using it (admin-required)

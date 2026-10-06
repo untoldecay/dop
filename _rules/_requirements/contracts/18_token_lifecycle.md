@@ -1,7 +1,7 @@
 # Feature Contract — Credential + Bearer Lifecycle
 
 ## Scope
-- Credentials (upstream secrets inside an integration; `vault.Token`, CLI flag names still say `token`): `dop integration set-token`, the TUI integration Credentials tab, and `EventIntegrationTokenSet`. Introduced in v1.13.0-rc16.
+- Credentials (upstream secrets inside an integration; `vault.Token`, CLI flag names still say `token`): `dop integration set-token`, `dop integration rename-token`, the TUI integration Credentials tab, `EventIntegrationTokenSet` and `EventTokenRename`. Introduced in v1.13.0-rc16.
 - Bearers (what an agent holds): the `dop token` subcommand set and the rule that every bearer record rewrite keeps the portable stash.
 
 ## Vocabulary
@@ -28,10 +28,18 @@
 - MUST print a one-line stderr summary: `set-token: <integ>/<tok> → value rotated, scope "..."`.
 - MUST include the reseal nudge in stderr when a rotation happened: "`bearers currently holding this token see the new value on their NEXT exec (direct availability) — or after `dop token reseal <subject>` for ed25519-bound bearers.`"
 
+### CLI — `dop integration rename-token`
+- `dop integration rename-token --integration <name> --from <old> --to <new> [--passphrase-stdin]`; all three names required (exit 2 otherwise). Admin session required.
+- Owner gate (`requireProtectionOwner`) like every integration mutation; a protected integration also takes the approval passphrase (`--passphrase-stdin` for the TUI and scripts): the rename rewrites grants.
+- MUST refuse (exit 1) an unknown integration or credential, and a `--to` that already exists on the integration.
+- MUST move the `Integration.Tokens` key and rewrite every grant on that integration whose `Token` equals `--from`; other grants untouched. One save + push.
+- MUST log one `token_rename` event (contract 10) and print `dop integration rename-token: <integration>: "<old>" → "<new>" (updated <n> grant reference(s))` on stderr.
+
 ### TUI — integration detail
 - `enter` on an integration row MUST open its detail with tabs Info / Credentials N / Grants N (contract 14). `e` edit and `r` remove work from the list and the Info tab.
 - Credentials tab rows: name, value as `•••• N chars` (`maskLen`, never the value or a tail), scope note. A placeholder-looking value MUST show an error hint ("Rotate in the real one").
-- `enter` on a credential MUST show its actions under the rows (`credActions`, in order): Edit scope note, Rotate value, Remove credential. No View / Back rows.
+- `enter` on a credential MUST show its actions under the rows (`credActions`, in order): Edit scope note, Rotate value, Rename, Remove credential. No View / Back rows. `n` on the Credentials tab (or in the actions) opens Rename directly.
+- Rename (`integModeTokenRename`): one text input prefilled with the current name, no review, `enter` saves (a protected integration asks the approval passphrase on the same screen first); running `Renaming credential…`, done `✓ Credential renamed`; empty, unchanged or taken names and CLI failures on the status line. Shells out through `sessionGuard` (`startRun`).
 - `a` on the Credentials tab MUST open Add credential for this integration (`newAddCredentialView`: credential + mandatory grant, contract 16); `a` on the Grants tab opens Add grant with the integration fixed.
 - Edit scope note MUST open the `scopePresets` picker on the current note (else `other…`); free text via `other…`.
 - Rotate value input MUST be masked and MUST pass the value via `--value-stdin` + stdin pipe (`doTokenRotate`), never `--value`.
@@ -39,7 +47,7 @@
 - Empty Credentials tab: `No credentials yet. Press a to add one.`
 
 ### TUI — integration-level edit
-- `e` MUST open the integration edit form (`integModeIntEdit`, `enterIntEdit`) seeded with current name, kind, description, kind slot, projects, tags, protection.
+- `e` MUST open the integration edit form (`integModeIntEdit`, `enterIntEdit`, dense form with Normal / Advanced tabs, contract 14) seeded with current name, kind, description, kind slot, projects, tags, protection and the Advanced metadata (contract 16); a review of the changed rows precedes the save.
 - Save MUST shell to `dop integration rename --from --to` first when the name changed, then `dop integration add --name <name> …` (idempotent update, contract 16).
 
 ### Bearers — `dop token` subcommands
@@ -63,7 +71,7 @@
 - Inputs: `--name`, `--token-name`, `--value` | `--value-stdin`, `--scope-note` on `dop integration set-token`; `enter` + action keys in the TUI token picker.
 - Outputs: audit event `integration_token_set`; stderr summary; mutated vault.
 - Events: `EventIntegrationTokenSet` with `extra.token`, `extra.rotated`, `extra.scope_changed`.
-- Dependencies: `cmd/dop/integrationcmd.go::runIntegrationSetToken`, `internal/tui/list_remove_views.go` (modes `integModeDetail` tabs, `integModeTokenAction` / `EditScope` / `Rotate` / `RemoveConfirm`, `integModeIntEdit`), `cmd/dop/protected.go::requireProtectionOwner`, `cmd/dop/tokencmd.go::putCapability`.
+- Dependencies: `cmd/dop/integrationcmd.go::runIntegrationSetToken`, `internal/tui/list_remove_views.go` (modes `integModeDetail` tabs, `integModeTokenAction` / `EditScope` / `Rotate` / `Rename` / `RemoveConfirm`, `integModeIntEdit` / `IntReview`), `cmd/dop/integrationcmd.go::runIntegrationRenameToken`, `cmd/dop/protected.go::requireProtectionOwner`, `cmd/dop/tokencmd.go::putCapability`.
 
 ## State & Data Rules
 - The token's `Value` field in `vault.Integration.Tokens[name]` is replaced atomically on rotation.
@@ -87,9 +95,10 @@
 - Verify `cmd/dop/integrationcmd.go::runIntegrationSetToken` reads the stdin value in `--value-stdin` mode via `readValueStdin()` which strips CR/LF.
 - Verify the audit event emission site in `runIntegrationSetToken` does not pass `tok.Value` or `*newValue` into the Event struct.
 - Verify `internal/tui/list_remove_views.go::doTokenRotate` builds `exec.Command` with `--value-stdin` and sets `cmd.Stdin`, NOT with a `--value <literal>` flag.
-- Verify `credActions` lists exactly 3 actions in the order: Edit scope note, Rotate value, Remove credential.
+- Verify `credActions` lists exactly 4 actions in the order: Edit scope note, Rotate value, Rename, Remove credential.
+- PASS if `TestRenameToken` passes (key moved, referencing grant rewritten, other grant untouched, existing target refused, `token_rename` logged).
 - Verify `cmd/dop` has no `v.Capabilities[id] = capability2VaultCapability(` outside `issueBearer`.
-- Verify `enterIntEdit` positions the kind cursor on the current kind (so Edit opens on today's value).
+- Verify `enterIntEdit` picks the current kind in the kind row (so Edit opens on today's value).
 
 ## Open Questions
 - Should `set-token` support a `--audit-reason "..."` flag for operator-supplied free-text that lands in `extra.reason`? Would help forensic review when rotating in response to a suspected leak. Not implemented yet.

@@ -58,7 +58,11 @@
 - `↑↓` move between editable rows; `enter` opens a row in place (text input or picker under the row); `enter` on the action row validates the step (`denseForm.missing` puts the cursor on the first empty required row).
 - Empty required rows show muted `required`; masked rows show `•`; fixed rows are muted and skipped by the cursor.
 - A picker whose last option is `other…` opens a text input for a custom value.
-- Used by: Add integration (stepper `Integration › Credential › Grant`) and Add grant (contracts 15, 16).
+- `esc` closes an open row (its value restored); on a closed form it leaves the form.
+- Used by: Add integration (stepper `Integration › Credential › Grant`), Add grant, the integration edit form and the grant edit form (contracts 15, 16, 18).
+- Edit forms follow the same pattern: rows prefilled from the record, a trailing `Review` row, then a review of the changed rows only (`snap` / `changes`; `No changes.` with `enter close` when none, which returns without a CLI call), running, `✓ <noun> saved`, `enter` back to the detail. A failed save returns to the review with the error on the status line.
+  - Integration edit (`e`, `integModeIntEdit` / `integModeIntReview`): tabs `Normal` / `Advanced` on the title row, `tab` flips them while no row is open. Normal: name, kind, description, the kind slot, scan for docs (api, mcp), projects, tags, protection, approval passphrase (only when switching to protected). Advanced: the add flow's `advFieldSpecs` rows for the kind. Running `Saving integration…`, done `✓ Integration saved`, back on the Info tab.
+  - Grant edit (`e`, `grantModeEdit` / `grantModeReview`): projects, tags, env prefix (the default as placeholder), protection, approval passphrase (only when switching to protected). Running `Saving grant…`, done `✓ Grant saved`, back on the grant detail.
 
 ### Pickers
 - Single choice (`optRows`, `pickRows`): `›` on the cursor row, label + muted description on the same row; cursor clamps, no wrap; opens on the current value.
