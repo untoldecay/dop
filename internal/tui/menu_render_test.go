@@ -7,6 +7,9 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func newTestRootForMenu() *rootModel {
@@ -22,8 +25,8 @@ func newTestRootForMenu() *rootModel {
 			{label: "Integration", hint: "add a service + upstream tokens"},
 			{label: "Grant", hint: "map a grant to an integration/token"},
 			{label: "Device", hint: "invite another machine of yours"},
-			{label: "Team member (invite)", hint: "invite another human as admin"},
-			{label: "Team member (manual)", hint: "add another admin's pubkey directly"},
+			{label: "Team member", hint: "invite another admin"},
+			{label: "Team member by key", hint: "add an admin with their public keys"},
 		}},
 		{label: "Issue", hint: "hand a bearer to an agent", key: "2"},
 		{label: "List", hint: "browse integrations, grants, bearers, team", key: "3", items: []menuItem{
@@ -41,7 +44,7 @@ func newTestRootForMenu() *rootModel {
 
 func TestMenuTopLevel_HasSixPrimaries(t *testing.T) {
 	m := newTestRootForMenu()
-	out := m.viewGroups()
+	out := m.viewMenu()
 	for _, want := range []string{"Add", "Issue", "List", "Remove", "Vault", "More"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("top-level menu missing %q\n--- got ---\n%s", want, out)
@@ -52,7 +55,7 @@ func TestMenuTopLevel_HasSixPrimaries(t *testing.T) {
 			t.Errorf("top-level menu missing key %q\n--- got ---\n%s", k, out)
 		}
 	}
-	if !strings.Contains(out, "↑↓ move · 1-5 jump · enter select · M more · q quit") {
+	if !strings.Contains(ansi.Strip(out), "enter open · ? more") {
 		t.Errorf("expected top-level footer; got:\n%s", out)
 	}
 }
@@ -60,15 +63,15 @@ func TestMenuTopLevel_HasSixPrimaries(t *testing.T) {
 func TestMenuSubgroup_Add_ShowsFiveLeaves(t *testing.T) {
 	m := newTestRootForMenu()
 	m.inGroup = 0 // Add
-	out := m.viewGroups()
+	out := m.viewMenu()
 	for _, want := range []string{
-		"Add", // breadcrumb
-		"esc back",
+		"Add",      // breadcrumb
+		"esc back", // footer
 		"Integration",
 		"Grant",
 		"Device",
-		"Team member (invite)",
-		"Team member (manual)",
+		"Team member",
+		"Team member by key",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Add submenu missing %q\n--- got ---\n%s", want, out)
@@ -79,14 +82,15 @@ func TestMenuSubgroup_Add_ShowsFiveLeaves(t *testing.T) {
 func TestMenuSubgroup_List_ShowsFourLeaves(t *testing.T) {
 	m := newTestRootForMenu()
 	m.inGroup = 2 // List
-	out := m.viewGroups()
+	out := m.viewMenu()
 	for _, want := range []string{"Integrations", "Grants", "Bearers", "Team"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("List submenu missing %q\n--- got ---\n%s", want, out)
 		}
 	}
-	if !strings.Contains(out, "1-4 jump") {
-		t.Errorf("List submenu footer should say `1-4 jump`:\n%s", out)
+	m.help = true
+	if out := m.viewMenu(); !strings.Contains(ansi.Strip(out), "1–4") || !strings.Contains(ansi.Strip(out), "? close") {
+		t.Errorf("List submenu help should list `1–4 jump` and `? close`:\n%s", out)
 	}
 }
 
@@ -101,9 +105,27 @@ func TestMenuTitle_IsShortDop(t *testing.T) {
 	// sessionUnlocked which hits the admin-session branch requiring
 	// adminClient — bypass by rendering viewGroups directly and
 	// checking the title separately via the known constant).
-	out := m.viewGroups()
+	out := m.viewMenu()
 	// Not expected to contain "Doors of Perception" anywhere.
 	if strings.Contains(out, "Doors of Perception") {
 		t.Errorf("tagline should be gone from the view:\n%s", out)
+	}
+}
+
+func TestShortDuration(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		30 * time.Minute:                "30m",
+		time.Hour:                       "1h",
+		90 * time.Minute:                "1h30m",
+		45 * time.Second:                "45s",
+		0:                               "0s",
+		time.Hour + 5*time.Second:       "1h",
+		10*time.Minute + time.Second:    "10m",
+		29*time.Minute + 59*time.Second: "30m",
+		7 * 24 * time.Hour:              "7d",
+	} {
+		if got := shortDuration(d); got != want {
+			t.Errorf("shortDuration(%v) = %q, want %q", d, got, want)
+		}
 	}
 }
