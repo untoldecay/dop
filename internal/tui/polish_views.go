@@ -95,9 +95,13 @@ func (v *syncView) View() string {
 
 // --- clipboard helper (for bearer display) ---
 
+// clipboardCopy is the seam views call; tests swap it to avoid
+// touching the real clipboard.
+var clipboardCopy = copyToClipboard
+
 // copyToClipboard copies via OSC 52 (works over SSH and in most modern
 // terminals) and also via pbcopy / xclip / xsel when one is installed. Call it
-// only from Update on the c key, never from View.
+// only from Update, never from View.
 func copyToClipboard(s string) bool {
 	termenv.NewOutput(os.Stdout).Copy(s)
 	var cmd *exec.Cmd
