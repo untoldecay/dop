@@ -8,7 +8,7 @@ Every `dop` command, grouped by what you're trying to do. Bare `dop` launches th
 - [Admin session](#admin-session) — `init`, `login`, `logout`, `status`, `set-approval`, `join`, `reset`
 - [Vault attach + sync](#vault-attach--sync) — `init`, `pull`, `push`, `vault edit`, `doctor`
 - [Integrations](#integrations) — `add`, `list`, `remove`, `remove-token`, `set-token`, `rename-token`
-- [Grants](#grants) — `add`, `list`, `show`, `remove`
+- [Grants](#grants) — `add`, `list`, `show`, `rename`, `remove`
 - [Tokens](#tokens-bearers) — `issue`, `list`, `show`, `revoke`, `prune`, `repin`, `reseal`, `add-grant`, `remove-grant`, `rotate`
 - [Claim + approval](#claim--approval) — `claim`, `pending`, `approve`, `reject`, `approve-remote`
 - [Agent keys](#agent-keys) — `list`, `info`, `migrate`, `sweep`, `delete`
@@ -368,6 +368,22 @@ dop grant show <grant-id> [--all] [--json]
 |---|---|---|
 | `--all` | false | Include revoked tokens. |
 | `--json` | false | JSON instead of human-readable. |
+
+### `dop grant rename`
+
+Rename a grant id. Every active bearer whose record lists the old id gets the new id and a fresh signature.
+
+```
+dop grant rename --from <ID> --to <ID> [--passphrase-stdin]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--from` | "" | Current grant id (required; must exist). |
+| `--to` | "" | New grant id (required; must not exist). |
+| `--passphrase-stdin` | false | Read the approval passphrase from stdin (protected grants: owner only). |
+
+Prints `dop grant rename: "<from>" → "<to>" (updated <n> bearer(s))` on stderr and logs a `grant_rename` audit event. Bearers of every key type keep working without a reseal or re-issue: the env holds no grant ids (env keys come from the grant's prefix, which defaults to integration + credential), so the bundle env and `env_wrapped` stay valid and the generation is not bumped.
 
 ### `dop grant remove`
 

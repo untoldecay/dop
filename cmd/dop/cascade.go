@@ -182,19 +182,28 @@ func cascadeGrantRemoval(
 				// list — exec will see the shorter grants on the
 				// record, but the bundle env (which is bearer-
 				// encrypted) still holds the stale credential.
-				rec := vaultCapability2Record(c, capID)
-				if err := signRecordViaDaemon(client, &rec); err != nil {
-					return out, fmt.Errorf("sign %s: %w", c.LookupID, err)
-				}
-				putCapability(v, capID, rec)
-				if err := writeRecordSidecar(paths, rec); err != nil {
-					return out, fmt.Errorf("write sidecar %s: %w", c.LookupID, err)
+				if err := resignCapability(client, paths, v, capID, c); err != nil {
+					return out, err
 				}
 				out.Ed25519Stale = append(out.Ed25519Stale, c.Subject)
 			}
 		}
 	}
 	return out, nil
+}
+
+// resignCapability re-signs c through the daemon, stores it with
+// putCapability and rewrites its sidecar. Env payloads are untouched.
+func resignCapability(client *admin.Client, paths *config.Paths, v *vault.Vault, capID string, c vault.Capability) error {
+	rec := vaultCapability2Record(c, capID)
+	if err := signRecordViaDaemon(client, &rec); err != nil {
+		return fmt.Errorf("sign %s: %w", c.LookupID, err)
+	}
+	putCapability(v, capID, rec)
+	if err := writeRecordSidecar(paths, rec); err != nil {
+		return fmt.Errorf("write sidecar %s: %w", c.LookupID, err)
+	}
+	return nil
 }
 
 // cascadePreview is a non-mutating variant used by the TUI

@@ -368,7 +368,12 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.advTab, f.cur = !v.advTab, 0
 			return v, nil
 		}
-		switch f.key(v.rows(), mm) {
+		kindWas := v.kind.pick
+		r := f.key(v.rows(), mm)
+		if v.kind.pick != kindWas {
+			v.url.in.SetValue("") // a base URL is never sent as --cmd
+		}
+		switch r {
 		case formBack:
 			v.back()
 		case formNext:

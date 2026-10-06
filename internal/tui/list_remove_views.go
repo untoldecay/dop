@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 
@@ -1420,7 +1421,12 @@ func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) 
 		v.ieAdvTab, f.cur = !v.ieAdvTab, 0
 		return v, nil
 	}
-	switch f.key(v.ieRows(v.ieAdvTab), mm) {
+	kindWas := v.ieKind.pick
+	r := f.key(v.ieRows(v.ieAdvTab), mm)
+	if v.ieKind.pick != kindWas {
+		v.ieURL.in.SetValue("") // a base URL is never sent as --cmd
+	}
+	switch r {
 	case formBack:
 		v.mode = v.from
 	case formNext:
@@ -1553,6 +1559,7 @@ const (
 	grantModeDone    = 4
 	grantModeEdit    = 5
 	grantModeReview  = 6
+	grantModeRename  = 7
 )
 
 type grantListView struct {
@@ -1581,6 +1588,11 @@ type grantListView struct {
 	editForm                            denseForm
 	edProj, edTags, edEnv, edPr, edPass *formField
 	edWas                               map[*formField]string
+
+	// rename: one input; a protected grant asks the passphrase after it.
+	renameIn, renamePass textinput.Model
+	renameAt             int    // 1: the passphrase input has the caret
+	keep                 string // id the cursor lands on after the next load
 }
 
 func newGrantListView(c *admin.Client, p *config.Paths) *grantListView {
@@ -1623,6 +1635,7 @@ func (v *grantListView) selectedID() string {
 
 var grantActions = []listAction{
 	{label: "Edit", key: "e", desc: "projects, tags, env prefix, protection"},
+	{label: "Rename", key: "n", desc: "bearers carrying it follow"},
 	{label: "Remove", key: "r", desc: "bearers holding it fail on their next exec"},
 }
 
@@ -1659,6 +1672,10 @@ func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.ids = append(v.ids, id)
 		}
 		sort.Strings(v.ids)
+		if i := slices.Index(v.ids, v.keep); i >= 0 {
+			v.cursor = i
+		}
+		v.keep = ""
 		v.cursor = max(min(v.cursor, len(v.ids)-1), 0)
 		items := make([]list.Item, len(v.ids))
 		for i, id := range v.ids {
@@ -1668,9 +1685,12 @@ func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case grantActionMsg:
 		if mm.err != "" {
 			// Errors stay on the screen that caused them, in plain words.
-			if mm.kind == "edit" {
+			switch mm.kind {
+			case "edit":
 				v.err, v.mode = "Save failed: "+cliErr(mm.err), grantModeReview
-			} else {
+			case "rename":
+				v.err, v.mode = "Rename failed: "+cliErr(mm.err), grantModeRename
+			default:
 				v.err, v.mode = "Remove failed: "+cliErr(mm.err), v.from
 			}
 			return v, nil
@@ -1697,6 +1717,8 @@ func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateDetail(mm)
 		case grantModeConfirm:
 			return v.updateConfirm(mm)
+		case grantModeRename:
+			return v.updateRename(mm)
 		case grantModeEdit, grantModeReview:
 			if !v.editForm.typing() && toggleHelp(&v.help, mm) {
 				return v, nil
@@ -1707,8 +1729,11 @@ func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return v, nil // done screens leave on enter only
 			}
 			v.done, v.mode = v.solo, grantModeList
-			if v.pending == "edit" {
+			switch v.pending {
+			case "edit":
 				v.done, v.mode = false, grantModeDetail
+			case "rename":
+				v.keep = strings.TrimSpace(v.renameIn.Value())
 			}
 			v.pending = ""
 			return v, v.load
@@ -1730,7 +1755,7 @@ func (v *grantListView) updateList(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(v.ids) > 0 {
 			v.mode, v.actionCursor = grantModeDetail, 0
 		}
-	case "e", "r":
+	case "e", "n", "r":
 		if len(v.ids) > 0 {
 			return v.runAction(k)
 		}
@@ -1752,21 +1777,88 @@ func (v *grantListView) updateDetail(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		stepCursor(&v.actionCursor, len(grantActions), 1)
 	case "enter":
 		return v.runAction(grantActions[v.actionCursor].key)
-	case "e", "r":
+	case "e", "n", "r":
 		return v.runAction(k)
 	}
 	return v, nil
 }
 
-// runAction: e opens the edit form, r the remove confirm.
+// runAction: e opens the edit form, n the rename, r the remove confirm.
 func (v *grantListView) runAction(k string) (tea.Model, tea.Cmd) {
 	v.from, v.help = v.mode, false
-	if k == "e" {
+	switch k {
+	case "e":
 		v.openEditor()
-	} else {
+	case "n":
+		v.renameIn, v.renamePass, v.renameAt = newFormInput(false), newFormInput(true), 0
+		v.renameIn.SetValue(v.selectedID())
+		v.renameIn.CursorEnd()
+		v.err, v.mode = "", grantModeRename
+	default:
 		v.mode = grantModeConfirm
 	}
 	return v, nil
+}
+
+// updateRename is the rename step: enter saves; a protected grant asks
+// its approval passphrase on the same screen first.
+func (v *grantListView) updateRename(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	v.err = ""
+	from, to := v.selectedID(), strings.TrimSpace(v.renameIn.Value())
+	prot := v.items[from].Protected
+	switch mm.String() {
+	case "esc":
+		if v.renameAt == 1 {
+			v.renameAt = 0
+			return v, nil
+		}
+		v.mode = v.from
+	case "enter":
+		_, taken := v.items[to]
+		switch {
+		case to == "":
+			v.err = "Enter a name."
+		case to == from:
+			v.err = "That is its current name."
+		case taken:
+			v.err = "A grant named " + to + " already exists."
+		case prot && v.renameAt == 0:
+			v.renameAt = 1
+		case prot && v.renamePass.Value() == "":
+			v.err = "Enter the approval passphrase."
+		default:
+			if cmd := v.locked(mm, &v.err); cmd != nil {
+				return v, cmd
+			}
+			args, pass := []string{"grant", "rename", "--from", from, "--to", to}, ""
+			if prot {
+				args, pass = append(args, "--passphrase-stdin"), v.renamePass.Value()
+			}
+			v.mode, v.pending = grantModeRun, "rename"
+			return v, func() tea.Msg {
+				_, err := runDop(pass, args...)
+				return grantActionMsg{kind: "rename", err: err}
+			}
+		}
+	default:
+		if v.renameAt == 1 {
+			edit(&v.renamePass, mm)
+		} else {
+			edit(&v.renameIn, mm)
+		}
+	}
+	return v, nil
+}
+
+func (v *grantListView) viewRename(width, height int) string {
+	w := wiz{width: width, height: height}
+	in := []string{inputRow(&v.renameIn)}
+	if v.renameAt == 1 {
+		v.renameIn.Blur()
+		in = []string{"  " + v.renameIn.View(), "", mutedSt.Render("Approval passphrase"), inputRow(&v.renamePass)}
+	}
+	return w.screen("Rename grant", "", "New id for "+v.selectedID(), in,
+		"Bearers carrying it follow the new id.", v.err, "", keyMap{short: []key.Binding{hint("enter", "save"), keyBack}})
 }
 
 func (v *grantListView) openEditor() {
@@ -1886,7 +1978,7 @@ func (v *grantListView) doEdit() tea.Cmd {
 var grantListKeys = keyMap{
 	short: []key.Binding{keyOpen, keyBack},
 	full: [][]key.Binding{
-		{keyMove, hint("enter", "open grant"), hint("e", "edit"), hint("r", "remove")},
+		{keyMove, hint("enter", "open grant"), hint("e", "edit"), hint("n", "rename"), hint("r", "remove")},
 		{keyBack, keyQuit},
 	},
 	notes: []string{"Projects and tags group grants; they are not permissions."},
@@ -1895,7 +1987,7 @@ var grantListKeys = keyMap{
 var grantDetailKeys = keyMap{
 	short: []key.Binding{hint("enter", "run"), hint("e", "edit"), keyBack},
 	full: [][]key.Binding{
-		{keyMove, hint("enter", "run action"), hint("e", "edit"), hint("r", "remove")},
+		{keyMove, hint("enter", "run action"), hint("e", "edit"), hint("n", "rename"), hint("r", "remove")},
 		{keyBack, keyQuit},
 	},
 	notes: []string{"Projects and tags group grants; they are not permissions."},
@@ -1922,17 +2014,23 @@ func (v *grantListView) View() string {
 		body = append(body, mutedSt.Render("  Bearers holding it fail on their next exec."))
 		return frame(width, height, "Remove "+id+"?", nil, "", body, "", confirmFoot("remove"))
 	case grantModeRun:
-		title := "Removing " + id + "…"
-		if v.pending == "edit" {
-			title = "Saving grant…"
+		title := map[string]string{"edit": "Saving grant…", "rename": "Renaming grant…"}[v.pending]
+		if title == "" {
+			title = "Removing " + id + "…"
 		}
 		return frame(width, height, title, nil, "", nil, "", "")
 	case grantModeDone:
-		title := map[string]string{"remove": "✓ Grant removed", "edit": "✓ Grant saved"}[v.pending]
-		body := append(strings.Split(kv([2]string{"grant", id}), "\n"), mutedSt.Render("  The vault is synced with the team."))
+		title := map[string]string{"remove": "✓ Grant removed", "edit": "✓ Grant saved", "rename": "✓ Grant renamed"}[v.pending]
+		rows := [][2]string{{"grant", id}}
+		if v.pending == "rename" {
+			rows = [][2]string{{"grant", strings.TrimSpace(v.renameIn.Value())}, {"was", id}}
+		}
+		body := append(strings.Split(kv(rows...), "\n"), mutedSt.Render("  The vault is synced with the team."))
 		return frame(width, height, title, nil, "", body, "", footer(width, hint("enter", "done")))
 	case grantModeEdit, grantModeReview:
 		return v.viewEdit(width, height)
+	case grantModeRename:
+		return v.viewRename(width, height)
 	}
 
 	km := grantListKeys
