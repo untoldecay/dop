@@ -24,6 +24,7 @@ const (
 	EventClaimApproved = "claim_approved"
 	EventClaimDenied   = "claim_denied"
 	EventRepin         = "repin"
+	EventPortable      = "portable" // portable stash stored or removed
 	EventRevoke        = "revoke"
 	EventExec          = "exec"
 	// v1.9.7 — `dop env` (like exec) surfaces plaintext values,

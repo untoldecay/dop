@@ -441,6 +441,14 @@ dop token repin --subject <S> [--token-file <PATH>] [--pin-ttl 1h]
 
 Refuses to repin an already-claimed capability (revoke + reissue to rebind).
 
+### `dop token portable`
+
+Store or remove the portable copy (bearer wrapped to your admin age key) that `dop use` reads. `--on` needs the current bearer and checks it against the record; both directions ask the approval passphrase.
+
+```
+dop token portable --subject <S> (--on | --off) [--token-file <PATH> | --token-stdin] [--passphrase-stdin]
+```
+
 ### `dop token reseal`
 
 Regenerate `EnvWrapped` from current vault grants using the agent's P-256 pubkey. Needed to push grant-list changes to a bound bearer when `token add-grant` / `remove-grant` isn't an option.
