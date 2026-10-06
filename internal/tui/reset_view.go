@@ -1,26 +1,26 @@
-// v1.9.2 — TUI wrapper for `dop admin reset`. System > Reset (wipe
-// local state). Requires typing "RESET" to confirm.
+// TUI wrapper for `dop admin reset`. System > Uninstall (wipe
+// local state). Requires typing "UNINSTALL" to confirm.
 
 package tui
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/fray/dop/internal/config"
 )
 
 type resetView struct {
+	wiz
 	paths *config.Paths
 
 	step    int // 0 = confirm, 1 = running, 2 = done
-	confBuf strings.Builder
+	confBuf textinput.Model
 	err     string
 	done    bool
 	flash   string
@@ -34,7 +34,9 @@ type resetDone struct {
 }
 
 func newResetView(paths *config.Paths) *resetView {
-	return &resetView{paths: paths}
+	v := &resetView{paths: paths, confBuf: newFormInput(false)}
+	v.confBuf.Placeholder = "UNINSTALL"
+	return v
 }
 
 func (v *resetView) Init() tea.Cmd { return nil }
@@ -42,55 +44,44 @@ func (v *resetView) Done() bool    { return v.done }
 func (v *resetView) Flash() string { return v.flash }
 
 func (v *resetView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.wizMsg(msg, true); ok {
+		return v, cmd
+	}
 	switch mm := msg.(type) {
 	case resetDone:
-		v.step = 2
-		v.rc = mm.rc
-		v.stdErr = mm.err
-		if mm.rc == 0 {
-			v.flash = "DOP wiped from this machine — re-install with the one-liner to come back"
+		v.rc, v.stdErr = mm.rc, mm.err
+		if mm.rc != 0 {
+			v.step, v.err = 0, "Uninstall failed: "+displayOr(firstLine(mm.err), "unknown error")
+			return v, nil
 		}
+		v.step = 2
+		v.flash = "DOP wiped from this machine — re-install with the one-liner to come back"
 		return v, nil
 	case tea.KeyMsg:
+		switch {
+		case v.step == 1:
+			return v, nil // subprocess running, ignore keys
+		case v.step == 2:
+			// the binary backing this process was just unlinked: quit
+			// the TUI instead of returning to a setup menu.
+			v.done = true
+			return v, tea.Quit
+		}
+		if mm.String() != "enter" {
+			v.err = ""
+		}
 		switch mm.String() {
 		case "esc", "ctrl+c":
 			v.done = true
-			return v, nil
-		}
-		if v.step == 2 {
-			v.done = true
-			// rc6n — on successful uninstall, QUIT the whole TUI
-			// instead of returning to the setup menu. The binary that
-			// backs this process just got unlinked; staying open to
-			// show "Setup admin" would be nonsensical since there's no
-			// `dop admin init` to run anymore.
-			if v.rc == 0 {
-				return v, tea.Quit
-			}
-			return v, nil
-		}
-		if v.step == 1 {
-			return v, nil // subprocess running, ignore keys
-		}
-		switch mm.String() {
 		case "enter":
-			if strings.TrimSpace(v.confBuf.String()) != "RESET" {
-				v.err = "must type RESET (all caps) to confirm"
+			if strings.TrimSpace(v.confBuf.Value()) != "UNINSTALL" {
+				v.err = "Type UNINSTALL in capitals to confirm"
 				return v, nil
 			}
-			v.err = ""
 			v.step = 1
-			return v, v.launch()
-		case "backspace":
-			s := v.confBuf.String()
-			if len(s) > 0 {
-				v.confBuf.Reset()
-				v.confBuf.WriteString(s[:len(s)-1])
-			}
+			return v, tea.Batch(v.spinStart(), v.launch())
 		default:
-			if len(mm.Runes) > 0 {
-				v.confBuf.WriteString(string(mm.Runes))
-			}
+			edit(&v.confBuf, mm)
 		}
 	}
 	return v, nil
@@ -104,7 +95,7 @@ func (v *resetView) launch() tea.Cmd {
 		}
 		// rc6n — TUI Uninstall → full purge (state + binary). CLI
 		// `dop admin reset` without --purge keeps the binary.
-		cmd := exec.Command(self, "admin", "reset", "--force", "--purge")
+		cmd := exec.Command(self, "admin", "uninstall", "--force", "--purge")
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -118,59 +109,16 @@ func (v *resetView) launch() tea.Cmd {
 }
 
 func (v *resetView) View() string {
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Reset — wipe local DOP state") + "\n\n")
-
-	warn := lipgloss.NewStyle().Foreground(danger).Bold(true)
-	b.WriteString(warn.Render("⚠  This is destructive.") + "\n\n")
-	b.WriteString("Will delete everything under:\n")
-	b.WriteString("  " + mutedSt.Render(v.paths.Root) + "\n\n")
-
-	b.WriteString(mutedSt.Render("Contents that go away:") + "\n")
-	items := []string{
-		"wrapped admin keys (admin.age.enc)",
-		"approval passphrase hash",
-		"vault clone (safe — encrypted at rest, remains on GitHub)",
-		"agent private keys",
-		"generation cache, pending PIN / remote / invite files",
-		"this machine's audit log",
-		"credential-map.yaml",
+	switch v.step {
+	case 1:
+		return v.running("Uninstall", "Uninstalling dop")
+	case 2:
+		return v.doneScreen("dop uninstalled", nil, "Re-install with the one-liner from github.com/untoldecay/dop to come back.", "")
 	}
-	for _, it := range items {
-		b.WriteString("  · " + mutedSt.Render(it) + "\n")
-	}
-	b.WriteString("\n")
-	// rc6n — the TUI purges the binary too; CLI (dop admin reset) keeps
-	// it unless called with --purge.
 	binPath, _ := os.Executable()
-	if binPath == "" {
-		binPath = "the dop binary"
-	}
-	b.WriteString(mutedSt.Render("The dop binary at ") + binPath + mutedSt.Render(" WILL be removed.") + "\n\n")
-
-	if v.step == 0 {
-		b.WriteString(cursorSt.Render("Type RESET (all caps) to confirm") + ": ")
-		b.WriteString(v.confBuf.String())
-		b.WriteString(cursorSt.Render("▎") + "\n")
-		if v.err != "" {
-			b.WriteString("\n" + failSt.Render(v.err) + "\n")
-		}
-		b.WriteString("\n" + helpSt.Render("enter confirm | esc cancel"))
-	}
-	if v.step == 1 {
-		b.WriteString(mutedSt.Render("wiping…") + "\n")
-	}
-	if v.step == 2 {
-		b.WriteString("\n")
-		if v.rc == 0 {
-			b.WriteString(okSt.Render("✓ done — DOP is gone from this machine.") + "\n")
-			b.WriteString(mutedSt.Render("  re-install with the one-liner at https://github.com/untoldecay/dop to come back.") + "\n")
-		} else {
-			b.WriteString(failSt.Render("✗ reset failed:") + "\n")
-			b.WriteString(mutedSt.Render("  "+v.stdErr) + "\n")
-		}
-		b.WriteString("\n" + helpSt.Render("any key to exit"))
-	}
-	fmt.Fprintln(&b)
-	return b.String()
+	body := strings.Split(strings.TrimRight(kv([2]string{"removes", midTrunc(v.paths.Root, 66)}, [2]string{"binary", midTrunc(displayOr(binPath, "the dop binary"), 66)}), "\n"), "\n")
+	body = append(body, "", mutedSt.Render("  Admin keys, approval hash, vault clone (the remote stays), agent keys,"),
+		mutedSt.Render("  caches, pending files, audit log and credential map go away."), "",
+		mutedSt.Render("Type UNINSTALL to confirm"), inputRow(&v.confBuf))
+	return frame(v.width, v.height, "Uninstall dop?", nil, "", body, status{err: v.err}.String(), confirmFoot("uninstall"))
 }

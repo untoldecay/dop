@@ -4,10 +4,12 @@ package tui
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/fray/dop/internal/config"
@@ -16,47 +18,39 @@ import (
 
 // ---------- Setup admin (first-run admin init) ----------
 
-// setupAdminView is the first-run TUI. It collects BOTH passphrases
-// DOP requires — admin (wraps the key, typed on every `dop admin login`)
+// setupAdminView is the first-run wizard. It collects BOTH passphrases
+// DOP requires — admin (wraps the key, typed on every dop admin login)
 // AND approval (typed on the phone to approve agent claims) — before
-// shelling out to `dop admin init --passphrase-stdin`, which reads them
-// in the same order.
-//
-// v1.10.5 — previous version only asked for the admin passphrase and
-// fed one line to the CLI. The CLI then failed with "approval passphrase
-// must be at least 10 characters" after having already written the
-// admin key to disk. Users were left in a half-installed state with a
-// confusing error. Now every field is on-screen with hints explaining
-// what each passphrase is for.
+// shelling out to dop admin init --passphrase-stdin, which reads them
+// in the same order. Then it signs in and asks for the harness.
 const (
 	setupStepAdminPass    = 0
 	setupStepAdminConfirm = 1
 	setupStepApprovalPass = 2
 	setupStepApprovalConf = 3
-	setupStepRunning      = 4
-	setupStepLoggingIn    = 5
-	// rc7k — first-start harness picker. New operators pick their AI
-	// harness here so DOP's trust-context cache knows which session
-	// env var to consult. Persisted to userprefs.Harness; the Settings
-	// view can change it later.
-	setupStepHarness = 6
+	setupStepReview       = 4
+	setupStepRunning      = 5
+	setupStepLoggingIn    = 6
+	setupStepHarness      = 7 // first-start harness picker, persisted to userprefs.Harness
 )
 
 type setupAdminView struct {
+	wiz
 	paths         *config.Paths
 	step          int
-	adminPass1    strings.Builder
-	adminPass2    strings.Builder
-	approvPass1   strings.Builder
-	approvPass2   strings.Builder
-	harnessCursor int // rc7k — cursor into userprefs.HarnessChoices
+	bufs          [4]textinput.Model // admin, admin confirm, approval, approval confirm
+	harnessCursor int                // cursor into userprefs.HarnessChoices
 	err           string
 	done          bool
 	flash         string
 }
 
 func newSetupAdminView(paths *config.Paths) *setupAdminView {
-	return &setupAdminView{paths: paths}
+	v := &setupAdminView{paths: paths}
+	for i := range v.bufs {
+		v.bufs[i] = newFormInput(true)
+	}
+	return v
 }
 func (v *setupAdminView) Init() tea.Cmd { return nil }
 func (v *setupAdminView) Done() bool    { return v.done }
@@ -68,65 +62,57 @@ type setupInitDone struct {
 }
 type setupLoginDone struct{ err string }
 
+func (v *setupAdminView) curBuf() *textinput.Model {
+	if v.step < setupStepReview {
+		return &v.bufs[v.step]
+	}
+	return nil
+}
+
 func (v *setupAdminView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	in := v.curBuf()
+	if ok, cmd := v.wizMsg(msg, in != nil && in.Value() != ""); ok {
+		return v, cmd
+	}
 	switch mm := msg.(type) {
 	case setupInitDone:
 		if mm.err != "" {
-			v.err = mm.err
-			// Restart from the first passphrase — buffers cleared so the
-			// user can't accidentally re-submit a bad one.
-			v.step = setupStepAdminPass
-			v.adminPass1.Reset()
-			v.adminPass2.Reset()
-			v.approvPass1.Reset()
-			v.approvPass2.Reset()
+			v.err, v.step = "Setup failed: "+firstLine(mm.err), setupStepReview
 			return v, nil
 		}
 		v.step = setupStepLoggingIn
 		return v, v.login(mm.pass)
 	case setupLoginDone:
 		if mm.err != "" {
-			v.err = mm.err
 			v.done = true
-			v.flash = "admin created but login failed — try 'dop admin login' manually"
+			v.flash = "admin created but login failed · run dop admin login"
 			return v, nil
 		}
-		// rc7k — after login succeeds, offer the harness picker before
-		// landing on the first menu. Operators who pick get the right
-		// trust-context env var consulted automatically.
 		v.step = setupStepHarness
 		return v, nil
 	case tea.KeyMsg:
-		// rc7k — harness picker owns its own key routing.
-		if v.step == setupStepHarness {
+		k := mm.String()
+		if k != "enter" {
+			v.err = ""
+		}
+		switch {
+		case v.step == setupStepHarness:
 			return v.updateHarnessStep(mm)
+		case v.step > setupStepReview:
+			return v, nil // running / logging in
 		}
-		if v.step >= setupStepRunning {
-			return v, nil // running / logging in — ignore keys
-		}
-		switch mm.String() {
-		case "esc", "ctrl+c":
+		switch k {
+		case "ctrl+c":
 			v.done = true
 		case "enter":
 			return v.advance()
-		case "tab", "down":
-			if v.step < setupStepApprovalConf {
-				v.step++
-			}
-		case "shift+tab", "up":
-			if v.step > setupStepAdminPass {
-				v.step--
-			}
-		case "backspace":
-			buf := v.currentBuf()
-			s := buf.String()
-			if len(s) > 0 {
-				buf.Reset()
-				buf.WriteString(s[:len(s)-1])
+		case "esc", "shift+tab":
+			if wizBack(mm, &v.step) < 0 {
+				v.done = true
 			}
 		default:
-			if len(mm.Runes) > 0 {
-				v.currentBuf().WriteString(string(mm.Runes))
+			if in != nil {
+				edit(in, mm)
 			}
 		}
 	}
@@ -134,97 +120,69 @@ func (v *setupAdminView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (v *setupAdminView) advance() (tea.Model, tea.Cmd) {
+	val := func(i int) string { return v.bufs[i].Value() }
 	switch v.step {
 	case setupStepAdminPass:
-		if v.adminPass1.Len() < 8 {
-			v.err = "admin passphrase must be at least 8 characters"
+		if len(val(0)) < 8 {
+			v.err = "Admin passphrase must be at least 8 characters"
 			return v, nil
 		}
-		v.err = ""
-		v.step = setupStepAdminConfirm
 	case setupStepAdminConfirm:
-		if v.adminPass1.String() != v.adminPass2.String() {
-			v.err = "admin passphrases don't match"
-			v.adminPass2.Reset()
+		if val(0) != val(1) {
+			v.err = "Admin passphrases don't match"
+			v.bufs[1].Reset()
 			return v, nil
 		}
-		v.err = ""
-		v.step = setupStepApprovalPass
 	case setupStepApprovalPass:
-		if v.approvPass1.Len() < 10 {
-			v.err = "approval passphrase must be at least 10 characters"
+		if len(val(2)) < 10 {
+			v.err = "Approval passphrase must be at least 10 characters"
 			return v, nil
 		}
-		if v.approvPass1.String() == v.adminPass1.String() {
-			v.err = "the approval passphrase must be different from the admin passphrase"
+		if val(2) == val(0) {
+			v.err = "The approval passphrase must differ from the admin passphrase"
 			return v, nil
 		}
-		v.err = ""
-		v.step = setupStepApprovalConf
 	case setupStepApprovalConf:
-		if v.approvPass1.String() != v.approvPass2.String() {
-			v.err = "approval passphrases don't match"
-			v.approvPass2.Reset()
+		if val(2) != val(3) {
+			v.err = "Approval passphrases don't match"
+			v.bufs[3].Reset()
 			return v, nil
 		}
-		v.err = ""
-		v.step = setupStepRunning
-		return v, v.doInit()
+	case setupStepReview:
+		v.err, v.step = "", setupStepRunning
+		return v, tea.Batch(v.spinStart(), v.doInit())
 	}
+	v.err = ""
+	v.step++
 	return v, nil
 }
 
-// updateHarnessStep — rc7k. Up/down moves the cursor; enter commits
-// the pick (saves to userprefs) and ends the setup. esc skips the
-// picker (leaves Harness empty; operator can set in Settings later).
+// updateHarnessStep: up/down moves, enter saves the pick to userprefs
+// and ends the setup, esc skips (set it later in Settings).
 func (v *setupAdminView) updateHarnessStep(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch mm.String() {
-	case "esc":
-		// Skip — leave Harness empty; operator can pick in Settings.
-		v.flash = "admin ready — session unlocked (harness pick skipped; set it in Settings → Harness)"
+	case "esc", "ctrl+c":
+		v.flash = "admin ready · harness not set (Settings > Harness)"
 		v.done = true
-		return v, nil
-	case "up", "k":
-		if v.harnessCursor > 0 {
-			v.harnessCursor--
-		}
-	case "down", "j":
-		if v.harnessCursor < len(userprefs.HarnessChoices)-1 {
-			v.harnessCursor++
-		}
+	case "up", "down":
+		stepCursor(&v.harnessCursor, len(userprefs.HarnessChoices), map[string]int{"up": -1, "down": 1}[mm.String()])
 	case "enter":
 		pick := userprefs.HarnessChoices[v.harnessCursor]
 		prefs := userprefs.Load(v.paths)
 		prefs.Harness = pick
 		if err := userprefs.Save(v.paths, prefs); err != nil {
-			v.err = "save prefs: " + err.Error()
+			v.err = "Save prefs: " + err.Error()
 			return v, nil
 		}
-		v.flash = "admin ready — harness set to " + userprefs.HarnessLabel(pick)
+		v.flash = "admin ready · harness set to " + userprefs.HarnessLabel(pick)
 		v.done = true
-		return v, nil
 	}
 	return v, nil
 }
 
-func (v *setupAdminView) currentBuf() *strings.Builder {
-	switch v.step {
-	case setupStepAdminPass:
-		return &v.adminPass1
-	case setupStepAdminConfirm:
-		return &v.adminPass2
-	case setupStepApprovalPass:
-		return &v.approvPass1
-	case setupStepApprovalConf:
-		return &v.approvPass2
-	}
-	var scratch strings.Builder
-	return &scratch
-}
-
 func (v *setupAdminView) doInit() tea.Cmd {
-	adminPass := v.adminPass1.String()
-	approvPass := v.approvPass1.String()
+	adminPass := v.bufs[0].Value()
+	approvPass := v.bufs[2].Value()
 	return func() tea.Msg {
 		self, _ := os.Executable()
 		cmd := exec.Command(self, "admin", "init", "--passphrase-stdin")
@@ -258,92 +216,45 @@ func (v *setupAdminView) login(pass string) tea.Cmd {
 }
 
 func (v *setupAdminView) View() string {
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Setup admin") + "\n")
-	b.WriteString(mutedSt.Render("First-run: choose TWO passphrases — they do different jobs.") + "\n\n")
-
-	if v.step == setupStepRunning {
-		b.WriteString("Generating admin keys…\n")
-		return b.String()
+	const title = "Setup admin"
+	switch v.step {
+	case setupStepRunning:
+		return v.running(title, "Generating admin keys")
+	case setupStepLoggingIn:
+		return v.running(title, "Signing in")
+	case setupStepHarness:
+		return harnessScreen(v.wiz, "Admin ready", v.harnessCursor, v.err)
+	case setupStepReview:
+		set := func(i int) string { return fmt.Sprintf("set, %d characters", len(v.bufs[i].Value())) }
+		return v.review(title, "Create the admin key?", [][2]string{{"admin passphrase", set(0)}, {"approval passphrase", set(2)}}, "create", false, v.err)
 	}
-	if v.step == setupStepLoggingIn {
-		b.WriteString("Signing in…\n")
-		return b.String()
-	}
-	// rc7k — harness picker step.
-	if v.step == setupStepHarness {
-		b.WriteString(okSt.Render("✓ admin ready, session unlocked.") + "\n\n")
-		b.WriteString("One last step: " + cursorSt.Render("which AI harness do you primarily use?") + "\n")
-		b.WriteString(mutedSt.Render("DOP's trust-context cache uses this to consult the right session env var") + "\n")
-		b.WriteString(mutedSt.Render("so `dop use` only pops the approval dialog once per conversation.") + "\n\n")
-		for i, choice := range userprefs.HarnessChoices {
-			prefix := "    "
-			label := userprefs.HarnessLabel(choice)
-			if i == v.harnessCursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				label = cursorSt.Render(label)
-			}
-			b.WriteString(prefix + label + "\n")
-		}
-		if v.err != "" {
-			b.WriteString("\n" + failSt.Render(v.err) + "\n")
-		}
-		b.WriteString("\n" + helpSt.Render("↑↓ pick | enter confirm | esc skip (change later in Settings → Harness)"))
-		return b.String()
-	}
-
-	// Explanations, always visible.
-	b.WriteString(mutedSt.Render("• admin passphrase (≥ 8 chars) — wraps your admin private key.") + "\n")
-	b.WriteString(mutedSt.Render("  You'll type this at every `dop admin login`.") + "\n")
-	b.WriteString(mutedSt.Render("• approval passphrase (≥ 10 chars, DIFFERENT) — separate secret.") + "\n")
-	b.WriteString(mutedSt.Render("  You'll type this on your phone to approve agent claims.") + "\n\n")
-
-	rows := []struct {
-		label string
-		val   string
-	}{
-		{"Admin passphrase", v.adminPass1.String()},
-		{"Confirm admin passphrase", v.adminPass2.String()},
-		{"Approval passphrase", v.approvPass1.String()},
-		{"Confirm approval passphrase", v.approvPass2.String()},
-	}
-	for i, r := range rows {
-		style := mutedSt
-		if i == v.step {
-			style = cursorSt
-		}
-		b.WriteString(style.Render(r.label) + ": ")
-		b.WriteString(strings.Repeat("•", len(r.val)))
-		if i == v.step {
-			b.WriteString(cursorSt.Render("▎"))
-		}
-		b.WriteString("\n")
-	}
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err) + "\n")
-	}
-	b.WriteString("\n" + helpSt.Render("enter next | tab/↑↓ jump between fields | esc cancel"))
-	return b.String()
+	prompt := []string{"Admin passphrase", "Confirm the admin passphrase", "Approval passphrase", "Confirm the approval passphrase"}[v.step]
+	helper := []string{"At least 8 characters. Wraps your admin key; typed at every login.", "",
+		"At least 10 characters, different. Typed on your phone to approve claims.", ""}[v.step]
+	km := wizKeys("next")
+	km.notes = []string{"Two passphrases, two jobs: admin unlocks this machine,", "approval confirms agent claims from your phone."}
+	return v.screen(title, counter(v.step, setupStepReview), prompt, []string{inputRow(&v.bufs[v.step])}, helper, v.err, "", km)
 }
 
 // ---------- Attach vault ----------
 
-// attachVaultView: prompts for vault URL/path, decides admin-vs-cache
-// based on presence of admin key, then shells to `dop init --vault`
-// or `dop init --cache`.
+// attachVaultView: one question (vault URL/path), then dop init --vault
+// (admin install) or dop init --cache (agent install).
 type attachVaultView struct {
-	paths   *config.Paths
+	wiz
+	paths          *config.Paths
 	adminIsPresent bool
-	url     strings.Builder
-	running bool
-	err     string
-	done    bool
-	flash   string
-	output  strings.Builder
+	url            textinput.Model
+	running        bool
+	err            string
+	done           bool
+	flash          string
 }
 
 func newAttachVaultView(paths *config.Paths, adminPresent bool) *attachVaultView {
-	return &attachVaultView{paths: paths, adminIsPresent: adminPresent}
+	v := &attachVaultView{paths: paths, adminIsPresent: adminPresent, url: newFormInput(false)}
+	v.url.Placeholder = "git@github.com:you/dop-vault.git"
+	return v
 }
 func (v *attachVaultView) Init() tea.Cmd { return nil }
 func (v *attachVaultView) Done() bool    { return v.done }
@@ -352,11 +263,14 @@ func (v *attachVaultView) Flash() string { return v.flash }
 type attachResultMsg struct{ err string }
 
 func (v *attachVaultView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.wizMsg(msg, v.url.Value() != ""); ok {
+		return v, cmd
+	}
 	switch mm := msg.(type) {
 	case attachResultMsg:
 		v.running = false
 		if mm.err != "" {
-			v.err = mm.err
+			v.err = "Attach failed: " + firstLine(mm.err)
 			return v, nil
 		}
 		v.flash = "vault attached"
@@ -365,27 +279,22 @@ func (v *attachVaultView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if v.running {
 			return v, nil
 		}
+		if mm.String() != "enter" {
+			v.err = ""
+		}
 		switch mm.String() {
 		case "esc", "ctrl+c":
 			v.done = true
 		case "enter":
-			u := strings.TrimSpace(v.url.String())
+			u := strings.TrimSpace(v.url.Value())
 			if u == "" {
+				v.err = "Vault URL is required"
 				return v, nil
 			}
 			v.running = true
-			v.err = ""
-			return v, v.attach(u)
-		case "backspace":
-			s := v.url.String()
-			if len(s) > 0 {
-				v.url.Reset()
-				v.url.WriteString(s[:len(s)-1])
-			}
+			return v, tea.Batch(v.spinStart(), v.attach(u))
 		default:
-			if len(mm.Runes) > 0 {
-				v.url.WriteString(string(mm.Runes))
-			}
+			edit(&v.url, mm)
 		}
 	}
 	return v, nil
@@ -410,25 +319,16 @@ func (v *attachVaultView) attach(u string) tea.Cmd {
 }
 
 func (v *attachVaultView) View() string {
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Attach vault") + "\n\n")
+	const title = "Attach vault"
+	if v.running {
+		return v.wiz.running(title, "Cloning "+strings.TrimSpace(v.url.Value()))
+	}
 	kind := "admin install"
 	if !v.adminIsPresent {
-		kind = "agent install (no admin key)"
+		kind = "agent install"
 	}
-	b.WriteString(mutedSt.Render("This machine: " + kind) + "\n\n")
-	b.WriteString("Vault repo URL or local path:\n")
-	b.WriteString("  " + v.url.String() + cursorSt.Render("▎") + "\n")
-	b.WriteString(mutedSt.Render("examples:") + "\n")
-	b.WriteString(mutedSt.Render("  https://github.com/you/dop-vault.git") + "\n")
-	b.WriteString(mutedSt.Render("  git@github.com:you/dop-vault.git") + "\n")
-	b.WriteString(mutedSt.Render("  /tmp/dop-vault-bare.git   (creates one)") + "\n")
-	if v.running {
-		b.WriteString("\n" + mutedSt.Render("cloning…") + "\n")
-	}
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err) + "\n")
-	}
-	b.WriteString("\n" + helpSt.Render("enter attach | esc cancel"))
-	return b.String()
+	km := wizKeys("attach")
+	km.notes = []string{"An https or ssh git URL, or a local path (a bare repo is created there)."}
+	return v.screen(title, kind, "Vault repo URL or local path", []string{inputRow(&v.url)},
+		"A local path that does not exist yet is created.", v.err, "", km)
 }

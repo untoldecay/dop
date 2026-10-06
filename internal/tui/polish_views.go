@@ -4,6 +4,7 @@ package tui
 
 import (
 	"bytes"
+	"github.com/muesli/termenv"
 	"os"
 	"os/exec"
 	"runtime"
@@ -16,6 +17,7 @@ import (
 
 // syncView runs `dop pull` or `dop push` and displays the output.
 type syncView struct {
+	wiz
 	action string // "pull" or "push"
 	paths  *config.Paths
 	out    strings.Builder
@@ -28,7 +30,7 @@ type syncView struct {
 func newSyncView(action string, paths *config.Paths) *syncView {
 	return &syncView{action: action, paths: paths}
 }
-func (v *syncView) Init() tea.Cmd { return v.run() }
+func (v *syncView) Init() tea.Cmd { return tea.Batch(v.spinStart(), v.run()) }
 func (v *syncView) Done() bool    { return v.done }
 func (v *syncView) Flash() string { return v.flash }
 
@@ -53,47 +55,51 @@ func (v *syncView) run() tea.Cmd {
 	}
 }
 func (v *syncView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.wizMsg(msg, false); ok {
+		return v, cmd
+	}
 	switch mm := msg.(type) {
 	case syncResultMsg:
 		v.ran = true
 		v.err = mm.err
 		v.out.WriteString(mm.out)
 		if mm.err == "" {
-			v.flash = v.action + " succeeded"
+			v.flash = "Vault " + v.action + "ed"
 		}
 	case tea.KeyMsg:
 		if v.ran {
 			v.done = true
 		}
-		_ = mm
 	}
 	return v, nil
 }
 func (v *syncView) View() string {
-	var b strings.Builder
-	if v.action == "pull" {
-		b.WriteString(titleSt.Render("Pull") + "\n\n")
-	} else {
-		b.WriteString(titleSt.Render("Push") + "\n\n")
-	}
+	verb := map[string]string{"pull": "pulled", "push": "pushed"}[v.action]
 	if !v.ran {
-		b.WriteString("running…")
-		return b.String()
+		return v.running(strings.ToUpper(v.action[:1])+v.action[1:], map[string]string{"pull": "Pulling", "push": "Pushing"}[v.action]+" the vault")
 	}
+	text, title, st := vocab(v.out.String()), "✓ Vault "+verb, status{}
 	if v.err != "" {
-		b.WriteString(failSt.Render("failed") + "\n\n" + v.err)
-	} else {
-		b.WriteString(okSt.Render("done") + "\n\n" + mutedSt.Render(v.out.String()))
+		text, title = vocab(v.err), "! "+strings.ToUpper(v.action[:1])+v.action[1:]+" failed"
+		st.setError(firstLine(strings.TrimPrefix(v.err, "! ")))
+		if strings.Contains(v.err, "rejected") {
+			st.setError("The vault changed on the server. Pull, then retry.")
+		}
 	}
-	b.WriteString("\n\n" + helpSt.Render("any key to go back"))
-	return b.String()
+	var body []string
+	for _, l := range strings.Split(strings.TrimSpace(text), "\n") {
+		body = append(body, "  "+mutedSt.Render(l))
+	}
+	return frame(v.width, v.height, title, nil, "", body, st.String(), footer(v.width, hint("enter", "done")))
 }
 
 // --- clipboard helper (for bearer display) ---
 
-// copyToClipboard tries pbcopy (macOS), xclip / xsel (Linux). Silent
-// no-op on failure — bearer stays on screen either way.
+// copyToClipboard copies via OSC 52 (works over SSH and in most modern
+// terminals) and also via pbcopy / xclip / xsel when one is installed. Call it
+// only from Update on the c key, never from View.
 func copyToClipboard(s string) bool {
+	termenv.NewOutput(os.Stdout).Copy(s)
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
@@ -103,12 +109,11 @@ func copyToClipboard(s string) bool {
 			cmd = exec.Command("xclip", "-selection", "clipboard")
 		} else if _, err := exec.LookPath("xsel"); err == nil {
 			cmd = exec.Command("xsel", "--clipboard", "--input")
-		} else {
-			return false
 		}
-	default:
-		return false
 	}
-	cmd.Stdin = strings.NewReader(s)
-	return cmd.Run() == nil
+	if cmd != nil {
+		cmd.Stdin = strings.NewReader(s)
+		_ = cmd.Run()
+	}
+	return true
 }
