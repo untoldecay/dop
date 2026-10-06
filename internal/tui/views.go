@@ -899,6 +899,12 @@ type listView struct {
 	repinNewPin     string
 	repinNewExpires string
 
+	// Portable toggle: on = bearer paste (0), passphrase (1), review (2);
+	// off = confirm (0), passphrase (1).
+	portStep   int
+	portBearer textField
+	portPass   textField
+
 	adminNames map[string]string // ed25519 pubkey → admin name, for "by alex"
 	doneSubj   string            // subject the done screen reports on
 	doneNote   string            // CLI result line for the done screen
@@ -935,7 +941,8 @@ const (
 	listModeRun       = 3
 	listModeGrantPick = 5 // add-grant / remove-grant picker
 	listModeRepin     = 6 // bearer + PIN TTL form
-	listModeDone      = 7 // ✓ outcome (revoke, reseal, grants, repin)
+	listModeDone      = 7 // ✓ outcome (revoke, reseal, grants, repin, portable)
+	listModePortable  = 8 // portable copy on/off wizard
 )
 
 func newListView(c *admin.Client, p *config.Paths) *listView {
@@ -1050,6 +1057,11 @@ func (v *listView) currentActions() []listAction {
 	if c.Binding != nil && c.Binding.Kind == "pin" && c.Binding.Pubkey == "" {
 		acts = append(acts, listAction{label: "Repin", key: "p", desc: "new PIN for a bearer the agent has not claimed yet"})
 	}
+	if c.PortableWrapped == "" {
+		acts = append(acts, listAction{label: "Portable: make portable", key: "o", desc: "store a copy so dop use works from your shells"})
+	} else {
+		acts = append(acts, listAction{label: "Portable: remove copy", key: "o", desc: "dop use stops working for this bearer"})
+	}
 	return append(acts, listAction{label: "Revoke", key: "r", destructive: true, desc: "the bearer stops working on its next exec"})
 }
 
@@ -1077,6 +1089,15 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.loadErr = mm.err
 		v.cursor = max(min(v.cursor, len(v.visible())-1), 0)
 	case listActionMsg:
+		if mm.err != "" && v.mode == listModeRun && strings.HasPrefix(v.pendingAction, "portable") {
+			// Errors land back in the wizard: a mismatch on the paste, the rest on the passphrase.
+			v.mode, v.portStep, v.err = listModePortable, 1, "Portable copy failed: "+cliErr(mm.err)
+			if strings.Contains(mm.err, "does not match") {
+				v.portStep, v.err = 0, "that bearer does not match "+v.doneSubj
+			}
+			v.portPass.Reset()
+			return v, nil
+		}
 		if mm.err != "" {
 			// Errors stay on the detail that caused them, in plain words.
 			v.err = map[string]string{"revoke": "Revoke", "reseal": "Reseal", "add": "Add grant",
@@ -1119,6 +1140,8 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateGrantPickMode(mm)
 		case listModeRepin:
 			return v.updateRepinMode(mm)
+		case listModePortable:
+			return v.updatePortableMode(mm)
 		case listModeDone:
 			if mm.String() == "c" && v.pendingAction == "repin" {
 				copyToClipboard(v.repinNewPin)
@@ -1129,6 +1152,9 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return v, nil // done screens leave on enter only
 			}
 			v.mode = listModeList
+			if strings.HasPrefix(v.pendingAction, "portable") {
+				v.mode = listModeAction // back to the Info tab, reloaded
+			}
 			v.pendingAction, v.doneNote, v.repinNewPin = "", "", ""
 			return v, v.load
 		}
@@ -1260,6 +1286,13 @@ func (v *listView) runAction(a listAction) (tea.Model, tea.Cmd) {
 		v.repinField = 0
 		v.repinBearerBuf.Reset()
 		v.repinTTLCursor = 0
+	case "o":
+		v.mode, v.portStep, v.pendingAction = listModePortable, 0, "portable-on"
+		if c := v.capabilities[v.selectedIndex()]; c.PortableWrapped != "" {
+			v.pendingAction = "portable-off"
+		}
+		v.portBearer.Reset()
+		v.portPass.Reset()
 	case "+":
 		// vault grants minus the ones already on this bearer.
 		if !v.prepareGrantPicker() {
@@ -1490,6 +1523,79 @@ func (v *listView) updateRepinMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return v, nil
 }
 
+// updatePortableMode drives the portable wizard; esc steps back, then
+// to the detail.
+func (v *listView) updatePortableMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	on, k := v.pendingAction == "portable-on", mm.String()
+	if on && v.portStep == 2 && toggleHelp(&v.help, mm) {
+		return v, nil
+	}
+	if k == "esc" {
+		v.err, v.help = "", false
+		if v.portStep == 0 {
+			v.mode, v.pendingAction = listModeAction, ""
+			v.portBearer.Reset()
+			v.portPass.Reset()
+		}
+		v.portStep = max(v.portStep-1, 0)
+		return v, nil
+	}
+	if k != "enter" {
+		switch {
+		case on && v.portStep == 0:
+			passKey(&v.portBearer, mm)
+		case v.portStep == 1:
+			passKey(&v.portPass, mm)
+		case !on && (k == "y" || k == "Y"):
+			v.portStep = 1
+		}
+		v.err = ""
+		return v, nil
+	}
+	switch {
+	case on && v.portStep == 0 && strings.TrimSpace(v.portBearer.String()) == "":
+		v.err = "Paste the current bearer."
+	case v.portStep == 1 && v.portPass.Len() == 0:
+		v.err = "The approval passphrase is required."
+	case v.portStep == 0 || (on && v.portStep == 1):
+		v.portStep, v.err = v.portStep+1, ""
+	default:
+		if cmd := v.locked(mm, &v.err); cmd != nil {
+			return v, cmd
+		}
+		v.mode, v.err = listModeRun, ""
+		return v, v.doPortable()
+	}
+	return v, nil
+}
+
+// doPortable shells out to dop token portable; bearer and passphrase go
+// on stdin (one line each), never in argv.
+func (v *listView) doPortable() tea.Cmd {
+	subject, on := v.doneSubj, v.pendingAction == "portable-on"
+	args := []string{"token", "portable", "--subject", subject, "--off", "--passphrase-stdin"}
+	stdin := v.portPass.String() + "\n"
+	if on {
+		args[4] = "--on"
+		args = append(args, "--token-stdin")
+		stdin = strings.TrimSpace(v.portBearer.String()) + "\n" + stdin
+	}
+	v.portBearer.Reset()
+	v.portPass.Reset()
+	return func() tea.Msg {
+		self, _ := os.Executable()
+		cmd := exec.Command(self, args...)
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+		cmd.Stdin = strings.NewReader(stdin)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return listActionMsg{err: strings.TrimSpace(stderr.String())}
+		}
+		return listActionMsg{}
+	}
+}
+
 // doRepin shells out to `dop token repin` with the pasted bearer in
 // a temp token-file so it never shows up in the process list.
 func (v *listView) doRepin() tea.Cmd {
@@ -1637,6 +1743,8 @@ func (v *listView) View() string {
 		return v.viewGrantPick(width, height)
 	case listModeRepin:
 		return v.viewRepin(width, height)
+	case listModePortable:
+		return v.viewPortable(width, height)
 	case listModeDone:
 		return v.viewDone(width, height)
 	}
@@ -1947,11 +2055,15 @@ func (v *listView) viewConfirm(width, height int) string {
 // (the subprocess can't be cancelled).
 func (v *listView) viewRun(width, height int) string {
 	verb := map[string]string{"revoke": "Revoking %s…", "reseal": "Resealing the env of %s…",
-		"add": "Adding grants to %s…", "remove": "Removing grants from %s…", "repin": "Repinning %s…"}[v.pendingAction]
+		"add": "Adding grants to %s…", "remove": "Removing grants from %s…", "repin": "Repinning %s…",
+		"portable-on": "Storing portable copy…", "portable-off": "Removing portable copy…"}[v.pendingAction]
 	if verb == "" {
 		verb = "Working on %s…"
 	}
-	return frame(width, height, fmt.Sprintf(verb, v.doneSubj), nil, "", nil, "", "")
+	if strings.Contains(verb, "%s") {
+		verb = fmt.Sprintf(verb, v.doneSubj)
+	}
+	return frame(width, height, verb, nil, "", nil, "", "")
 }
 
 // viewDone is the ✓ outcome of a bearer action; any key returns to the list.
@@ -1972,6 +2084,10 @@ func (v *listView) viewDone(width, height int) string {
 		title = fmt.Sprintf("✓ %s %sed", n, map[string]string{"add": "add", "remove": "remov"}[v.pendingAction])
 		rows = append(rows, [2]string{"grants", v.doneNote})
 		note = "Env resealed; the agent picks it up on its next exec."
+	case "portable-on":
+		title, note = "✓ Bearer is portable", "dop use "+v.doneSubj+" works from any of your shells"
+	case "portable-off":
+		title, note = "✓ Portable copy removed", "dop use no longer works for this bearer."
 	default: // repin
 		title, note = "✓ Bearer repinned", "Share the new PIN with the agent along with its bearer."
 		rows = append(rows, [2]string{"new PIN", v.repinNewPin}, [2]string{"valid", shortDur(v.repinNewExpires)})
@@ -2018,6 +2134,32 @@ func (v *listView) viewRepin(width, height int) string {
 	}
 	foot := footer(width, hint("enter", verb), hint("tab", "field"), keyBack)
 	return frame(width, height, "Repin "+v.doneSubj, nil, "", body, status{err: v.err}.String(), foot)
+}
+
+// viewPortable is the portable wizard: make portable (paste, passphrase,
+// review) or remove copy (confirm, passphrase).
+func (v *listView) viewPortable(width, height int) string {
+	w := wiz{width: width, height: height, help: v.help}
+	field := func(f *textField) []string {
+		before, after := f.SplitMasked("•")
+		return []string{focusSt.Render("› ") + before + focusSt.Render("▎") + after}
+	}
+	if v.pendingAction == "portable-off" {
+		title := "Remove the portable copy of " + v.doneSubj + "?"
+		if v.portStep == 0 {
+			return w.confirmScreen(title, []string{mutedSt.Render("  dop use will stop working for this bearer")}, "remove", v.err)
+		}
+		return w.screen(title, "", "Approval passphrase", field(&v.portPass), "", v.err, "", wizKeys("remove"))
+	}
+	title := "Make " + v.doneSubj + " portable"
+	switch v.portStep {
+	case 0:
+		return w.screen(title, counter(0, 2), "Paste the current bearer", field(&v.portBearer), "must match this bearer's record", v.err, "", wizKeys("next"))
+	case 1:
+		return w.screen(title, counter(1, 2), "Approval passphrase", field(&v.portPass), "", v.err, "", wizKeys("next"))
+	}
+	return w.review(title, "Store a portable copy of "+v.doneSubj+"?",
+		[][2]string{{"bearer", v.doneSubj}, {"copy", "wrapped to your admin age key"}}, "store", false, v.err)
 }
 
 // viewGrantPick is the add-grant multi-select picker, plus the approval

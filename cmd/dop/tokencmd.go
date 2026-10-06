@@ -39,7 +39,7 @@ import (
 
 func runToken(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop token <issue|list|show|revoke|repin|reseal|add-grant|remove-grant|rotate> ...")
+		fmt.Fprintln(os.Stderr, "usage: dop token <issue|list|show|revoke|repin|portable|reseal|add-grant|remove-grant|rotate> ...")
 		return 2
 	}
 	switch args[0] {
@@ -53,6 +53,8 @@ func runToken(args []string) int {
 		return runTokenRevoke(args[1:])
 	case "repin":
 		return runTokenRepin(args[1:])
+	case "portable":
+		return runTokenPortable(args[1:])
 	case "reseal":
 		return runTokenReseal(args[1:])
 	case "add-grant":
@@ -898,6 +900,127 @@ func runTokenRepin(args []string) int {
 	fmt.Fprintln(os.Stderr, "  new PIN (shown ONCE):")
 	fmt.Println(newPIN)
 	return 0
+}
+
+// runTokenPortable stores (--on) or removes (--off) the portable stash on
+// an existing bearer. --on verifies the current bearer the way repin does
+// and wraps it the way issue --portable does. Both directions sit behind
+// the approval passphrase so a scripted shell cannot flip it silently.
+func runTokenPortable(args []string) int {
+	fs := flag.NewFlagSet("token portable", flag.ExitOnError)
+	subject := fs.String("subject", "", "subject of the bearer (required)")
+	on := fs.Bool("on", false, "store a portable copy (needs the current bearer)")
+	off := fs.Bool("off", false, "remove the portable copy")
+	tokenFile := fs.String("token-file", "", "read the current bearer from file")
+	tokenStdin := fs.Bool("token-stdin", false, "read the current bearer from the first line of stdin")
+	passStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin (after the bearer line)")
+	_ = fs.Parse(args)
+	fail := func(f string, a ...any) int {
+		fmt.Fprintf(os.Stderr, "dop token portable: "+f+"\n", a...)
+		return 1
+	}
+	if strings.TrimSpace(*subject) == "" || *on == *off {
+		fmt.Fprintln(os.Stderr, "usage: dop token portable --subject <subject> (--on | --off) [--token-file <path> | --token-stdin] [--passphrase-stdin]")
+		return 2
+	}
+	var bearer string
+	if *on {
+		var err error
+		if *tokenStdin {
+			bearer, err = readPassphrase("", true) // byte-wise line read; leaves the passphrase line on stdin
+			bearer = strings.TrimSpace(bearer)
+		} else {
+			bearer, err = readBearer(*tokenFile)
+		}
+		if err == nil && bearer == "" {
+			err = errors.New("no bearer")
+		}
+		if err != nil {
+			return fail("%v — supply via --token-stdin, --token-file or $DOP_TOKEN", err)
+		}
+	}
+
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		return fail("%v", err)
+	}
+	v, vaultPath, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		return fail("%v", err)
+	}
+	var vaultCtx []byte
+	recipient := ""
+	if *on {
+		if vaultCtx, err = os.ReadFile(filepath.Join(paths.Vault, "vault-context.bin")); err != nil {
+			return fail("no vault_context: %v", err)
+		}
+		st, err := client.Status()
+		if err != nil {
+			return fail("session status: %v", err)
+		}
+		if st.AgeRecipient == "" {
+			return fail("needs an active admin session with an age recipient")
+		}
+		recipient = st.AgeRecipient
+	}
+	lookupID, err := setPortable(v, *subject, bearer, vaultCtx, recipient)
+	if err != nil {
+		return fail("%v", err)
+	}
+	if err := promptProtectionPassphrase(paths, fmt.Sprintf("approval passphrase (portable copy for %s): ", *subject), *passStdin); err != nil {
+		return fail("%v", err)
+	}
+	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
+		return fail("save vault: %v", err)
+	}
+	state, msg := "off", "portable copy removed for %s\n"
+	if *on {
+		state, msg = "on", "portable copy stored for %s\n"
+	}
+	audit.Append(paths, audit.Event{Kind: audit.EventPortable, Subject: *subject, LookupID: lookupID,
+		Extra: map[string]string{"portable": state}})
+	fmt.Printf(msg, *subject)
+	return 0
+}
+
+// setPortable finds subject's single active record and clears its stash,
+// or (bearer != "") checks the bearer against the record's lookup id and
+// stores it wrapped to recipient. Returns the record's lookup id.
+func setPortable(v *vault.Vault, subject, bearer string, vaultCtx []byte, recipient string) (string, error) {
+	id, inactive := "", ""
+	for cid, c := range v.Capabilities {
+		switch {
+		case c.Subject != subject:
+		case c.Status != capability.RecordStatusActive:
+			inactive = c.Status
+		case id != "":
+			return "", fmt.Errorf("subject %q matches multiple active bearers", subject)
+		default:
+			id = cid
+		}
+	}
+	if id == "" {
+		if inactive != "" {
+			return "", fmt.Errorf("bearer %q is %s", subject, inactive)
+		}
+		return "", fmt.Errorf("no active bearer with subject %q", subject)
+	}
+	c := v.Capabilities[id]
+	c.PortableWrapped = ""
+	if bearer != "" {
+		if capability.LookupID(vaultCtx, bearer) != c.LookupID {
+			return "", errors.New("bearer does not match this subject")
+		}
+		wrapped, err := admin.WrapToRecipient([]byte(bearer), recipient)
+		if err != nil {
+			return "", fmt.Errorf("wrap bearer for admin use: %w", err)
+		}
+		c.PortableWrapped = wrapped
+	}
+	// ponytail: the stash sits outside the signed record, so no re-sign.
+	v.Capabilities[id] = c
+	return c.LookupID, nil
 }
 
 // --- daemon-mediated helpers ---
