@@ -26,8 +26,11 @@
   - v1.14.0-rc3: `exec` events gain `extra.portable_owner = "yes"` when the owner-held portable bypass skipped the binding check. Same event kind, extra field.
   - v1.14.0-rc3 (rc5 Option A): `print_approval_requested`, `print_approval_granted`, `print_approval_denied`. Fired by `internal/cli/printguard` on every print surface (`dop use`/`dop token issue`/`dop env`/`dop claim --shell`). Carries `extra.surface` ∈ {`print_use`,`print_issue`,`print_env`,`print_claim`}, `extra.channel` ∈ {`local`,`phone`,`env`,`trust_context`,`shell_trust`}, `extra.reason` on denial (`wrong_passphrase`,`verify_error`,`rejected`,`expired`,`fallback_error`), `extra.escalated_from` on phone-fallback requests.
   - v1.14.0-rc15: `integration_probed` (opt-in endpoints probe at `integration add`; see contract 17). Carries `subject` (integration name), `extra.kind`, `extra.probed_url`, `extra.endpoint_count`.
-  - v1.14.0-rc16: `integration_token_set` (`dop integration set-token` rotated a value or edited scope; see contract 18). Carries `subject` (integration name), `extra.token_name`, `extra.changed` ∈ {`value`,`scope`,`both`}.
+  - v1.14.0-rc16: `integration_token_set` (`dop integration set-token` rotated a credential value or edited its scope note; see contract 18). Carries `subject` (integration name), `extra.token` (credential name), `extra.rotated`, `extra.scope_changed` (bool-as-string). Not emitted when nothing changed.
+  - `portable` (`dop token portable`; see contracts 19, 25). Carries `subject`, `lookup_id` (the record now holding the stash, or the cleared one), `extra.portable` ∈ {`on`,`off`}, `extra.replaces` (old lookup id, on `on`).
+  - `repin` now marks a re-issue: carries `extra.pin_ttl` and `extra.replaces`; the same run also emits `issue` (new bearer) and `revoke` (old bearer). See contract 25.
 - MUST include reason strings on denial: `pin_mismatch`, `pin_expired`, `rejected`, `approval_timeout`, `admin_removed`.
+- The constant list in `internal/audit/audit.go` is the source of truth; this section MUST list every constant there. `invite_response` is emitted by `dop admin join` (M2 side).
 - MUST fire `audit.Notify` on Darwin for `claim_pending`, `claim`, `claim_denied`, `revoke`.
 - MUST honor `DOP_NO_NOTIFY=1` (used by tests + headless CI).
 - `dop watch` MUST support `--since D`, `--all`, `--filter K,K,K`, `--no-color`.

@@ -1,10 +1,14 @@
-# Feature Contract — Token Lifecycle (set / rotate / remove)
+# Feature Contract — Credential + Bearer Lifecycle
 
 ## Scope
-- The `dop integration set-token` CLI command, the TUI token drill-down (enter on an integration row → tokenListView parity with grantListView), and the `EventIntegrationTokenSet` audit event. Introduced in v1.13.0-rc16.
+- Credentials (upstream secrets inside an integration; `vault.Token`, CLI flag names still say `token`): `dop integration set-token`, the TUI integration Credentials tab, and `EventIntegrationTokenSet`. Introduced in v1.13.0-rc16.
+- Bearers (what an agent holds): the `dop token` subcommand set and the rule that every bearer record rewrite keeps the portable stash.
+
+## Vocabulary
+- TUI copy MUST say credential (upstream secret), bearer (agent-held), grant, integration; never token or capability (contract 14). CLI flags and audit keys (`--token-name`, `extra.token`) keep their names.
 
 ## Purpose
-- Give operators first-class tools to rotate a token's value or edit its scope note after creation, without reusing `dop integration add` (which creates/merges). Mirrors `dop grant` CRUD parity: tokens are now a first-class drill-down target with view / edit / rotate / remove actions.
+- Rotate a credential's value or edit its scope note after creation without reusing `dop integration add` (which creates / merges); manage bearers without ever losing their portable copy.
 
 ## Invariants
 - `dop integration set-token` MUST require `--name` and `--token-name` and at least one of `--value`, `--value-stdin`, `--scope-note`.
@@ -20,25 +24,28 @@
 - Flags: `--name` (required), `--token-name` (required), `--value` (optional), `--value-stdin` (optional, mutually-sensible with --value), `--scope-note` (optional).
 - MUST refuse with exit 2 and message "supply at least one of --value / --value-stdin / --scope-note" when no mutation flag is set.
 - MUST refuse with exit 1 when the integration or token doesn't exist, including the available token names in the error message.
-- MUST emit the audit event even when the new values exactly match the old values (so `rotated=false` + `scope_changed=false` events exist in the trail — proves "someone tried, nothing changed").
-- Actually: when BOTH `rotated=false` AND `scope_changed=false`, MUST early-exit with a stderr note and NO audit event (nothing happened, keeps the log clean). Prefer this over noise.
+- When the value and scope note are both unchanged, MUST exit 0 with a stderr note and NO audit event.
 - MUST print a one-line stderr summary: `set-token: <integ>/<tok> → value rotated, scope "..."`.
 - MUST include the reseal nudge in stderr when a rotation happened: "`bearers currently holding this token see the new value on their NEXT exec (direct availability) — or after `dop token reseal <subject>` for ed25519-bound bearers.`"
 
-### TUI — token drill-down
-- Enter on an integration row MUST open the token picker for that integration (previously opened the detail pane).
-- The main integration list help legend MUST advertise the new key bindings: enter manage tokens, d details, e edit integration, r remove.
-- The token picker MUST render each token as a row with name + scope note, cursor arrow prefix on the active row.
-- Enter on a token row MUST open the per-token action menu: View details / Edit scope note / Rotate value / Remove / Back.
-- Rotate value input MUST be masked (render with `•` glyphs) and MUST pass the value to the CLI via `--value-stdin` + stdin pipe, never via `--value` on the command line.
-- Edit scope note input MUST pre-populate with the existing scope note.
-- Remove confirmation MUST accept `y/Y/enter` as confirm and `n/N/esc` as cancel (per contract 14).
-- Backspace on an empty edit buffer MUST return to the parent action menu.
+### TUI — integration detail
+- `enter` on an integration row MUST open its detail with tabs Info / Credentials N / Grants N (contract 14). `e` edit and `r` remove work from the list and the Info tab.
+- Credentials tab rows: name, value as `•••• N chars` (`maskLen`, never the value or a tail), scope note. A placeholder-looking value MUST show an error hint ("Rotate in the real one").
+- `enter` on a credential MUST show its actions under the rows (`credActions`, in order): Edit scope note, Rotate value, Remove credential. No View / Back rows.
+- `a` on the Credentials tab MUST open Add credential for this integration (`newAddCredentialView`: credential + mandatory grant, contract 16); `a` on the Grants tab opens Add grant with the integration fixed.
+- Edit scope note MUST open the `scopePresets` picker on the current note (else `other…`); free text via `other…`.
+- Rotate value input MUST be masked and MUST pass the value via `--value-stdin` + stdin pipe (`doTokenRotate`), never `--value`.
+- Remove credential confirm MUST list the grants removed with it (`upTo5`) and say bearers holding them are resealed where possible; footer `enter remove · esc cancel`.
+- Empty Credentials tab: `No credentials yet. Press a to add one.`
 
-### TUI — integration-level edit (sibling feature)
-- `e` on the integration list MUST open the integration-level edit form (new mode `integModeIntEdit`).
-- Form fields: Kind preset picker, Description, KindSlot (label + hint change per kind — mirrors add-integration flow).
-- Save MUST shell to `dop integration add --name <existing> --kind <new> …` which per contract 16 is idempotent-update when the integration exists.
+### TUI — integration-level edit
+- `e` MUST open the integration edit form (`integModeIntEdit`, `enterIntEdit`) seeded with current name, kind, description, kind slot, projects, tags, protection.
+- Save MUST shell to `dop integration rename --from --to` first when the name changed, then `dop integration add --name <name> …` (idempotent update, contract 16).
+
+### Bearers — `dop token` subcommands
+- `issue`, `list`, `show`, `revoke`, `repin`, `portable --on|--off`, `reseal`, `add-grant`, `remove-grant`, `rotate`; all admin-session gated (contract 01).
+- `repin`, `portable --on` and `rotate` re-issue the bearer through one path (contract 25). `portable` semantics: contract 19.
+- Every rewrite of an existing bearer record (revoke, repin, reseal, add/remove-grant, rotate, cascade, claim, remote approve, agent migrate, `syncSidecars` re-sign) MUST go through `putCapability`, which carries `PortableWrapped` from the existing entry.
 
 ### Protection interaction
 - `set-token` on a protected integration owned by someone else MUST refuse (CLI-side via `requireProtectionOwner`), AND MUST be caught by the daemon save-guard if somehow bypassed (per contract 15).
@@ -55,13 +62,13 @@
 - Inputs: `--name`, `--token-name`, `--value` | `--value-stdin`, `--scope-note` on `dop integration set-token`; `enter` + action keys in the TUI token picker.
 - Outputs: audit event `integration_token_set`; stderr summary; mutated vault.
 - Events: `EventIntegrationTokenSet` with `extra.token`, `extra.rotated`, `extra.scope_changed`.
-- Dependencies: `cmd/dop/integrationcmd.go::runIntegrationSetToken`, `internal/tui/list_remove_views.go` (new modes `integModeTokenList`/`Action`/`Detail`/`EditScope`/`Rotate`/`RemoveConfirm` + `integModeIntEdit`), `cmd/dop/protected.go::requireProtectionOwner`.
+- Dependencies: `cmd/dop/integrationcmd.go::runIntegrationSetToken`, `internal/tui/list_remove_views.go` (modes `integModeDetail` tabs, `integModeTokenAction` / `EditScope` / `Rotate` / `RemoveConfirm`, `integModeIntEdit`), `cmd/dop/protected.go::requireProtectionOwner`, `cmd/dop/tokencmd.go::putCapability`.
 
 ## State & Data Rules
 - The token's `Value` field in `vault.Integration.Tokens[name]` is replaced atomically on rotation.
 - The token's `ScopeNote` field is replaced atomically on scope edit.
 - No new vault schema fields are introduced by this feature.
-- The TUI's token drill-down state (`tokenNames`, `tokenCursor`, `tokenEditBuf`, `tokenPending`) MUST be reset on each `enterTokenList()` call.
+- The Credentials tab state (`tokenNames`, `tokenCursor`) MUST be reloaded on each detail open (`refreshTokens`); the rotate / scope buffer (`tokenEditBuf`) MUST be reset when an action opens.
 - The integration-edit state (`intEditField`, `intEditKindChoice`, `intEditDescBuf`, `intEditKindSlotBuf`) MUST be seeded with current values on each `enterIntEdit()` call.
 
 ## Acceptance Criteria
@@ -69,19 +76,21 @@
 - PASS if `go test ./internal/tui/` passes (unit tests remain green, no regression on handoff shape).
 - PASS if a token rotation emits an audit event with `rotated=true` and the new value does NOT appear anywhere in `audit.jsonl`.
 - PASS if the TUI `e` key on an integration row opens the integration edit form with current values pre-populated.
+- PASS if `TestPutCapabilityKeepsPortableStash` passes (stash survives revoke, reseal, grant edits, re-sign, generation bump).
 - PASS if the TUI token-rotate flow sends the new value via stdin (ps/history of the subprocess don't contain the value).
 - FAIL if any CLI mutation path puts a new token value on an argv line visible via `ps`.
-- FAIL if the token picker is reachable for an integration with zero tokens WITHOUT a clear "(no tokens)" state in the view.
+- FAIL if the Credentials tab of an integration with zero credentials shows anything but the empty-state line.
+- FAIL if any bearer record rewrite drops `PortableWrapped`.
 
 ## Regression Checks
 - Verify `cmd/dop/integrationcmd.go::runIntegrationSetToken` reads the stdin value in `--value-stdin` mode via `readValueStdin()` which strips CR/LF.
 - Verify the audit event emission site in `runIntegrationSetToken` does not pass `tok.Value` or `*newValue` into the Event struct.
 - Verify `internal/tui/list_remove_views.go::doTokenRotate` builds `exec.Command` with `--value-stdin` and sets `cmd.Stdin`, NOT with a `--value <literal>` flag.
-- Verify `renderTokenActionMenu` lists exactly 5 actions in the order: View details, Edit scope note, Rotate value, Remove, Back.
-- Verify the integration list footer help mentions `enter manage tokens`.
+- Verify `credActions` lists exactly 3 actions in the order: Edit scope note, Rotate value, Remove credential.
+- Verify `cmd/dop` has no `v.Capabilities[id] = capability2VaultCapability(` outside `issueBearer`.
 - Verify `enterIntEdit` positions the kind cursor on the current kind (so Edit opens on today's value).
 
 ## Open Questions
 - Should `set-token` support a `--audit-reason "..."` flag for operator-supplied free-text that lands in `extra.reason`? Would help forensic review when rotating in response to a suspected leak. Not implemented yet.
 - Should rotation emit an additional event (`EventTokenRotated`) distinct from `EventIntegrationTokenSet`? Current contract folds both into one event with `rotated=true` — simpler but less filterable in `dop watch`.
-- The TUI integration-edit form doesn't yet support flipping `Protected` on/off. Protection changes still require the add-integration CLI/TUI flow with its passphrase gate. Should the edit form prompt-and-flip? Deferred.
+- Resolved: the integration edit form flips protection with the passphrase gate (contract 15).

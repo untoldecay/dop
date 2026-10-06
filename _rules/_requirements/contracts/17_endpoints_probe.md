@@ -32,7 +32,8 @@
 - MUST skip when `--mcp-url` is empty (operator probably only set `--mcp-cmd`).
 
 ### TUI port
-- A new preset-picker step (`integAddStepProbe`) MUST render after `integAddStepKindSlot` whenever the chosen kind is `api` or `mcp` (regardless of what's in the URL buffer — see rc16 note below).
+- A `scan for docs` picker row (`probePresets`, dense form Integration step of `addIntegrationView`) MUST render under the kind slot whenever the chosen kind is `api` or `mcp` (regardless of what's in the URL buffer — see rc16 note below). New integrations only.
+- Done screen MUST show the scan outcome (`probe →` / `probe-endpoints skipped` line from CLI stderr) as a `scan` row.
 - The picker MUST default to `no` (DOP never auto-fetches unless the operator says yes).
 - On "yes", the TUI subprocess call MUST append `--probe-endpoints` to the `dop integration add` invocation.
 - The Probe row MUST render in the row list for api/mcp integrations; the TUI MUST hide it entirely for cli/other kinds.
@@ -85,3 +86,4 @@
 - Should cross-origin redirects be followed or refused? Current behavior inherits net/http defaults (follows same-origin up to 10 hops). Could tighten.
 - Should operators be able to configure extra probe paths? Currently the list is closed. Would need `--probe-path` repeatable flag + a security review (operators pointing probes at admin interfaces).
 - For MCP, should the probe cache the discovered tool list for later display? Currently no — only a liveness check.
+- Code drift (v1.14 distill): `addIntegrationView.rows` renders `scan for docs` for `api` only and `integArgs` sends `--probe-endpoints` only for api; mcp lost its TUI probe. Contract kept; fix the code.

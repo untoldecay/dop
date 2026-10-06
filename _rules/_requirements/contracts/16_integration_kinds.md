@@ -11,7 +11,7 @@
 - `vault.IntegrationKindOf(integ)` MUST be the single source of truth for the effective kind — callers MUST NOT read `integ.Kind` directly for behavior decisions.
 - `vault.ValidIntegrationKind(s)` MUST be the sole validator on CLI input.
 - Every env bundle entry for a grant MUST include `${PREFIX}_TOKEN` and `${PREFIX}_KIND`.
-- The promoted env suffix set is CLOSED and canonical: {`BASE_URL`, `ENDPOINTS_URL`, `AUTH_HEADER`, `CMD`, `ARGS_HINT`, `MCP_URL`, `MCP_CMD`}. Adding a new one requires updating this contract.
+- The promoted env suffix set is CLOSED and canonical: the 13 rows of the table below (`promotedMetadataKeys`). Adding a new one requires updating this contract.
 
 ## Mandatory Behaviors
 
@@ -59,16 +59,20 @@
 - `--kind` on an existing integration MUST update the stored Kind (mutable); omitting `--kind` MUST preserve the existing Kind.
 - `dop integration list` MUST prefix every row with `[<kind>]` where `<kind>` is the effective kind.
 
-### TUI
-- The add-integration flow MUST include a Kind preset step (step 1, after service name) with the four kinds in the order api → cli → mcp → other.
-- When an operator picks an EXISTING service at step 0, the flow MUST read that service's stored Kind and skip the Kind step entirely.
-- The step after Kind (step 3, KindSlot) MUST change its label + hint per kind:
-  - `api` → "Base URL"
-  - `cli` → "Command (binary name)"
-  - `mcp` → "MCP URL (or stdio cmd)"
-  - `other` → row skipped entirely in render + advance.
-- The TUI subprocess invocation MUST pass `--kind <kind>` and route the KindSlot buffer to the right flag per kind (`--base-url`, `--cmd`, `--mcp-url`/`--mcp-cmd`).
-- The integration detail view MUST render a `kind: <kind>` line directly under description.
+### TUI (Add integration dense form, `internal/tui/integration_views.go`)
+- First screen picks `New integration` or an existing one (`pickOpts`). An existing integration starts at the Credential step and is never mutated: no integration-level row is asked or sent.
+- Stepper `Integration › Credential › Grant`, one dense form per step (contract 14), then review, running, done.
+- Integration step rows: name, kind (`kindPresets`, order api → cli → mcp → other, no escape row), description, then the kind slot: api `base URL` + `scan for docs`, cli `command`, mcp `URL or launcher`, other nothing.
+- The kind slot MUST route to `--base-url` (api), `--cmd` (cli), `--mcp-url` when it starts with `http(s)://` else `--mcp-cmd` (mcp) (`integArgs`).
+- A name that already exists MUST be refused at the Integration step ("pick it on the first screen to add a credential").
+- Credential step, Normal tab: credential (prefilled with the integration name once), value (masked), scope note (`scopePresets` + `other…`), and for a new integration protection (+ passphrase when protected).
+- Credential step, Advanced tab (new integrations only, `tab` switches): `advFieldSpecs` filtered by kind (`advFieldsForKind`): auth env template `--cli-auth-env` (cli), server root `--server-root`, allowed scope hint `--allowed`, auth style `--auth-style` (api), install hint `--cli-install` (cli), help entry `--cli-help` (cli).
+- Every Advanced field MUST be integration-level metadata. A credential stores only `value` and `scope_note` (`vault.Token`); the TUI sends it as `--token <cred>=<value>:<scope|->`.
+- An existing credential name on the integration MUST be refused ("already has a credential"); `integration add` would overwrite it.
+- Grant step is mandatory for a new credential: grant id (default `<integration>.<scope>` for read-only / read-write / admin, else `<integration>`, `-2`, `-3`… when taken), integration + credential fixed, env prefix default `vault.SanitizeEnvKey(<integration>_<credential>)` (= `Grant.EffectivePrefix`), projects, tags.
+- An env prefix equal to the default MUST NOT be sent (`--env-prefix` omitted, record stays empty).
+- Save runs `dop integration add` then `dop grant add`; if the second fails the retry only re-runs the grant (`integSaved`).
+- The integration Info tab MUST show `kind` as its first row (`infoBody`); the integration edit form (`e`) MUST allow changing kind, description, kind slot, projects, tags, protection.
 
 ### Protection interaction
 - `cmd/dop/protected.go::integrationEqual` MUST compare Kind so a non-owner flipping Kind on a protected integration gets reverted by `enforceProtectedOnSave`.
@@ -82,8 +86,8 @@
 - MUST NOT auto-fetch any URL (`endpoints_url`, `mcp_url`) at integration-add or env-resolve time. Hints are inert URLs; DOP never follows them.
 
 ## Interfaces
-- Inputs: `--kind`, `--endpoints-url`, `--auth-header`, `--cmd`, `--args-hint`, `--mcp-url`, `--mcp-cmd` on `dop integration add`.
-- Outputs: env bundle (map[string]string) with promoted suffixes; CLI list prefix; TUI picker + adaptive step.
+- Inputs: `--kind`, `--base-url`, `--endpoints-url`, `--auth-header`, `--auth-style`, `--cmd`, `--args-hint`, `--cli-auth-env`, `--cli-install`, `--cli-help`, `--mcp-url`, `--mcp-cmd`, `--server-root`, `--allowed` on `dop integration add`.
+- Outputs: env bundle (map[string]string) with promoted suffixes; CLI list prefix; TUI dense form with kind-adaptive rows.
 - Events: no new audit events (Protected emits `EventProtectedBypassAttempt` on Kind-flip by non-owner).
 - Dependencies: `internal/vault.IntegrationKindOf`, `internal/vault.ValidIntegrationKind`, `cmd/dop/tokencmd.go::resolveGrantsToEnv`, `cmd/dop/tokencmd.go::promotedMetadataKeys`.
 
@@ -102,13 +106,14 @@
 - FAIL if a promoted metadata key double-exports (once as `_BASE_URL` and once as `_BASE_URL` sanitized-raw).
 
 ## Regression Checks
-- Verify `cmd/dop/tokencmd.go::promotedMetadataKeys` returns exactly the 7 keys from the table above.
+- Verify `cmd/dop/tokencmd.go::promotedMetadataKeys` returns exactly the 13 keys from the table above.
 - Verify `internal/vault.IntegrationKindOf` substitutes `api` for empty Kind.
 - Verify `cmd/dop/integrationcmd.go::runIntegrationAdd` validates `--kind` via `ValidIntegrationKind`.
 - Verify `cmd/dop/integrationcmd.go::runIntegrationAdd` makes `--token` optional only when the integration already exists.
 - Verify `internal/tui/integration_views.go::kindPresets` lists exactly 4 kinds in order (api, cli, mcp, other) — no "other…" escape row (kinds are closed, not open-ended).
-- Verify `internal/tui/integration_views.go::kindSlotLabel` returns different labels for each kind.
-- Verify the service-picker-pick-existing path inherits Kind via `IntegrationKindOf` (so the Kind step is skipped on second-credential adds).
+- Verify `addIntegrationView.rows` shows a different kind-slot label per kind and none for `other`.
+- Verify `useExisting` reads Kind via `IntegrationKindOf` and starts at the Credential step.
+- Verify `integArgs` sends no integration-level flag for an existing integration and every Advanced field as an `integration add` flag.
 
 ## Open Questions
 - Should the probe-on-add feature (planned rc15) store its result in `endpoints_url` even if the operator passed `--kind api` without `--endpoints-url`? Current contract says `endpoints_url` is a hint URL, operator-supplied; probe would make it DOP-populated. May need to add a `probed_endpoints_url` separate key to distinguish operator-supplied from auto-discovered.

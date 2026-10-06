@@ -7,7 +7,7 @@
 - Make "the record was signed by a trusted admin" a real read-path check, not a design claim.
 
 ## Invariants
-- MUST write a `<lookup_id>.record` file next to every `<lookup_id>.bundle` at issue / claim / repin time.
+- MUST write a `<lookup_id>.record` file next to every `<lookup_id>.bundle` at issue / claim / re-issue (repin, portable --on, rotate) time.
 - MUST write `admins.trust` (JSON, mode 0644) alongside `vault-context.bin` on every `saveVaultViaDaemon` call.
 - MUST include exactly these fields in each record: `capability_id, subject, grants[], created_at, expires_at, generation, lookup_id, bundle_hash, issued_by, status, binding?, signature`.
 - MUST use ed25519 for signatures with the canonical payload defined by `Record.SigningPayload()`.
@@ -29,7 +29,8 @@
 ## Interfaces
 - Inputs: `capability.Record` in memory; ed25519 sign RPC to the admin daemon.
 - Outputs: JSON files at `<Vault>/capabilities/<lookup_id>.record` (0644) and `<Vault>/admins.trust` (0644).
-- Events: `issue`, `revoke`, `claim`, `repin` audit events accompany writes.
+- Events: `issue`, `revoke`, `claim`, `repin`, `portable` audit events accompany writes.
+- Every rewrite of an existing record in `vault.Capabilities` goes through `putCapability` (keeps the unsigned `PortableWrapped` stash; contracts 19, 25).
 - Dependencies: `internal/capability` (Record + SigningPayload + Verify), `internal/trust` (Path/Write/Load).
 
 ## State & Data Rules

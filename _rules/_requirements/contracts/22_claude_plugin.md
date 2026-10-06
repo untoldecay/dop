@@ -23,6 +23,8 @@
 - MUST tear down everything on `dop admin reset --purge`: `claude plugin uninstall` + `claude plugin marketplace remove` + `rm -rf ~/.claude-local-plugins/dop-tools/` + remove loose files.
 - MUST filter the "not found" error from `claude plugin uninstall` on cleanup (idempotency).
 - MUST ship the embedded templates verbatim from `cmd/dop/skill_template.md` + `cmd/dop/dop_use_command_template.md` via `//go:embed`.
+- The TUI done-screen guidance (contract 13, `useGuidance`) MUST point at `dop skill install` for a portable bearer when the harness is Claude Code and `~/.claude/skills/dop/SKILL.md` or `~/.claude/commands/dop-use.md` is missing (`skillInstalled`), and MUST then show `in Claude Code: /dop-use <subject> <task>`.
+- Those two loose-file paths are therefore a stable interface: moving them requires updating `skillInstalled`.
 
 ## Forbidden Behaviors
 - MUST NOT write the plugin bundle for `--path <custom>` installs (would drop a Claude Code artifact into Cursor/Zed/other-agent locations).

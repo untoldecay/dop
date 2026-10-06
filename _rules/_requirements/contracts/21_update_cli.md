@@ -24,6 +24,13 @@
 - MUST sort GitHub `/releases` results by `published_at` desc before picking the newest — the API returns tag-lexical order which breaks dev-channel on same-minor-line pre-releases.
 - `dop update --rollback` MUST pick the most-recently-stored binary in the old-versions dir (skipping the one matching the running version) and atomic-replace.
 
+### TUI (`internal/tui/update_view.go`)
+- The view MUST check first (`dop update --check-only --channel <c>`, default `stable`), then confirm, install (streamed lines), done.
+- `c` MUST flip the channel (stable ↔ dev) and re-check on the confirm step AND on the done step when nothing was installed: already latest, or the check failed (`canFlipFromDone`). Otherwise an operator on the latest stable could never reach dev.
+- `c` MUST NOT flip after a failed install; any other key on the done step leaves.
+- After a successful install the TUI MUST quit so the next launch runs the new binary.
+- Footers: confirm `enter install · esc back` (`c channel` in the expanded help); done-with-nothing-installed `enter done · c channel`.
+
 ## Forbidden Behaviors
 - MUST NOT replace the binary without checksum verification. If `checksums.txt` is missing, MUST print a warning and still refuse (there is no "trust" fallback).
 - MUST NOT overwrite the running binary without first staging the new one to disk successfully.
@@ -53,6 +60,7 @@
 - Verify `splitBaseAndPrerelease("v1.14.0-rc7n-smoke")` returns `("v1.14.0", "rc7n-smoke")`.
 - Verify `dop update --check-only --channel dev` returns the most-recently-published pre-release, not the lex-largest tag.
 - Verify `~/.local/share/dop/old-versions/` contains at most 3 files after multiple updates.
+- Verify `go test ./internal/tui -run TestUpdate` (flip from already-latest, flip from check error, other key leaves, no flip after failed install).
 
 ## Open Questions
 - Should self-update emit audit events (`update_installed`, `update_rollback`)? Currently silent.

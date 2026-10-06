@@ -11,7 +11,7 @@
 - MUST offer three binding modes: `pin` (default), `pubkey` (admin-supplied), `none` (opt-out).
 - MUST generate PINs as `XX-XX-XX` using the alphabet `ABCDEFGHJKMNPQRSTUVWXYZ` (24 chars, confusables removed).
 - MUST HMAC the PIN with the bearer as key (`capability.HashPIN`) and store the hex hash inside the bundle envelope.
-- MUST default the PIN TTL to 5 minutes and store `pin_expiry` as unix seconds in the envelope binding.
+- MUST default the PIN TTL to `defaultPinTTL` (1h, rc11; fits a chat back-and-forth) and store `pin_expiry` as unix seconds in the envelope binding.
 - MUST persist agent private keys at `<Root>/agent-keys/<lookup_id>.key`, mode 0600, raw ed25519.
 
 ## Mandatory Behaviors
@@ -21,18 +21,20 @@
 - `dop claim` MUST verify the PIN via `capability.VerifyPIN` (constant-time compare).
 - `dop claim` MUST reorder the persistence steps as: agent key → bundle rename → record sidecar → vault save.
 - `dop claim` MUST refuse to run without an active admin session (vault mutation requires signing).
-- `dop token repin --subject S` MUST regenerate the PIN while keeping the bearer intact.
+- `dop token repin --subject S [--pin-ttl D]` MUST re-issue the unclaimed PIN-bound bearer: new bearer + new PIN, same subject / grants / expiry, old record revoked in the same save, portable stash carried. No bearer paste. Rules in contract 25.
+- The TUI bearer detail MUST offer Repin only on an unclaimed PIN-bound bearer, with a PIN validity picker (`repinTTLPresets`: 1h default, 5m, 30m, 4h, 24h) and a shown-once result screen.
 
 ## Forbidden Behaviors
 - MUST NOT store the PIN anywhere in plaintext — only its bearer-keyed HMAC.
 - MUST NOT allow a second `dop claim` on an already-claimed bearer (must revoke + reissue).
-- MUST NOT allow `token repin` on a claimed capability (only unclaimed ones).
+- MUST NOT allow `token repin` on a claimed bearer (refused, points at `dop token rotate`) or on a non-PIN bearer.
+- MUST NOT keep the old bearer working after a repin (DOP never stores the bearer, so a new PIN needs a new bearer).
 - MUST NOT persist the agent private key under any group-readable mode.
 
 ## Interfaces
 - Inputs: `$DOP_TOKEN` or `--token-file <path>`; PIN as CLI arg.
 - Outputs: bearer + PIN at issue; agent key file at `<Root>/agent-keys/<lookup_id>.key`; updated bundle + record.
-- Events: `issue` (with binding kind), `claim_pending`, `claim` (with pubkey), `claim_denied` (reason), `repin`.
+- Events: `issue` (with binding kind), `claim_pending`, `claim` (with pubkey), `claim_denied` (reason), `repin` (with `extra.pin_ttl`, `extra.replaces`) + `issue` + `revoke` on repin.
 - Dependencies: `internal/capability`, `internal/vault`, `internal/pendingclaim`, `internal/approvalserver`, `internal/audit`.
 
 ## State & Data Rules
@@ -50,7 +52,11 @@
 
 ## Regression Checks
 - `v1_pin_claim.sh` covers the full happy path + wrong PIN + double claim + PIN expiry + `token repin`.
+- `TestTokenRepin` (`cmd/dop/portable_test.go`) covers re-issue, PIN TTL, stash carry-over, claimed / revoked refusal.
 - `v1_sas_approval.sh` covers the SAS/pending-claim slice via `--no-tunnel`.
 
 ## Open Questions
-- Should PIN entropy be increased if we ever remove the argon-cost-and-rate-limit web gate? Currently 24^6 ≈ 191M is sized against the 5-min claim window and rate-limited approval.
+- Should PIN entropy be increased if we ever remove the argon-cost-and-rate-limit web gate? Currently 24^6 ≈ 191M is sized against the 1h default claim window and rate-limited approval.
+
+## Related contracts
+- **25 (Bearer Re-issue)** — repin is one of the three re-issue entry points.

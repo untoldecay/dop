@@ -19,7 +19,8 @@
 - Operator intent "lock this one credential" maps to a grant-level lock, not an integration-level lock. Integration-level protection remains available for the rarer "lock the whole catalog" case.
 - Flip-to-protected on a grant whose parent integration is NOT already protected (OR whose parent is protected but the operator explicitly set `--protected`): prompts the approval passphrase and stamps the current admin as owner. The inherited case (new grant, parent protected, no explicit flag) uses the parent's owner directly — no new passphrase.
 - `dop integration add --protected=false` on a currently-protected integration (owner-only) explicitly unlocks it. Clears `Owner`. Emits `EventProtectedUnlock`. Fixes the pre-rc3 "orphan lock" trap where removing the last protected child left an integration locked with no CLI/TUI path to unlock.
-- TUI integration edit + grant edit each expose a Protection row + conditional passphrase row (field only renders when flipping unprotected → protected).
+- TUI integration edit (`enterIntEdit`) + grant edit (`openEditor`) each expose a Protection row (`protectionPresets`: default / protected) + a passphrase row only when flipping unprotected → protected.
+- TUI Add integration asks protection only for a NEW integration (credential step, dense form) with the passphrase row under it when protected; adding a credential to an existing integration never changes its protection. Add grant has no protection row (inherits at creation).
 
 ## Mandatory Behaviors
 
@@ -52,8 +53,7 @@
 
 ### Visual surfacing
 - `dop integration list` MUST prefix protected rows with `🔒 owner=<short-pubkey>`.
-- TUI integration list MUST show a muted `🔒 ` glyph on protected rows, inside the padded column so cursor alignment stays stable.
-- TUI integration detail view MUST render `protection: 🔒 owner-locked (owner=<short>)` for protected integrations.
+- TUI MUST surface protection as the muted word `protected`, never a glyph (contract 14): in the integration / grant row status hint (`rowHint`, `grantHint`), as the `protection` kv row in the integration Info tab (`protectWord`), and as a `protected` note in the multi-select grant picker (`grantPickItems`).
 
 ## Forbidden Behaviors
 - MUST NOT allow a non-owner to flip `Protected: false → true` on an existing resource (owner is always session on claim).

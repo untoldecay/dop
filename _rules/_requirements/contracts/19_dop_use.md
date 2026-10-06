@@ -1,13 +1,13 @@
 # Feature Contract — `dop use <subject>`
 
 ## Scope
-- The `dop use` top-level command, the `token issue --portable` flag that stashes a bearer on the capability record, the admin daemon `OpUnwrapPortable` RPC, and the `use_attached` audit event. Introduced in v1.14.0-rc1.
+- The `dop use` top-level command, the `token issue --portable` flag, the `dop token portable --on|--off` toggle for existing bearers, the admin daemon `OpUnwrapPortable` RPC, the `use_attached` / `portable` audit events, and the TUI portable surfaces. Introduced in v1.14.0-rc1.
 
 ## Purpose
 - Give admins a one-command way to attach their OWN bearer to any shell on any of their machines, without re-issuing or re-claiming. Keeps the "narrow bearer per task" scoping intent while removing the operational cost of per-shell credential handoff.
 
 ## Invariants
-- A bearer is retrievable via `dop use` ONLY IF it was issued with `--portable`. Default `token issue` behavior is unchanged — the bearer leaves the admin and lives only with the agent that claims it.
+- A bearer is retrievable via `dop use` ONLY IF it carries a stash: issued with `--portable`, re-issued by `dop token portable --on`, or re-issued (repin) from a bearer that had one. Default `token issue` behavior is unchanged — the bearer leaves the admin and lives only with the agent that claims it.
 - The admin-use stash (`vault.Capability.PortableWrapped`) is a base64 age-encrypted ciphertext. The plaintext is the raw bearer value.
 - The stash MUST be wrapped to the ISSUING admin's age recipient. Other admins on the vault see the ciphertext but cannot decrypt it.
 - `dop use` MUST require an unlocked admin session on the local machine. Without the daemon's age identity, the stash can't be decrypted.
@@ -32,9 +32,23 @@
 - MUST require an active admin session (needs `client.Status().AgeRecipient`).
 - MUST age-wrap the freshly-minted bearer value to the session admin's age recipient via `admin.WrapToRecipient`.
 - MUST store the base64 ciphertext on the capability's `PortableWrapped` field BEFORE calling `saveVaultViaDaemon`.
-- MUST preserve `PortableWrapped` through subsequent `syncSidecars` round-trips (which otherwise re-materialize `vault.Capability` from `capability.Record` and would drop the field).
+- MUST preserve `PortableWrapped` through every later record rewrite (revoke, repin, reseal, grant edits, rotate, cascade, claim, remote approve, agent migrate, `syncSidecars`): all go through `putCapability`, which carries the stash from the existing entry.
 - MUST NOT change the bearer handoff printed to stderr — the normal "bearer (shown ONCE — copy now):" output still fires. The stash is additional, not a replacement.
 - Setting `--portable` alongside `--protected` grants MUST still enforce the normal protection passphrase gate at issue time.
+
+### `dop token portable --subject S (--on | --off) [--passphrase-stdin]`
+- Exactly one of `--on` / `--off` (usage error, exit 2, otherwise). Subject MUST resolve to one active bearer.
+- `--on` MUST re-issue (DOP never keeps the bearer it handed out, so it cannot wrap the existing one). Path by binding state, rules in contract 25:
+  - claimed: rotated in place (`rotateBearer` with the session age recipient); the agent picks up the new bearer on its next exec; stdout `portable copy stored for <S>`; no bearer printed.
+  - unclaimed PIN-bound or unbound: new bearer (+ new PIN, `defaultPinTTL`), old revoked in the same save (`reissueUnclaimed`); bearer + PIN printed once on stdout.
+- `--on` MUST refuse an expired bearer and MUST ask the approval passphrase only when the bearer carries protected grants (`gateProtectedGrants`).
+- `--off` MUST always ask the approval passphrase, clear `PortableWrapped` without re-signing (the stash is outside the signed record), keep the bearer working, print `portable copy removed for <S>`.
+- Both MUST emit `portable` (`extra.portable` = `on` / `off`; `extra.replaces` on `on`).
+
+### TUI
+- Issue wizard MUST have a Portable step (`portablePresets`: no default / yes).
+- Bearer detail MUST offer `Portable: make portable` when the stash is empty and `Portable: remove copy` when set (`listView.currentActions`), each behind a confirm that states the consequence (claimed: the agent keeps working; unclaimed: a new bearer and PIN are shown once) and a passphrase step when needed (`portNeedsPass`).
+- The re-issue result MUST land on the shown-once screen (unclaimed) or `✓ Bearer is portable` (claimed), with `useGuidance` lines (contract 13): Claude Code harness gets the skill-install line (when missing) and `/dop-use <S> <task>`; every harness gets `eval "$(dop use <S>)"`.
 
 ### Admin daemon RPC
 - `OpUnwrapPortable` MUST require session unlocked (same as `OpSign` / `OpDecryptVault`).
@@ -52,16 +66,16 @@
 - MUST NOT wrap the bearer to any recipient other than the ISSUING admin's own age recipient.
 
 ## Interfaces
-- Inputs: `--portable` boolean flag on `dop token issue`; `--token-file FILE` + `--print-export` + `--passphrase-stdin` (reserved) flags on `dop use`; `<subject>` positional on `dop use`.
+- Inputs: `--portable` boolean flag on `dop token issue`; `--subject`, `--on`, `--off`, `--passphrase-stdin` on `dop token portable`; `--token-file FILE` + `--print-export` + `--passphrase-stdin` (reserved) flags on `dop use`; `<subject>` positional on `dop use`.
 - Outputs: stdout `export DOP_TOKEN=…` line OR a token-file JSON envelope; stderr informational text; audit event.
-- Events: `EventUseAttached` with the fields enumerated above.
+- Events: `EventUseAttached` with the fields enumerated above; `EventPortable` on the toggle.
 - Dependencies: `internal/admin.Client.UnwrapPortable` + `.Status`, `internal/admin.WrapToRecipient` + `.UnwrapWithIdentity`, `internal/vault.Capability.PortableWrapped`, `internal/audit.Append`, `cmd/dop/protected.go` for the owner gate pattern.
 
 ## State & Data Rules
 - `vault.Capability.PortableWrapped` MUST serialize via `yaml:"portable_wrapped,omitempty" json:"portable_wrapped,omitempty"` — pre-rc1 vaults round-trip unchanged.
 - The stash lives ONLY on the capability record. There is no sidecar, no separate file, no admin-local keychain entry. Vault pull carries it; vault push publishes it (encrypted-at-rest alongside the whole SOPS payload).
 - `PortableWrapped` is NOT part of the capability's signature (unlike `EnvWrapped`/`BearerWrapped` which are). It's admin-only; agents never see it; signing it would be noise.
-- `syncSidecars` MUST read the vault's current `PortableWrapped` before the `capability2VaultCapability(rec)` conversion and reapply it after. Tested implicitly by the round-trip e2e steps.
+- `syncSidecars` and every other rewrite MUST write records via `putCapability` (never a bare `capability2VaultCapability` on an existing id). Tested by `TestPutCapabilityKeepsPortableStash`.
 - Token file format: `{"token", "subject", "issued_at", "expires_at"}` as pretty-printed JSON. Mode 0600 (chmod'd twice: once on open flags, once explicit after write, to defeat umask).
 
 ## Acceptance Criteria
@@ -75,8 +89,8 @@
 - FAIL if `token issue --portable` is accepted without an active admin session.
 
 ## Regression Checks
-- Verify `cmd/dop/tokencmd.go::runTokenIssue` preserves `stored.PortableWrapped` after setting it (store the whole struct back; don't overwrite partially).
-- Verify `cmd/dop/tokencmd.go::syncSidecars` saves + restores the stash across the `vaultCapability2Record` → `capability2VaultCapability` round-trip (preservedStash pattern).
+- Verify `cmd/dop/tokencmd.go::issueBearer` preserves `stored.PortableWrapped` after setting it (store the whole struct back; don't overwrite partially).
+- Verify `go test ./cmd/dop -run 'TestTokenPortable|TestPutCapability'` passes.
 - Verify `cmd/dop/usecmd.go::checkCapabilityProtection` applies the rc12 owner check on EVERY grant carried by the bearer, not just the first.
 - Verify `internal/admin/session.go::opUnwrapPortable` fails cleanly when `s.keys == nil` (session locked).
 - Verify no file outside `--token-file`'s target ever contains the plaintext bearer.
@@ -98,5 +112,7 @@
 - **03 (Vault Schema)** — adds `PortableWrapped` to the Capability shape.
 - **04 (Capability Envelope)** — notes that `PortableWrapped` is distinct from `EnvWrapped`/`BearerWrapped` (admin-only vs agent-facing).
 - **07 (Approval Gate)** — the approval passphrase is NOT consumed by `dop use` v1; the admin daemon unlock is the gate. If a future `--passphrase-stdin` phase lands, it becomes a second gate.
-- **10 (Audit Log)** — adds `use_attached` event kind.
+- **10 (Audit Log)** — adds `use_attached` and `portable` event kinds.
+- **13 (Handoff Text Shape)** — the `useGuidance` block on done screens.
+- **25 (Bearer Re-issue)** — `portable --on` re-issue path and stash carry-over.
 - **15 (Protected Credentials)** — the owner check for protected bearers is reused by `dop use`.
