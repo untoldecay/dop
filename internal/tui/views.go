@@ -1076,8 +1076,11 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if mm.err != "" {
 			// Errors stay on the detail that caused them, in plain words.
 			v.err = map[string]string{"revoke": "Revoke", "reseal": "Reseal", "add": "Add grant",
-				"remove": "Remove grant"}[v.pendingAction] + " failed: " + cliErr(mm.err)
+				"remove": "Remove grant", "prune": "Prune"}[v.pendingAction] + " failed: " + cliErr(mm.err)
 			v.mode = listModeAction
+			if v.pendingAction == "prune" {
+				v.mode = listModeList
+			}
 			v.pendingAction = ""
 			return v, nil
 		}
@@ -1156,7 +1159,17 @@ func cliErr(e string) string {
 
 func (v *listView) updateListMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	vis := v.visible()
+	v.err = ""
 	switch k := mm.String(); k {
+	case "x":
+		if !v.revoked {
+			break
+		}
+		if v.pruneCount() == 0 {
+			v.flash = "nothing to prune"
+			break
+		}
+		v.mode, v.pendingAction, v.help = listModeConfirm, "prune", false
 	case "esc", "ctrl+c", "q":
 		v.done = true
 	case "up", "k":
@@ -1586,14 +1599,48 @@ func (v *listView) updateConfirmMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if v.pendingAction == "revoke" {
 			return v, v.doRevoke()
 		}
+		if v.pendingAction == "prune" {
+			return v, v.doPrune()
+		}
 		return v, v.doGrantMutation()
 	case k == "esc" || (!needPass && (k == "n" || k == "N")):
-		v.mode, v.pendingAction, v.err = listModeAction, "", ""
+		if v.pendingAction == "prune" {
+			v.mode = listModeList
+		} else {
+			v.mode = listModeAction
+		}
+		v.pendingAction, v.err = "", ""
 	case needPass:
 		v.err = ""
 		passKey(&v.grantPickPassBuf, mm)
 	}
 	return v, nil
+}
+
+// pruneCount is how many bearers dop token prune --older-than 30d removes.
+func (v *listView) pruneCount() int {
+	n := 0
+	for _, c := range v.capabilities {
+		if (c.Status == capability.RecordStatusRevoked || c.Status == capability.RecordStatusRotated) &&
+			time.Since(c.TouchedAt()) > 30*24*time.Hour {
+			n++
+		}
+	}
+	return n
+}
+
+func (v *listView) doPrune() tea.Cmd {
+	return func() tea.Msg {
+		self, _ := os.Executable()
+		cmd := exec.Command(self, "token", "prune", "--older-than", "30d", "--yes")
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return listActionMsg{err: strings.TrimSpace(stderr.String())}
+		}
+		return listActionMsg{}
+	}
 }
 
 func (v *listView) doRevoke() tea.Cmd {
@@ -1660,6 +1707,9 @@ func (v *listView) View() string {
 	}
 	km := bearerListKeys
 	km.short = []key.Binding{keyOpen, hint("tab", other), keyBack}
+	if v.revoked {
+		km.short = []key.Binding{keyOpen, hint("x", "prune"), hint("tab", other), keyBack}
+	}
 	st := status{err: v.err, flash: v.flash}
 	var body []string
 	switch {
@@ -1691,6 +1741,7 @@ var bearerListKeys = keyMap{
 	full: [][]key.Binding{
 		{keyMove, hint("enter", "open bearer"), hint("tab", "active / revoked"), keyBack},
 		{hint("r", "revoke"), hint("s", "reseal env"), hint("p", "repin (unclaimed only)"), keyQuit},
+		{hint("x", "prune revoked older than 30d (Revoked tab)")},
 	},
 	notes: []string{
 		"The status line shows id, generation, binding, portable and owner",
@@ -1921,6 +1972,10 @@ func (v *listView) viewDetail(width, height int) string {
 }
 
 func (v *listView) viewConfirm(width, height int) string {
+	if v.pendingAction == "prune" {
+		return frame(width, height, "Prune "+plural(v.pruneCount(), "bearer")+" revoked or rotated more than 30d ago?", nil, "",
+			[]string{mutedSt.Render("  Their records and files are deleted; the audit log keeps the history.")}, "", confirmFoot("prune"))
+	}
 	idx := v.selectedIndex()
 	if idx < 0 {
 		return frame(width, height, "Bearers", nil, "", nil, "", footer(width, keyBack))
@@ -1953,7 +2008,7 @@ func (v *listView) viewConfirm(width, height int) string {
 func (v *listView) viewRun(width, height int) string {
 	verb := map[string]string{"revoke": "Revoking %s…", "reseal": "Resealing the env of %s…",
 		"add": "Adding grants to %s…", "remove": "Removing grants from %s…", "repin": "Re-issuing %s…",
-		"portable-on": "Re-issuing %s…", "portable-off": "Removing portable copy…"}[v.pendingAction]
+		"portable-on": "Re-issuing %s…", "portable-off": "Removing portable copy…", "prune": "Pruning…"}[v.pendingAction]
 	if verb == "" {
 		verb = "Working on %s…"
 	}
@@ -1994,6 +2049,9 @@ func (v *listView) viewDone(width, height int) string {
 		return onceScreen(width, height, "✓ Bearer re-issued", v.doneSubj, v.portNew, v.portPin, g, v.portArmed, v.portCopied)
 	case "portable-off":
 		title, note = "✓ Portable copy removed", "dop use no longer works for this bearer."
+	case "prune":
+		rows = nil
+		title, note = "✓ Pruned "+plural(v.pruneCount(), "bearer"), "The audit log keeps the history."
 	}
 	body := strings.Split(kv(rows...), "\n")
 	for _, l := range strings.Split(note, "\n") {

@@ -31,16 +31,17 @@ import (
 // Record is the vault-side metadata for one issued capability.
 // Fields with `json:"-"` are computed / injected at load time.
 type Record struct {
-	CapabilityID string    `json:"capability_id"` // hex of the raw 32-byte id
-	Subject      string    `json:"subject"`       // human label
-	Grants       []string  `json:"grants"`        // grant ids
-	CreatedAt    time.Time `json:"created_at"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	Generation   uint64    `json:"generation"`
-	LookupID     string    `json:"lookup_id"`   // 40-hex bundle filename
-	BundleHash   string    `json:"bundle_hash"` // sha256 hex of bundle file
-	IssuedBy     string    `json:"issued_by"`   // ed25519 pubkey hex
-	Status       string    `json:"status"`      // "active" | "revoked"
+	CapabilityID string         `json:"capability_id"` // hex of the raw 32-byte id
+	Subject      string         `json:"subject"`       // human label
+	Grants       []string       `json:"grants"`        // grant ids
+	CreatedAt    time.Time      `json:"created_at"`
+	ExpiresAt    time.Time      `json:"expires_at"`
+	RevokedAt    time.Time      `json:"revoked_at,omitempty"` // set when status becomes revoked; zero on older records
+	Generation   uint64         `json:"generation"`
+	LookupID     string         `json:"lookup_id"`   // 40-hex bundle filename
+	BundleHash   string         `json:"bundle_hash"` // sha256 hex of bundle file
+	IssuedBy     string         `json:"issued_by"`   // ed25519 pubkey hex
+	Status       string         `json:"status"`      // "active" | "revoked"
 	Binding      *RecordBinding `json:"binding,omitempty"`
 
 	// v1.12 — env resolved from Grants, sealed to the agent's P-256
@@ -136,6 +137,10 @@ func (r Record) SigningPayload() ([]byte, error) {
 		"bundle_hash":   r.BundleHash,
 		"issued_by":     r.IssuedBy,
 		"status":        r.Status,
+	}
+	// Only when set, so records signed before revoked_at existed verify.
+	if !r.RevokedAt.IsZero() {
+		m["revoked_at"] = r.RevokedAt.UTC().Format(time.RFC3339Nano)
 	}
 	// Include binding only when set — pre-v1.3 records signed without it
 	// still verify.

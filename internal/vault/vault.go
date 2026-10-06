@@ -318,6 +318,7 @@ type Capability struct {
 	Grants     []string  `yaml:"grants"`
 	CreatedAt  time.Time `yaml:"created_at"`
 	ExpiresAt  time.Time `yaml:"expires_at"`
+	RevokedAt  time.Time `yaml:"revoked_at,omitempty" json:"revoked_at,omitempty"` // zero on records revoked before the field existed
 	Generation uint64    `yaml:"generation"`
 	LookupID   string    `yaml:"lookup_id"`
 	BundleHash string    `yaml:"bundle_hash"`
@@ -340,6 +341,36 @@ type Capability struct {
 	// stash is specifically for bearers the admin itself will use.
 	PortableWrapped string `yaml:"portable_wrapped,omitempty" json:"portable_wrapped,omitempty"`
 	Signature       string `yaml:"signature"`
+}
+
+// TouchedAt is the time a record ages from for dop token prune: RevokedAt
+// for a revoked record, the rotation seal (BearerWrapped.SealedAt) for a
+// rotated one. Records without those (revoked before RevokedAt existed)
+// fall back to the newest of creation, claim and seal times.
+func (c Capability) TouchedAt() time.Time {
+	if c.Status == "revoked" && !c.RevokedAt.IsZero() {
+		return c.RevokedAt
+	}
+	if c.Status == "rotated" && c.BearerWrapped != nil && !c.BearerWrapped.SealedAt.IsZero() {
+		return c.BearerWrapped.SealedAt
+	}
+	ts := []time.Time{c.CreatedAt}
+	if c.Binding != nil {
+		ts = append(ts, c.Binding.ClaimedAt)
+	}
+	if c.EnvWrapped != nil {
+		ts = append(ts, c.EnvWrapped.SealedAt)
+	}
+	if c.BearerWrapped != nil {
+		ts = append(ts, c.BearerWrapped.SealedAt)
+	}
+	t := ts[0]
+	for _, u := range ts {
+		if u.After(t) {
+			t = u
+		}
+	}
+	return t
 }
 
 // WrappedEnv / WrappedBearer mirror the identically-named types in
@@ -378,9 +409,10 @@ type WrappedBearer struct {
 // v1.11 — KeyType identifies which signature scheme the agent's key
 // uses. Older records omit the field entirely; verifiers default to
 // Ed25519 (the only option pre-v1.11) for backward compatibility.
-//   "ed25519"  — legacy raw file key (default when field is empty)
-//   "p256"     — ECDSA P-256, hardware-backed (macOS Secure Enclave)
-//                 or file-backed (Linux/CI with DOP_ALLOW_FILE_KEYS=1)
+//
+//	"ed25519"  — legacy raw file key (default when field is empty)
+//	"p256"     — ECDSA P-256, hardware-backed (macOS Secure Enclave)
+//	              or file-backed (Linux/CI with DOP_ALLOW_FILE_KEYS=1)
 type Binding struct {
 	Kind      string    `yaml:"kind" json:"kind"`
 	PinExpiry time.Time `yaml:"pin_expiry,omitempty" json:"pin_expiry,omitempty"`

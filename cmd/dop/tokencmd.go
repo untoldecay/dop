@@ -39,7 +39,7 @@ import (
 
 func runToken(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop token <issue|list|show|revoke|repin|portable|reseal|add-grant|remove-grant|rotate> ...")
+		fmt.Fprintln(os.Stderr, "usage: dop token <issue|list|show|revoke|prune|repin|portable|reseal|add-grant|remove-grant|rotate> ...")
 		return 2
 	}
 	switch args[0] {
@@ -51,6 +51,8 @@ func runToken(args []string) int {
 		return runTokenShow(args[1:])
 	case "revoke":
 		return runTokenRevoke(args[1:])
+	case "prune":
+		return runTokenPrune(args[1:])
 	case "repin":
 		return runTokenRepin(args[1:])
 	case "portable":
@@ -729,11 +731,91 @@ func runTokenRevoke(args []string) int {
 	return 0
 }
 
+// runTokenPrune deletes revoked and rotated records last touched before
+// the cutoff, plus their files. Active records are never candidates; a
+// rotated record keeps its BearerWrapped until the cutoff so its agent can
+// still switch over. Generations are left alone.
+func runTokenPrune(args []string) int {
+	fs := flag.NewFlagSet("token prune", flag.ExitOnError)
+	olderThan := fs.String("older-than", "30d", "prune records revoked or rotated longer ago than this (e.g. 30d, 2w, 720h)")
+	dryRun := fs.Bool("dry-run", false, "list the candidates, change nothing")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt")
+	_ = fs.Parse(args)
+	cutoff, err := parseDurationLoose(*olderThan)
+	if err != nil || cutoff <= 0 {
+		fmt.Fprintf(os.Stderr, "dop token prune: bad --older-than %q\n", *olderThan)
+		return 2
+	}
+
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token prune: %v\n", err)
+		return 1
+	}
+	v, vaultPath, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token prune: %v\n", err)
+		return 1
+	}
+
+	now := time.Now()
+	var ids []string
+	for id, c := range v.Capabilities {
+		if (c.Status == capability.RecordStatusRevoked || c.Status == capability.RecordStatusRotated) &&
+			now.Sub(c.TouchedAt()) > cutoff {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		fmt.Println("nothing to prune")
+		return 0
+	}
+	sort.Strings(ids)
+	var short []string
+	for _, id := range ids {
+		c := v.Capabilities[id]
+		short = append(short, shortID(c.LookupID))
+		fmt.Printf("  %-20s %-8s %4dd  %s\n", c.Subject, c.Status, int(now.Sub(c.TouchedAt()).Hours()/24), shortID(c.LookupID))
+	}
+	if *dryRun {
+		return 0
+	}
+	if !*yes && os.Getenv("DOP_FROM_TUI") != "1" {
+		fmt.Fprintf(os.Stderr, "prune %d records? [y/N] ", len(ids))
+		var line string
+		fmt.Fscanln(os.Stdin, &line)
+		if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
+			fmt.Fprintln(os.Stderr, "dop token prune: aborted")
+			return 1
+		}
+	}
+	for _, id := range ids {
+		removeBearerFiles(paths, v.Capabilities[id].LookupID, "dop token prune")
+		delete(v.Capabilities, id)
+	}
+	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
+		fmt.Fprintf(os.Stderr, "dop token prune: %v\n", err)
+		return 1
+	}
+	audit.Append(paths, audit.Event{Kind: audit.EventPrune,
+		Extra: map[string]string{"count": fmt.Sprint(len(ids)), "lookup_ids": strings.Join(short, ",")}})
+	fmt.Printf("pruned %d records (older than %s)\n", len(ids), *olderThan)
+	return 0
+}
+
+func shortID(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
 // markRevoked sets capID's status to revoked, bumps the generation (so
 // any cached bundle is superseded) and re-signs the record in v.
 func markRevoked(client *admin.Client, v *vault.Vault, capID string) (vault.Capability, error) {
 	c := v.Capabilities[capID]
-	c.Status = capability.RecordStatusRevoked
+	c.Status, c.RevokedAt = capability.RecordStatusRevoked, time.Now().UTC().Truncate(time.Second)
 	c.Generation = v.BumpGeneration(c.Subject)
 	rec := vaultCapability2Record(c, capID)
 	if err := signRecordViaDaemon(client, &rec); err != nil {
@@ -1578,6 +1660,7 @@ func capability2VaultCapability(r capability.Record) vault.Capability {
 		Grants:     r.Grants,
 		CreatedAt:  r.CreatedAt,
 		ExpiresAt:  r.ExpiresAt,
+		RevokedAt:  r.RevokedAt,
 		Generation: r.Generation,
 		LookupID:   r.LookupID,
 		BundleHash: r.BundleHash,
@@ -1636,6 +1719,7 @@ func vaultCapability2Record(c vault.Capability, capIDHex string) capability.Reco
 		Grants:       c.Grants,
 		CreatedAt:    c.CreatedAt,
 		ExpiresAt:    c.ExpiresAt,
+		RevokedAt:    c.RevokedAt,
 		Generation:   c.Generation,
 		LookupID:     c.LookupID,
 		BundleHash:   c.BundleHash,

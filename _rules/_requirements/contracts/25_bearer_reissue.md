@@ -22,7 +22,7 @@
 ## Mandatory Behaviors
 
 ### Old record
-- Unclaimed: `markRevoked` (status `revoked`, generation bumped, re-signed, written via `putCapability` so its stash survives); after the new bearer is saved, `removeBearerFiles` deletes its `.bundle`, `.record` and local agent key files.
+- Unclaimed: `markRevoked` (status `revoked`, `revoked_at` now, generation bumped, re-signed, written via `putCapability` so its stash survives); after the new bearer is saved, `removeBearerFiles` deletes its `.bundle`, `.record` and local agent key files.
 - Claimed: status `rotated`, generation = new generation, `BearerWrapped` sealed to the bound P-256 pubkey with AAD `dop-bearerwrap-v1|old_lookup=<old>|new_gen=<n>`, re-signed, sidecar rewritten; the agent switches on its next exec (contract 04).
 
 ### New record
@@ -61,6 +61,7 @@
 ## State & Data Rules
 - Every record rewrite MUST go through `putCapability` (stash carried from the existing entry); only a fresh id uses `capability2VaultCapability` directly.
 - The stash stays on the retired record (harmless: the bearer no longer works).
+- Retired records are deleted only by `dop token prune` (contract 18): revoked or rotated, aged from `revoked_at` or the rotation seal, older than the cutoff (default `30d`). A rotated record ages from its rotation seal (`BearerWrapped.SealedAt`), so its agent keeps the full cutoff to switch; prune MUST NOT remove it earlier.
 
 ## Acceptance Criteria
 - PASS if `TestTokenRepin`: unclaimed repin → old revoked, new PIN-bound record with the requested PIN TTL, bearer + PIN on stdout, stash carried; claimed and revoked refused.

@@ -21,7 +21,7 @@
 - MUST store each grant as `{integration, token, env_prefix, projects?, tags?, protected?, owner?}` where `env_prefix` defaults to uppercase integration name when empty.
   - `projects` + `tags` (rc8): string arrays for grouping.
   - `protected` + `owner` (rc12): inherited from parent integration on grant creation; see contract 15.
-- MUST store each capability as `{subject, grants[], created_at, expires_at, generation, lookup_id, bundle_hash, issued_by, status, binding?, signature, env_wrapped?, bearer_wrapped?, portable_wrapped?}` keyed by hex `capability_id`.
+- MUST store each capability as `{subject, grants[], created_at, expires_at, revoked_at?, generation, lookup_id, bundle_hash, issued_by, status, binding?, signature, env_wrapped?, bearer_wrapped?, portable_wrapped?}` keyed by hex `capability_id`. `revoked_at` (RFC3339) is set whenever status becomes `revoked` (`markRevoked`, cascade, team remove) and is signed only when present, so older records still verify.
   - `env_wrapped` + `bearer_wrapped` (v1.12): ECDH direct-availability envelopes; see contract 04.
   - `portable_wrapped` (v1.14.0-rc1): opt-in age-encrypted bearer stash so the issuing admin can `dop use <subject>` across their shells; see contract 19.
 - MUST refuse to migrate a v0.3 numeric schema automatically — the operator MUST start fresh.

@@ -29,6 +29,7 @@
   - v1.14.0-rc16: `integration_token_set` (`dop integration set-token` rotated a credential value or edited its scope note; see contract 18). Carries `subject` (integration name), `extra.token` (credential name), `extra.rotated`, `extra.scope_changed` (bool-as-string). Not emitted when nothing changed.
   - `portable` (`dop token portable`; see contracts 19, 25). Carries `subject`, `lookup_id` (the record now holding the stash, or the cleared one), `extra.portable` ∈ {`on`,`off`}, `extra.replaces` (old lookup id, on `on`).
   - `rotate` (`dop token rotate`; see contract 25). Carries `subject`, `lookup_id` (new record), `extra.replaces` (old lookup id), `extra.old_gen`, `extra.new_gen`.
+  - `prune` (`dop token prune`; see contract 18). Carries `extra.count` and `extra.lookup_ids` (comma-joined 12-char lookup ids of the deleted records). No `subject`: one event per run.
   - `invite_cancel` (`dop team cancel-invite`; see contract 23). Carries `extra.invite_id`.
   - `repin` now marks a re-issue: carries `extra.pin_ttl` and `extra.replaces`; the same run also emits `issue` (new bearer) and `revoke` (old bearer). See contract 25.
 - MUST include reason strings on denial: `pin_mismatch`, `pin_expired`, `rejected`, `approval_timeout`, `admin_removed`.

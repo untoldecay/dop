@@ -4,6 +4,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -147,6 +148,74 @@ func TestTokenRepin(t *testing.T) {
 		if rc := runTokenRepin([]string{"--subject", s}); rc != 1 {
 			t.Fatalf("repin %s: rc=%d", s, rc)
 		}
+	}
+}
+
+// TestTokenPrune: old revoked/rotated records go, recent ones and active
+// ones stay, generations are untouched, one audit event, --dry-run is inert.
+func TestTokenPrune(t *testing.T) {
+	paths, client, _ := tokenFixture(t)
+	v, vaultPath, err := loadVaultViaDaemon(client, paths)
+	must(t, err)
+	old, recent := time.Now().Add(-40*24*time.Hour), time.Now().Add(-24*time.Hour)
+	add := func(id, status string, at time.Time) {
+		c := vault.Capability{Subject: id, Grants: []string{"github"}, CreatedAt: old, ExpiresAt: tokenNeverSentinel(),
+			LookupID: strings.Repeat(id[:1], 24), Status: status}
+		switch {
+		case status == capability.RecordStatusRotated:
+			c.BearerWrapped = &vault.WrappedBearer{SealedAt: at} // rotation time, not creation, guards the record
+		case id == "yrevday":
+			c.CreatedAt, c.RevokedAt = time.Now().Add(-90*24*time.Hour), at // ages from RevokedAt, not CreatedAt
+		default:
+			c.CreatedAt = at
+		}
+		v.Capabilities[id] = c
+	}
+	add("rotold", capability.RecordStatusRotated, old)
+	add("frotnew", capability.RecordStatusRotated, recent)
+	add("revnew", capability.RecordStatusRevoked, recent)
+	add("yrevday", capability.RecordStatusRevoked, recent)
+	must(t, saveVaultViaDaemon(client, paths, vaultPath, v))
+	rec := filepath.Join(paths.Vault, "capabilities", "cccccccccccccccccccccccc.record")
+	must(t, os.MkdirAll(filepath.Dir(rec), 0o700))
+	must(t, os.WriteFile(rec, []byte("{}"), 0o600))
+	gens := v.Generations
+
+	if rc := runTokenPrune([]string{"--dry-run"}); rc != 0 {
+		t.Fatalf("dry-run: rc=%d", rc)
+	}
+	v, _, err = loadVaultViaDaemon(client, paths)
+	must(t, err)
+	if len(v.Capabilities) != 7 {
+		t.Fatalf("dry-run changed the vault: %d records", len(v.Capabilities))
+	}
+	if rc := runTokenPrune([]string{"--older-than", "30d"}); rc != 0 {
+		t.Fatalf("prune: rc=%d", rc)
+	}
+	v, _, err = loadVaultViaDaemon(client, paths)
+	must(t, err)
+	for _, id := range []string{"gone", "rotold"} {
+		if _, ok := v.Capabilities[id]; ok {
+			t.Fatalf("%s not pruned", id)
+		}
+	}
+	for _, id := range []string{"claimed", "unclaimed", "frotnew", "revnew", "yrevday"} {
+		if _, ok := v.Capabilities[id]; !ok {
+			t.Fatalf("%s pruned", id)
+		}
+	}
+	if _, err := os.Stat(rec); !os.IsNotExist(err) {
+		t.Fatalf("record file left behind: %v", err)
+	}
+	if fmt.Sprint(v.Generations) != fmt.Sprint(gens) {
+		t.Fatalf("generations changed: %v -> %v", gens, v.Generations)
+	}
+	b, _ := os.ReadFile(filepath.Join(paths.Logs, "audit.jsonl"))
+	if !strings.Contains(string(b), `"event":"prune"`) || !strings.Contains(string(b), "cccccccccccc,rrrrrrrrrrrr") {
+		t.Fatalf("no prune audit event: %s", b)
+	}
+	if rc := runTokenPrune(nil); rc != 0 {
+		t.Fatalf("second prune: rc=%d", rc)
 	}
 }
 

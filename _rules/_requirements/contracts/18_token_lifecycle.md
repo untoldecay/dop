@@ -43,8 +43,9 @@
 - Save MUST shell to `dop integration rename --from --to` first when the name changed, then `dop integration add --name <name> …` (idempotent update, contract 16).
 
 ### Bearers — `dop token` subcommands
-- `issue`, `list`, `show`, `revoke`, `repin`, `portable --on|--off`, `reseal`, `add-grant`, `remove-grant`, `rotate`; all admin-session gated (contract 01).
+- `issue`, `list`, `show`, `revoke`, `prune`, `repin`, `portable --on|--off`, `reseal`, `add-grant`, `remove-grant`, `rotate`; all admin-session gated (contract 01).
 - `repin`, `portable --on` and `rotate` re-issue the bearer through one path (contract 25). `portable` semantics: contract 19.
+- `prune [--older-than 30d] [--dry-run] [--yes]` MUST delete only revoked and rotated records whose age (`vault.Capability.TouchedAt`: `revoked_at` for revoked, rotation seal `BearerWrapped.SealedAt` for rotated; records revoked before `revoked_at` existed fall back to the newest of created / claimed / sealed) is older than the cutoff, plus their files; never active records, never `Generations`; one vault save and one `prune` audit event. A rotated record MUST stay until the cutoff so its agent can still pick up `BearerWrapped`.
 - Every rewrite of an existing bearer record (revoke, repin, reseal, add/remove-grant, rotate, cascade, claim, remote approve, agent migrate, `syncSidecars` re-sign) MUST go through `putCapability`, which carries `PortableWrapped` from the existing entry.
 
 ### Protection interaction
