@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -333,4 +334,331 @@ func pickKeys(verb string) keyMap {
 // notice is a body-only screen (loading, empty, load error).
 func (w wiz) notice(title, text string) string {
 	return frame(w.width, w.height, title, nil, "", strings.Split(text, "\n"), "", footer(w.width, keyBack))
+}
+
+// ---- dense form: a label column, a value column, one row per field ----
+
+// formField is one dense-form row: a text input, or a picker (opts)
+// whose last option may open the text input for a custom value (other).
+type formField struct {
+	label string
+	in    textinput.Model
+	opts  [][2]string // picker options: label (the value), muted desc; nil = text row
+	pick  int
+	other bool // the last option opens the text input
+	fixed bool // muted, not editable; the cursor skips it
+	req   bool
+	mask  bool
+}
+
+func textRow(label, placeholder string, req, mask bool) *formField {
+	f := &formField{label: label, in: newFormInput(mask), req: req, mask: mask}
+	f.in.Placeholder = placeholder
+	return f
+}
+
+func pickRow(label string, opts [][2]string) *formField {
+	return &formField{label: label, in: newFormInput(false), opts: opts}
+}
+
+func fixedRow(label, val string) *formField {
+	f := &formField{label: label, in: newFormInput(false), fixed: true}
+	f.in.SetValue(val)
+	return f
+}
+
+// custom: the picker's custom option is selected.
+func (f *formField) custom() bool { return f.other && f.pick == len(f.opts)-1 }
+
+// val is the row's value: the picked label, or the trimmed text.
+func (f *formField) val() string {
+	if f.opts != nil && !f.custom() {
+		return f.opts[f.pick][0]
+	}
+	return strings.TrimSpace(f.in.Value())
+}
+
+// denseForm is the cursor / inline-edit state over a []*formField the
+// view rebuilds per step (rows may come and go with earlier answers).
+// cur == len(rows) is the trailing action row (enter next).
+type denseForm struct {
+	cur, open, pcur int // open: 0 closed, 1 picker open, 2 text open
+	was             string
+	wasPick         int
+}
+
+const (
+	formStay = iota
+	formNext // enter on the action row
+	formBack // esc on a closed row
+)
+
+// move steps the cursor by d to the next editable row (or the action row).
+func (d *denseForm) move(rows []*formField, dir int) {
+	for i := d.cur + dir; i >= 0 && i <= len(rows); i += dir {
+		if i == len(rows) || !rows[i].fixed {
+			d.cur = i
+			return
+		}
+	}
+}
+
+// settle keeps the cursor in range and off fixed rows.
+func (d *denseForm) settle(rows []*formField) {
+	d.cur = min(max(d.cur, 0), len(rows))
+	if d.cur < len(rows) && rows[d.cur].fixed {
+		d.move(rows, 1)
+	}
+}
+
+// key routes one key: ↑↓ move, enter opens the row (or, on the action
+// row, reports formNext), esc cancels an open row or reports formBack.
+func (d *denseForm) key(rows []*formField, km tea.KeyMsg) int {
+	d.settle(rows)
+	k := km.String()
+	if d.open != 0 {
+		f := rows[d.cur]
+		switch {
+		case k == "esc":
+			f.in.SetValue(d.was)
+			f.pick, d.open = d.wasPick, 0
+		case d.open == 1 && (k == "up" || k == "down"):
+			stepCursor(&d.pcur, len(f.opts), map[string]int{"up": -1, "down": 1}[k])
+		case d.open == 1 && k == "enter":
+			f.pick, d.open = d.pcur, 0
+			if f.custom() {
+				d.open = 2
+				return formStay
+			}
+			d.move(rows, 1)
+		case d.open == 2 && k == "enter":
+			d.open = 0
+			d.move(rows, 1)
+		case d.open == 2:
+			edit(&f.in, km)
+		}
+		return formStay
+	}
+	switch k {
+	case "up", "down":
+		d.move(rows, map[string]int{"up": -1, "down": 1}[k])
+	case "esc":
+		return formBack
+	case "enter":
+		if d.cur == len(rows) {
+			return formNext
+		}
+		f := rows[d.cur]
+		d.was, d.wasPick = f.in.Value(), f.pick
+		d.open, d.pcur = 2, f.pick
+		if f.opts != nil {
+			d.open = 1
+		}
+	}
+	return formStay
+}
+
+// typing: an open text row holds text, so ? is a character there.
+func (d *denseForm) typing() bool { return d.open == 2 }
+
+// missing points the cursor at the first required empty row and
+// returns its error, or "".
+func (d *denseForm) missing(rows []*formField) string {
+	for i, f := range rows {
+		if f.req && f.val() == "" {
+			d.cur = i
+			return f.label + " is required"
+		}
+	}
+	return ""
+}
+
+// view renders the rows (› on the cursor row, the open picker in place
+// under its row), then the action row. Every row fits width.
+func (d *denseForm) view(rows []*formField, width int, action string) []string {
+	d.settle(rows)
+	lw := 0
+	for _, f := range rows {
+		lw = max(lw, lipgloss.Width(f.label))
+	}
+	vw := max(width-lw-6, 8)
+	var out []string
+	for i, f := range rows {
+		lab := padTrunc(f.label, lw)
+		shown := ansi.Truncate(f.val(), vw, "…")
+		if f.mask && shown != "" {
+			shown = strings.Repeat("•", min(len([]rune(f.val())), vw))
+		}
+		switch {
+		case f.fixed:
+			out = append(out, "  "+mutedSt.Render(lab+"  "+shown))
+		case i == d.cur && d.open == 2:
+			f.in.Width = vw
+			out = append(out, inputRowLabel(&f.in, lab))
+		case i == d.cur && d.open == 1:
+			out = append(out, "  "+bodySt.Render(lab)+"  "+bodySt.Render(shown))
+			for _, o := range optRows(f.opts, d.pcur) {
+				out = append(out, strings.Repeat(" ", lw+2)+o)
+			}
+		case i == d.cur:
+			if shown == "" && f.req {
+				shown = mutedSt.Render("required")
+			}
+			out = append(out, focusSt.Render("› "+lab)+"  "+bodySt.Render(shown))
+		default:
+			if shown == "" && f.req {
+				shown = mutedSt.Render("required")
+			}
+			out = append(out, "  "+mutedSt.Render(lab)+"  "+bodySt.Render(shown))
+		}
+	}
+	out = append(out, "")
+	if d.cur == len(rows) {
+		return append(out, focusSt.Render("› "+action))
+	}
+	return append(out, "  "+bodySt.Render(action))
+}
+
+// inputRowLabel is an open text row: › and the label in brand, the field.
+func inputRowLabel(t *textinput.Model, lab string) string {
+	t.Focus()
+	return focusSt.Render("› "+lab) + "  " + t.View()
+}
+
+// formKeys is a dense form's footer for its current state.
+func (d *denseForm) formKeys(rows []*formField, action string, extra ...key.Binding) keyMap {
+	var short []key.Binding
+	switch {
+	case d.open == 1:
+		short = []key.Binding{hint("enter", "select"), keyCancel}
+	case d.open == 2:
+		short = []key.Binding{hint("enter", "done"), keyCancel}
+	case d.cur >= len(rows):
+		short = append([]key.Binding{hint("enter", strings.ToLower(action))}, extra...)
+		short = append(short, keyBack)
+	default:
+		short = append([]key.Binding{hint("enter", "edit")}, extra...)
+		short = append(short, keyBack)
+	}
+	return keyMap{short: short, full: [][]key.Binding{
+		{keyMove, hint("enter", "edit a row / "+strings.ToLower(action)), keyBack},
+		append([]key.Binding{hint("esc", "cancel an edit"), hint("ctrl+u", "clear")}, extra...)}}
+}
+
+// ---- multi-select picker (issue grants, bearer add grant) ----
+
+// pickItem is one multi-select row: its group header, the name column,
+// a muted second column and a muted note.
+type pickItem struct{ group, id, col, note string }
+
+type multiPick struct {
+	items []pickItem
+	sel   map[string]bool
+	cur   int
+}
+
+// key: ↑↓ move, space toggles, ctrl+a all, n none. Reports whether
+// the key was used.
+func (p *multiPick) key(k string) bool {
+	if p.sel == nil {
+		p.sel = map[string]bool{}
+	}
+	switch k {
+	case "up", "down":
+		stepCursor(&p.cur, len(p.items), map[string]int{"up": -1, "down": 1}[k])
+	case " ":
+		if p.cur < len(p.items) {
+			id := p.items[p.cur].id
+			p.sel[id] = !p.sel[id]
+		}
+	case "ctrl+a":
+		for _, it := range p.items {
+			p.sel[it.id] = true
+		}
+	case "n":
+		p.sel = map[string]bool{}
+	default:
+		return false
+	}
+	return true
+}
+
+// picked is the selection in row order.
+func (p *multiPick) picked() []string {
+	var out []string
+	for _, it := range p.items {
+		if p.sel[it.id] {
+			out = append(out, it.id)
+		}
+	}
+	return out
+}
+
+// rows renders the picker in at most n lines: muted group headers with
+// a blank line between groups, ●/○, › on the cursor row, the name and
+// second columns aligned; bad rows get a danger !. Scrolls to keep the
+// cursor in view.
+func (p *multiPick) rows(width, n int, bad map[string]bool) []string {
+	nw := 0
+	for _, it := range p.items {
+		nw = max(nw, lipgloss.Width(it.id))
+	}
+	nw = min(nw, max(width/2-4, 12))
+	cw := max(width-nw-10, 6)
+	var out []string
+	at, group := 0, "\x00"
+	for i, it := range p.items {
+		if it.group != group {
+			if group != "\x00" {
+				out = append(out, "")
+			}
+			group = it.group
+			out = append(out, "  "+mutedSt.Render(it.group))
+		}
+		mark := mutedSt.Render("○")
+		if p.sel[it.id] {
+			mark = bodySt.Render("●")
+		}
+		col := ansi.Truncate(strings.TrimSpace(it.col+"  "+it.note), cw, "…")
+		row := "  " + mark + " " + bodySt.Render(padTrunc(it.id, nw)) + "  " + mutedSt.Render(col)
+		if i == p.cur {
+			at = len(out)
+			row = focusSt.Render("› ") + mark + " " + focusSt.Render(padTrunc(it.id, nw)) + "  " + mutedSt.Render(col)
+		}
+		if bad[it.id] {
+			row += " " + dangerSt.Render("!")
+		}
+		out = append(out, row)
+	}
+	if n > 0 && len(out) > n {
+		top := min(max(at-n/2, 0), len(out)-n)
+		out = out[top : top+n]
+	}
+	return out
+}
+
+// grantPickItems lists grant ids for the picker: grouped by their first
+// project (ungrouped last), the env prefix as the second column.
+func grantPickItems(ids []string, info map[string]tuiGrantInfo) []pickItem {
+	var items []pickItem
+	for _, id := range ids {
+		g := info[id]
+		grp := "ungrouped"
+		if len(g.Projects) > 0 {
+			grp = g.Projects[0]
+		}
+		note := ""
+		if g.Protected {
+			note = "protected"
+		}
+		items = append(items, pickItem{grp, id, g.Prefix, note})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i].group, items[j].group
+		if (a == "ungrouped") != (b == "ungrouped") {
+			return b == "ungrouped"
+		}
+		return a < b
+	})
+	return items
 }
