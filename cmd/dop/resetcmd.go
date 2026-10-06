@@ -77,7 +77,7 @@ func runAdminReset(args []string) int {
 	// Stop the daemon if running (so the socket doesn't linger and so
 	// deletion isn't fighting an open file handle).
 	client := admin.NewClient(admin.SockPath(paths))
-	if client.SessionActive() {
+	if _, err := client.Status(); err == nil { // daemon up, locked or not
 		fmt.Fprintln(os.Stderr, "Stopping active admin session first…")
 		if err := client.Logout(); err != nil {
 			fmt.Fprintf(os.Stderr, "  warning: logout: %v (continuing anyway)\n", err)

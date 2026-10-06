@@ -108,11 +108,12 @@ if DOP_TOKEN="$B2" "$DOP" claim --skip-approval "$P2" 2>/dev/null; then
 fi
 pass "expired PIN rejected"
 
-echo "=== [12] token repin — expired subject, fresh PIN, can now claim"
-repin_out=$(DOP_TOKEN="$B2" "$DOP" token repin --subject shortpin 2>&1)
+echo "=== [12] token repin — expired subject, new bearer + fresh PIN, can now claim"
+repin_out=$("$DOP" token repin --subject shortpin 2>&1)
+B2new=$(echo "$repin_out" | grep -E '^tok_1' | head -1)
 P2new=$(echo "$repin_out" | grep -E '^[A-Z]{2}-[A-Z]{2}-[A-Z]{2}$' | head -1)
-[[ -n "$P2new" ]] || { echo "$repin_out"; fail "repin didn't emit new PIN"; }
-DOP_TOKEN="$B2" "$DOP" claim --skip-approval "$P2new" >/dev/null 2>&1 || fail "reclaim after repin failed"
+[[ -n "$B2new" && -n "$P2new" ]] || { echo "$repin_out"; fail "repin didn't emit new bearer and PIN"; }
+DOP_TOKEN="$B2new" "$DOP" claim --skip-approval "$P2new" >/dev/null 2>&1 || fail "reclaim after repin failed"
 pass "repin works, reclaim succeeds"
 
 echo ""

@@ -10,7 +10,8 @@
 //   1. check phase: run `dop update --check-only` (channel from flag or
 //      prefs), parse the stderr for "Latest: <tag>" vs installed.
 //   2. confirm phase: operator sees installed → latest, picks y/n, can
-//      flip the channel with `c`.
+//      flip the channel with `c`. `c` also works on the done screen
+//      when nothing was installed (already up to date / check failed).
 //   3. install phase: run `dop update` (no --check-only), stream
 //      stderr. On rc=0, exit TUI so the stale binary doesn't keep
 //      running (the renamed file is already in place).
@@ -27,6 +28,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/fray/dop/internal/config"
@@ -35,13 +37,14 @@ import (
 type updateStep int
 
 const (
-	updateStepChecking  updateStep = 0
-	updateStepConfirm   updateStep = 1
+	updateStepChecking   updateStep = 0
+	updateStepConfirm    updateStep = 1
 	updateStepInstalling updateStep = 2
-	updateStepDone      updateStep = 3
+	updateStepDone       updateStep = 3
 )
 
 type updateView struct {
+	wiz
 	paths   *config.Paths
 	step    updateStep
 	channel string // "stable" | "dev"
@@ -55,10 +58,10 @@ type updateView struct {
 	linesMu sync.Mutex
 	lines   []string
 
-	rc     int
-	err    string
-	done   bool
-	flash  string
+	rc    int
+	err   string
+	done  bool
+	flash string
 }
 
 func newUpdateView(paths *config.Paths) *updateView {
@@ -70,7 +73,7 @@ func newUpdateView(paths *config.Paths) *updateView {
 	}
 }
 
-func (v *updateView) Init() tea.Cmd { return v.runCheck() }
+func (v *updateView) Init() tea.Cmd { return tea.Batch(v.spinStart(), v.runCheck()) }
 func (v *updateView) Done() bool    { return v.done }
 func (v *updateView) Flash() string { return v.flash }
 
@@ -87,6 +90,9 @@ type updateInstallDoneMsg struct {
 }
 
 func (v *updateView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.wizMsg(msg, false); ok {
+		return v, cmd
+	}
 	switch mm := msg.(type) {
 	case updateCheckMsg:
 		v.installed = mm.installed
@@ -100,7 +106,7 @@ func (v *updateView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if mm.installed == mm.latest {
 			v.step = updateStepDone
 			v.rc = 0
-			v.flash = "already on " + mm.installed + " (" + v.channel + " channel)"
+			v.flash = "Already on " + mm.installed + " (" + v.channel + " channel)"
 			return v, nil
 		}
 		v.step = updateStepConfirm
@@ -118,7 +124,7 @@ func (v *updateView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.rc = mm.rc
 		v.err = mm.err
 		if mm.rc == 0 {
-			v.flash = "updated to " + v.latest + " — TUI will exit; relaunch to use the new version"
+			v.flash = "Updated to " + v.latest + ". Relaunch dop to use it."
 		}
 		return v, nil
 	case tea.KeyMsg:
@@ -128,6 +134,12 @@ func (v *updateView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		if v.step == updateStepDone {
+			// Nothing installed (already up to date, or the check
+			// failed) → c still flips the channel. Without this, an
+			// operator on the latest stable can never reach dev.
+			if mm.String() == "c" && v.canFlipFromDone() {
+				return v, v.flipChannel()
+			}
 			v.done = true
 			// Successful update means the running binary is stale —
 			// exit the TUI so the next `dop` launch gets the new one.
@@ -143,16 +155,10 @@ func (v *updateView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return v, tea.Batch(v.runInstall(), v.waitForLine())
 			case "n":
 				v.done = true
-				v.flash = "update cancelled"
+				v.flash = "Update cancelled"
 				return v, nil
 			case "c":
-				if v.channel == "stable" {
-					v.channel = "dev"
-				} else {
-					v.channel = "stable"
-				}
-				v.step = updateStepChecking
-				return v, v.runCheck()
+				return v, v.flipChannel()
 			}
 		}
 	}
@@ -253,62 +259,91 @@ func (v *updateView) waitForLine() tea.Cmd {
 	}
 }
 
-func (v *updateView) View() string {
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Update") + "\n\n")
-	b.WriteString(mutedSt.Render("channel: "+v.channel) + "\n\n")
+var updateKeys = keyMap{
+	short: []key.Binding{hint("enter", "install"), keyBack},
+	full:  [][]key.Binding{{hint("enter", "install"), hint("c", "channel"), keyBack}},
+}
 
+// updateDoneKeys is the keymap of the done screens that installed
+// nothing (up to date / check failed): c flips the channel there.
+var updateDoneKeys = keyMap{
+	short: []key.Binding{hint("enter", "done"), hint("c", "channel")},
+	full:  [][]key.Binding{{hint("enter", "done"), hint("c", "channel"), keyBack}},
+}
+
+// flipChannel toggles stable ⇄ dev and re-runs the check.
+func (v *updateView) flipChannel() tea.Cmd {
+	if v.channel == "stable" {
+		v.channel = "dev"
+	} else {
+		v.channel = "stable"
+	}
+	v.step = updateStepChecking
+	v.rc, v.err, v.checkErr, v.flash = 0, "", "", ""
+	v.installed, v.latest = "", ""
+	return tea.Batch(v.spinStart(), v.runCheck())
+}
+
+// canFlipFromDone is true when the done screen was reached without an
+// install attempt — up to date, or the check itself failed.
+func (v *updateView) canFlipFromDone() bool {
+	if v.checkErr != "" {
+		return true
+	}
+	return v.rc == 0 && (v.installed == v.latest || v.latest == "")
+}
+
+// otherChannel is where c would switch to.
+func (v *updateView) otherChannel() string {
+	if v.channel == "stable" {
+		return "dev"
+	}
+	return "stable"
+}
+
+func (v *updateView) View() string {
+	rows := [][2]string{{"installed", v.installed}, {"latest", v.latest}, {"channel", v.channel}}
 	switch v.step {
 	case updateStepChecking:
-		b.WriteString(mutedSt.Render("checking GitHub for the latest release…") + "\n")
+		return v.running("Update", "Checking for the latest release")
 	case updateStepConfirm:
-		b.WriteString("  Installed: " + v.installed + "\n")
-		b.WriteString("  Latest:    " + okSt.Render(v.latest) + "\n\n")
-		b.WriteString("  Install this version and exit the TUI?\n")
-		b.WriteString("\n" + helpSt.Render("y/enter install · n cancel · c flip channel (stable/dev) · esc back"))
+		body := append([]string{bodySt.Render("Install " + v.latest + "?"), ""}, strings.Split(strings.TrimRight(kv(rows...), "\n"), "\n")...)
+		body = updateKeys.overlay(body, v.width, frameRows(v.height), v.help)
+		return frame(v.width, v.height, "Update", nil, "", body, "", updateKeys.footerLine(v.width, v.help))
 	case updateStepInstalling:
-		b.WriteString(mutedSt.Render("installing…") + "\n\n")
-		v.linesMu.Lock()
-		start := 0
-		if len(v.lines) > 10 {
-			start = len(v.lines) - 10
-		}
-		for _, ln := range v.lines[start:] {
-			b.WriteString("  " + mutedSt.Render(ln) + "\n")
-		}
-		v.linesMu.Unlock()
-	case updateStepDone:
-		b.WriteString("\n")
-		if v.rc == 0 {
-			if v.installed == v.latest || v.latest == "" {
-				b.WriteString(okSt.Render("✓ "+v.flash) + "\n")
-			} else {
-				b.WriteString(okSt.Render("✓ updated to "+v.latest+" — TUI will exit") + "\n")
-				b.WriteString(mutedSt.Render("  relaunch dop to use the new version.") + "\n")
-			}
-		} else {
-			b.WriteString(failSt.Render("✗ update failed") + "\n")
-			if v.checkErr != "" {
-				b.WriteString(mutedSt.Render("  "+v.checkErr) + "\n")
-			}
-			if v.err != "" {
-				b.WriteString(mutedSt.Render("  "+v.err) + "\n")
-			}
-			// Surface the stderr tail so the operator can diagnose.
+		body := []string{v.spin.View() + " " + mutedSt.Render("Installing "+v.latest)}
+		if v.help {
 			v.linesMu.Lock()
-			if len(v.lines) > 0 {
-				b.WriteString("\n" + mutedSt.Render("Last output:") + "\n")
-				start := 0
-				if len(v.lines) > 12 {
-					start = len(v.lines) - 12
-				}
-				for _, ln := range v.lines[start:] {
-					b.WriteString("  " + mutedSt.Render(ln) + "\n")
-				}
+			body = append(body, "")
+			for _, ln := range v.lines[max(len(v.lines)-10, 0):] {
+				body = append(body, "  "+mutedSt.Render(ln))
 			}
 			v.linesMu.Unlock()
 		}
-		b.WriteString("\n" + helpSt.Render("any key to continue"))
+		return frame(v.width, v.height, "Update", nil, "", body, "", "")
 	}
-	return b.String()
+	if v.rc == 0 {
+		if v.installed == v.latest || v.latest == "" {
+			body := strings.Split(strings.TrimRight(kv([2]string{"installed", v.installed}, [2]string{"channel", v.channel}), "\n"), "\n")
+			body = updateDoneKeys.overlay(body, v.width, frameRows(v.height), v.help)
+			h := "c channel · check the " + v.otherChannel() + " channel"
+			return frame(v.width, v.height, "✓ Up to date", nil, "", body, status{hint: h}.String(), updateDoneKeys.footerLine(v.width, v.help))
+		}
+		return v.doneScreen("Updated to "+v.latest, rows[1:], "Relaunch dop to use the new version.", "")
+	}
+	reason := displayOr(firstLine(v.checkErr+v.err), "unknown error")
+	var body []string
+	v.linesMu.Lock()
+	for _, ln := range v.lines[max(len(v.lines)-12, 0):] {
+		body = append(body, "  "+mutedSt.Render(ln))
+	}
+	v.linesMu.Unlock()
+	if v.canFlipFromDone() {
+		// Check failed: the status line carries the error, so the
+		// c channel hint goes in the body.
+		body = append(body, "", "  "+mutedSt.Render("c channel · check the "+v.otherChannel()+" channel"))
+		body = updateDoneKeys.overlay(body, v.width, frameRows(v.height), v.help)
+		return frame(v.width, v.height, "! Update failed", nil, "", body, status{err: reason}.String(), updateDoneKeys.footerLine(v.width, v.help))
+	}
+	return frame(v.width, v.height, "! Update failed", nil, "", body, status{err: reason}.String(), footer(v.width, hint("enter", "done")))
 }

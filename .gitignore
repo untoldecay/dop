@@ -25,3 +25,4 @@ coverage.txt
 /.gitattributes
 /CLAUDE.md
 /_rules/_orchestration/
+__pycache__/

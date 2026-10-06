@@ -24,14 +24,18 @@ const (
 	EventClaimApproved = "claim_approved"
 	EventClaimDenied   = "claim_denied"
 	EventRepin         = "repin"
+	EventPortable      = "portable" // portable stash stored or removed
 	EventRevoke        = "revoke"
+	EventRotate        = "rotate"        // claimed bearer rotated in place
+	EventPrune         = "prune"         // old revoked/rotated records deleted (extra: count, lookup_ids)
+	EventInviteCancel  = "invite_cancel" // pending admin invite deleted
 	EventExec          = "exec"
 	// v1.9.7 — `dop env` (like exec) surfaces plaintext values,
 	// so it now enforces + audits the same binding gate.
-	EventEnv       = "env"
-	EventEnvDenied = "env_denied"
-	EventAdminLogin    = "admin_login"
-	EventAdminLogout   = "admin_logout"
+	EventEnv         = "env"
+	EventEnvDenied   = "env_denied"
+	EventAdminLogin  = "admin_login"
+	EventAdminLogout = "admin_logout"
 	// v1.9 — admin-invite bootstrap.
 	EventInvite         = "invite"          // M1 opens an invite
 	EventInviteResponse = "invite_response" // M2 replies
@@ -67,6 +71,14 @@ const (
 	// old_name + new_name + referrers (count of grants rewritten).
 	// Fires once per rename; the rename itself is atomic at save time.
 	EventIntegrationRenamed = "integration_renamed"
+	// `dop integration rename-token` renamed a credential and rewrote the
+	// grants that used it. Subject = integration; extra.from, extra.to,
+	// extra.grants (count rewritten, as string).
+	EventTokenRename = "token_rename"
+	// grant_rename — `dop grant rename` moved a grant id and rewrote it in
+	// every active bearer record. Subject = new id; extra.from, extra.to,
+	// extra.bearers (records re-signed, as string).
+	EventGrantRename = "grant_rename"
 	// v1.14.0-rc4 — Tier 3 approval events for secret-print surfaces.
 	// Emitted by `internal/cli/printguard` around the approval dialog.
 	// Requested fires before the dialog opens so a hung dialog still

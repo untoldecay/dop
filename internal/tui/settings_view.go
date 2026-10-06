@@ -29,10 +29,16 @@
 package tui
 
 import (
+	"fmt"
+	"os"
 	"strings"
+	"time"
 
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/userprefs"
 )
@@ -40,9 +46,9 @@ import (
 type settingsMode int
 
 const (
-	settingsModeList    settingsMode = 0
-	settingsModePicker  settingsMode = 1
-	settingsModeCustom  settingsMode = 2 // text input for custom AdminIdleTTL
+	settingsModeList   settingsMode = 0
+	settingsModePicker settingsMode = 1
+	settingsModeCustom settingsMode = 2 // text input for custom AdminIdleTTL
 )
 
 // Row indices. Order defines on-screen order.
@@ -55,6 +61,7 @@ const (
 )
 
 type settingsView struct {
+	wiz   // size, for the custom duration step
 	paths *config.Paths
 	prefs Prefs
 	mode  settingsMode
@@ -67,7 +74,7 @@ type settingsView struct {
 	pickerCursor int // index within that setting's choices
 
 	// custom-input state (for AdminIdleTTL custom...)
-	customBuf strings.Builder
+	customBuf textinput.Model
 	customErr string
 
 	done  bool
@@ -76,7 +83,9 @@ type settingsView struct {
 }
 
 func newSettingsView(p *config.Paths) *settingsView {
-	return &settingsView{paths: p, prefs: LoadPrefs(p)}
+	v := &settingsView{paths: p, prefs: LoadPrefs(p), customBuf: newFormInput(false)}
+	v.customBuf.Placeholder = "90m"
+	return v
 }
 
 func (v *settingsView) Init() tea.Cmd { return nil }
@@ -84,9 +93,15 @@ func (v *settingsView) Done() bool    { return v.done }
 func (v *settingsView) Flash() string { return v.flash }
 
 func (v *settingsView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.wizMsg(msg, v.mode == settingsModeCustom); ok {
+		return v, cmd
+	}
 	mm, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return v, nil
+	}
+	if k := mm.String(); k != "esc" && k != "q" {
+		v.flash, v.err = "", ""
 	}
 	// Universal escapes.
 	switch mm.String() {
@@ -152,6 +167,9 @@ func (v *settingsView) updatePicker(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (v *settingsView) updateCustom(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if mm.String() != "enter" {
+		v.customErr = ""
+	}
 	switch mm.String() {
 	case "esc":
 		// Back to picker list (not all the way to settings list — if the
@@ -161,7 +179,7 @@ func (v *settingsView) updateCustom(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		v.customErr = ""
 		return v, nil
 	case "enter":
-		secs, err := userprefs.ParseAdminIdleTTL(v.customBuf.String())
+		secs, err := userprefs.ParseAdminIdleTTL(v.customBuf.Value())
 		if err != nil {
 			v.customErr = err.Error()
 			return v, nil
@@ -171,19 +189,11 @@ func (v *settingsView) updateCustom(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.customErr = "save: " + err.Error()
 			return v, nil
 		}
-		v.flash = "admin idle timeout → " + userprefs.AdminIdleTTLLabel(secs)
+		v.flash = "Idle timeout set to " + shortDur(userprefs.AdminIdleTTLLabel(secs)) + ", " + v.applyIdleTTL()
 		v.mode = settingsModeList
 		return v, nil
-	case "backspace":
-		s := v.customBuf.String()
-		if len(s) > 0 {
-			v.customBuf.Reset()
-			v.customBuf.WriteString(s[:len(s)-1])
-		}
 	default:
-		if len(mm.Runes) > 0 {
-			v.customBuf.WriteString(string(mm.Runes))
-		}
+		edit(&v.customBuf, mm)
 	}
 	return v, nil
 }
@@ -199,6 +209,7 @@ func (v *settingsView) openPicker(row int) {
 
 type settingChoice struct {
 	label    string
+	desc     string // muted, same row in the picker
 	value    string // internal canonical value (for logging / lookup)
 	isCustom bool   // true → enter opens text input instead of committing
 }
@@ -207,8 +218,8 @@ func (v *settingsView) choicesFor(row int) []settingChoice {
 	switch row {
 	case settingRowFileKeys:
 		return []settingChoice{
-			{label: "no — default (SE on signed macOS, else ed25519)", value: "no"},
-			{label: "yes — allow extractable file-backed P-256", value: "yes"},
+			{label: "Default", desc: "Secure Enclave or ed25519", value: "no"},
+			{label: "File-backed P-256", desc: "extractable key, allowed on this machine", value: "yes"},
 		}
 	case settingRowApprovalTimeout:
 		out := []settingChoice{}
@@ -223,17 +234,18 @@ func (v *settingsView) choicesFor(row int) []settingChoice {
 		out := []settingChoice{}
 		for _, s := range userprefs.AdminIdleTTLChoices {
 			out = append(out, settingChoice{
-				label: userprefs.AdminIdleTTLLabel(s),
+				label: shortDur(userprefs.AdminIdleTTLLabel(s)),
 				value: userprefs.AdminIdleTTLLabel(s),
 			})
 		}
-		out = append(out, settingChoice{label: "custom…", value: "custom", isCustom: true})
+		out = append(out, settingChoice{label: "Custom…", desc: "type a duration such as 2h", value: "custom", isCustom: true})
 		return out
 	case settingRowHarness:
 		out := []settingChoice{}
 		for _, h := range userprefs.HarnessChoices {
 			out = append(out, settingChoice{
-				label: userprefs.HarnessLabel(h),
+				label: harnessShort(h),
+				desc:  harnessDesc(h),
 				value: h,
 			})
 		}
@@ -290,9 +302,9 @@ func (v *settingsView) applyPick(row int, pick settingChoice) {
 			return
 		}
 		if v.prefs.AllowFileKeys {
-			v.flash = "allow-file-keys ON — new TUI tokens will recommend --key-type p256"
+			v.flash = "Agent key backend set to file-backed P-256"
 		} else {
-			v.flash = "allow-file-keys OFF — default key backend"
+			v.flash = "Agent key backend set to default"
 		}
 	case settingRowApprovalTimeout:
 		for _, s := range userprefs.ApprovalTimeoutChoices {
@@ -302,7 +314,7 @@ func (v *settingsView) applyPick(row int, pick settingChoice) {
 					v.err = err.Error()
 					return
 				}
-				v.flash = "approval popup timeout → " + pick.value
+				v.flash = "Approval popup timeout set to " + shortDur(pick.value)
 				return
 			}
 		}
@@ -314,7 +326,7 @@ func (v *settingsView) applyPick(row int, pick settingChoice) {
 					v.err = err.Error()
 					return
 				}
-				v.flash = "admin idle timeout → " + pick.value + "  (effective on next `dop admin login`)"
+				v.flash = "Idle timeout set to " + shortDur(pick.value) + ", " + v.applyIdleTTL()
 				return
 			}
 		}
@@ -324,8 +336,28 @@ func (v *settingsView) applyPick(row int, pick settingChoice) {
 			v.err = err.Error()
 			return
 		}
-		v.flash = "harness → " + userprefs.HarnessLabel(pick.value)
+		v.flash = "Harness set to " + harnessShort(pick.value)
 	}
+}
+
+// applyIdleTTL pushes the saved idle pref into a running session (never →
+// both TTLs 100 years; finite → abs stays the daemon default or
+// DOP_ADMIN_MAX_TTL) and says where the change took effect.
+func (v *settingsView) applyIdleTTL() string {
+	c := admin.NewClient(admin.SockPath(v.paths))
+	if !c.SessionActive() {
+		return "applies at next login"
+	}
+	idle, abs := v.prefs.EffectiveAdminIdleTTL(), admin.DefaultAbsTTL
+	if v.prefs.AdminIdleTTLSeconds == userprefs.AdminIdleTTLNever {
+		abs = idle
+	} else if d, err := time.ParseDuration(os.Getenv("DOP_ADMIN_MAX_TTL")); err == nil {
+		abs = d
+	}
+	if err := c.SetTTL(idle, abs); err != nil {
+		return "applies at next login"
+	}
+	return "applied to the current session"
 }
 
 func approvalTimeoutLabel(s int) string {
@@ -337,7 +369,7 @@ func humanDur(secs int) string {
 	case secs < 60:
 		return intToStr(secs) + "s"
 	case secs%60 == 0:
-		return intToStr(secs/60) + " min"
+		return intToStr(secs/60) + "m"
 	default:
 		return intToStr(secs) + "s"
 	}
@@ -369,91 +401,80 @@ func intToStr(n int) string {
 
 // --- View ---
 
+var settingsKeys = keyMap{
+	short: []key.Binding{hint("enter", "change"), keyBack},
+	full:  [][]key.Binding{{hint("enter", "change"), keyBack}, {keyMove}},
+}
+
+// shortDur turns the preference labels into 15m / 4h.
+func shortDur(s string) string {
+	s = strings.NewReplacer(" min", "m", " h", "h").Replace(s)
+	if d, err := time.ParseDuration(s); err == nil {
+		return shortDuration(d)
+	}
+	return s
+}
+
+func harnessShort(h string) string {
+	if n, ok := map[string]string{userprefs.HarnessManual: "Manual", userprefs.HarnessAny: "Any", userprefs.HarnessNone: "None"}[h]; ok {
+		return n
+	}
+	return userprefs.HarnessLabel(h)
+}
+
+func harnessDesc(h string) string {
+	return map[string]string{userprefs.HarnessManual: "set DOP_SESSION_ID yourself", userprefs.HarnessAny: "try all recognized adapters", userprefs.HarnessNone: "skip the session check"}[h]
+}
+
 func (v *settingsView) View() string {
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Settings") + "\n\n")
-
-	switch v.mode {
-	case settingsModeCustom:
-		b.WriteString(v.viewCustom())
-	case settingsModePicker:
-		b.WriteString(v.viewPicker())
-	default:
-		b.WriteString(v.viewList())
+	if v.mode == settingsModeCustom {
+		return v.viewCustom()
 	}
-
-	if v.flash != "" {
-		b.WriteString("\n" + okSt.Render(v.flash) + "\n")
+	rows := []struct{ label, value, hint string }{
+		{"Agent key backend", v.rowValueFileKeys(), "default: Secure Enclave or ed25519 · alternative: file-backed P-256"},
+		{"Approval popup timeout", v.rowValueApprovalTimeout(), "how long the approval dialog waits before moving to the phone"},
+		{"Admin idle timeout", v.rowValueAdminIdleTTL(), v.idleHint()},
+		{"Harness", v.rowValueHarness(), "which session variable dop reads for the trust cache"},
 	}
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err) + "\n")
-	}
-	return b.String()
-}
-
-func (v *settingsView) viewList() string {
-	var b strings.Builder
-	rows := []struct {
-		label string
-		value string
-		hint  string
-	}{
-		{"Agent key backend", v.rowValueFileKeys(), "default (SE / ed25519) vs extractable file-backed P-256"},
-		{"Approval popup timeout", v.rowValueApprovalTimeout(), "how long the osascript dialog waits before upgrading to tunnel+phone"},
-		{"Admin session idle timeout", v.rowValueAdminIdleTTL(), "how long the admin daemon stays unlocked without activity"},
-		{"Harness", v.rowValueHarness(), "which session env var DOP consults for the trust-context cache"},
-	}
-	for i, r := range rows {
-		prefix := "    "
-		labelSt := mutedSt
-		if i == v.rowCursor {
-			prefix = "  " + cursorSt.Render("➤ ")
-			labelSt = cursorSt
+	st := status{err: v.err, flash: v.flash}
+	var body []string
+	ctx := ""
+	if v.mode == settingsModePicker {
+		ctx = rows[v.pickerRow].label
+		var opts [][2]string
+		for _, c := range v.choicesFor(v.pickerRow) {
+			opts = append(opts, [2]string{c.label, c.desc})
 		}
-		b.WriteString(prefix + labelSt.Render(r.label) + "  " + okSt.Render("["+r.value+"]") + "\n")
-		if i == v.rowCursor {
-			b.WriteString("      " + mutedSt.Render(r.hint) + "\n")
+		body = optRows(opts, v.pickerCursor)
+	} else {
+		st.setHint(rows[v.rowCursor].hint)
+		for i, r := range rows {
+			if i == v.rowCursor {
+				body = append(body, focusSt.Render("› "+padTrunc(r.label, 26))+"  "+bodySt.Render(r.value))
+			} else {
+				body = append(body, "  "+bodySt.Render(padTrunc(r.label, 26))+"  "+mutedSt.Render(r.value))
+			}
 		}
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move · enter change · esc back"))
-	return b.String()
-}
-
-func (v *settingsView) viewPicker() string {
-	var b strings.Builder
-	title := []string{"Agent key backend", "Approval popup timeout", "Admin session idle timeout", "Harness"}[v.pickerRow]
-	b.WriteString(cursorSt.Render(title) + "\n\n")
-	for i, c := range v.choicesFor(v.pickerRow) {
-		prefix := "    "
-		label := c.label
-		if i == v.pickerCursor {
-			prefix = "  " + cursorSt.Render("➤ ")
-			label = cursorSt.Render(label)
-		}
-		b.WriteString(prefix + label + "\n")
+	km := settingsKeys
+	if v.mode == settingsModePicker {
+		km = keyMap{short: []key.Binding{hint("enter", "pick"), keyBack}, full: [][]key.Binding{{hint("enter", "pick"), keyBack}, {keyMove}}}
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move · enter pick · esc back to settings"))
-	return b.String()
+	body = km.overlay(body, v.width, frameRows(v.height), v.help)
+	return frame(v.width, v.height, "Settings", nil, ctx, body, st.String(), km.footerLine(v.width, v.help))
 }
 
 func (v *settingsView) viewCustom() string {
-	var b strings.Builder
-	b.WriteString(cursorSt.Render("Admin session idle timeout — custom") + "\n\n")
-	b.WriteString(mutedSt.Render("Examples:  15m   2h   24h   90m   never") + "\n")
-	b.WriteString(mutedSt.Render("Minimum: 1 minute. Enter `never` for no timeout (manual logout only).") + "\n\n")
-	b.WriteString("Duration: " + v.customBuf.String() + cursorSt.Render("▎") + "\n")
-	if v.customErr != "" {
-		b.WriteString("\n" + failSt.Render(v.customErr) + "\n")
-	}
-	b.WriteString("\n" + helpSt.Render("enter commit · esc back to presets"))
-	return b.String()
+	return v.screen("Idle timeout", "", "Admin session idle timeout", []string{inputRow(&v.customBuf)},
+		"A duration such as 15m, 2h or 24h, at least 1m; never for manual logout only.",
+		strings.ReplaceAll(v.customErr, "`", ""), "", wizKeys("save"))
 }
 
 func (v *settingsView) rowValueFileKeys() string {
 	if v.prefs.AllowFileKeys {
-		return "yes"
+		return "file-backed P-256"
 	}
-	return "no"
+	return "default"
 }
 func (v *settingsView) rowValueApprovalTimeout() string {
 	s := v.prefs.ApprovalPopupTimeoutSeconds
@@ -463,8 +484,17 @@ func (v *settingsView) rowValueApprovalTimeout() string {
 	return humanDur(s)
 }
 func (v *settingsView) rowValueAdminIdleTTL() string {
-	return userprefs.AdminIdleTTLLabel(v.prefs.AdminIdleTTLSeconds)
+	return shortDur(userprefs.AdminIdleTTLLabel(v.prefs.AdminIdleTTLSeconds))
 }
+
+// idleHint says what the idle pick means, the absolute cap included.
+func (v *settingsView) idleHint() string {
+	if v.prefs.AdminIdleTTLSeconds == userprefs.AdminIdleTTLNever {
+		return "manual logout only; the session also never expires on its own"
+	}
+	return fmt.Sprintf("unlocked until idle this long; sessions also end %dm after login", int(admin.DefaultAbsTTL.Minutes()))
+}
+
 func (v *settingsView) rowValueHarness() string {
 	if v.prefs.Harness == "" {
 		return "unset"

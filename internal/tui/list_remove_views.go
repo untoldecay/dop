@@ -8,105 +8,97 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/vault"
 )
 
-// ---------- Integration list (v1.10.1 picker) ----------
+// ---------- Integration list ----------
 
+// Integrations list modes. The detail has tabs Info / Credentials /
+// Grants (v.tab); Info carries the integration actions, the credential
+// actions open under the Credentials rows (integModeTokenAction).
 const (
-	integModeList    = 0
-	integModeAction  = 1
-	integModeConfirm = 2
-	integModeRun     = 3
-	integModeDetail  = 4
-	// v1.13.0-rc16 — token drill-down inside the integration list.
-	// Enter on an integration row now opens integModeTokenList for
-	// that integration. From there each token is pickable with its
-	// own action menu (view / edit scope / rotate / remove), parity
-	// with the grant list behavior.
-	integModeTokenList          = 5
-	integModeTokenAction        = 6
-	integModeTokenDetail        = 7
-	integModeTokenEditScope     = 8
-	integModeTokenRotate        = 9
-	integModeTokenRemoveConfirm = 10
-	// Integration-level edit (kind / description / URL). Reached via
-	// the `e` key on the integration list or the token-list footer.
-	integModeIntEdit = 11
+	integModeList               = 0
+	integModeDetail             = 1
+	integModeConfirm            = 2 // remove integration
+	integModeRun                = 3
+	integModeDone               = 4
+	integModeTokenAction        = 5
+	integModeTokenEditScope     = 6
+	integModeTokenRotate        = 7
+	integModeTokenRemoveConfirm = 8
+	integModeIntEdit            = 9
+	integModeIntReview          = 10
+	integModeTokenRename        = 11
 )
 
 type integrationListView struct {
-	client *admin.Client
-	paths  *config.Paths
-	loaded bool
-	err    string
-	names  []string
-	items  map[string]vault.Integration
-	grants map[string]vault.Grant // for referrer counts
-	done   bool
+	sessionGuard
+	client  *admin.Client
+	paths   *config.Paths
+	loaded  bool
+	loadErr string
+	err     string // last action's failure, on the status line
+	names   []string
+	items   map[string]vault.Integration
+	grants  map[string]vault.Grant // for referrer counts
+	done    bool
 
 	mode         int
+	tab          int  // detail tab: 0 Info, 1 Credentials, 2 Grants
+	help         bool // ? expanded help
 	cursor       int
 	actionCursor int
+	grantCursor  int
+	list         list.Model // list-mode renderer; v.cursor stays the source of truth
+	width        int
+	height       int
 	flash        string
-	pending      string // "remove"
+	pending      string // action in flight / done: remove, scope, rotate, remove-cred, edit
+	from         int    // mode a confirm or the edit form returns to
+	back         int    // mode a failed action returns to
+	keep         string // integration to put the cursor on after the next load
+	sub          tea.Model
 
-	// v1.13.0-rc16 — token drill-down state. Populated when the
-	// operator presses enter on an integration row.
 	tokenNames        []string
 	tokenCursor       int
 	tokenActionCursor int
 	tokenEditBuf      strings.Builder // scope note edit OR rotation value
-	tokenPending      string          // "remove-token" | "rotate" | "edit-scope"
-	// v1.13.0-rc17 — scope-note edit uses the same preset picker shape
-	// as add-integration (parity ask from the field report).
 	// tokenScopeMode true = preset picker, false = free-text input.
 	tokenScopeMode       bool
 	tokenScopePickCursor int
 
-	// Integration-level edit form state (integModeIntEdit).
-	// v1.14.0-rc3 Phase 5 — field 0 is Name (rename), Phase 4 added
-	// Projects/Tags; see intEditField* constants below.
-	intEditField         int
-	intEditNameBuf       textField
-	intEditNameWas       string // snapshot at open time, so rename detection is cheap at save
-	intEditKindCursor    int
-	intEditKindChoice    string
-	intEditDescBuf       textField
-	intEditKindSlotBuf   textField
-	intEditProjectsBuf   textField
-	intEditTagsBuf       textField
-	intEditProtectCursor int
-	intEditProtectChoice bool // mirrors protectionPresets[cursor].value
-	intEditProtectWas    bool // snapshot at enter time, used to decide if passphrase step is needed
-	intEditPassBuf       textField
-}
+	// Integration edit: a dense form (Normal / Advanced tabs), then a
+	// review of the changed rows.
+	ieForm                                                      denseForm
+	ieName, ieDesc, ieURL, ieKind, ieScan, ieProj, ieTags, iePr *formField
+	iePass                                                      *formField
+	ieAdv                                                       []*formField
+	ieAdvTab                                                    bool
+	ieWas                                                       map[*formField]string
+	ieNameWas                                                   string
+	ieProtectWas                                                bool
 
-// Integration edit field constants.
-// v1.14.0-rc3 Phase 4 added Projects/Tags; Phase 5 adds Name (rename).
-// Name is field 0 so a rename is the first thing an operator sees.
-const (
-	intEditFieldName       = 0
-	intEditFieldKind       = 1
-	intEditFieldDesc       = 2
-	intEditFieldKindSlot   = 3
-	intEditFieldProjects   = 4
-	intEditFieldTags       = 5
-	intEditFieldProtection = 6
-	intEditFieldPassphrase = 7
-)
+	renameIn, renamePass textinput.Model // credential rename step
+	renameAt             int             // 1: the passphrase input has the caret
+}
 
 func newIntegrationListView(c *admin.Client, p *config.Paths) *integrationListView {
-	return &integrationListView{client: c, paths: p}
+	return &integrationListView{client: c, paths: p, list: newNameList()}
 }
+
 func (v *integrationListView) Init() tea.Cmd { return v.load }
 func (v *integrationListView) Done() bool    { return v.done }
 func (v *integrationListView) Flash() string { return v.flash }
@@ -155,28 +147,43 @@ func (v *integrationListView) referrers(name string) []string {
 	return out
 }
 
-type integAction struct {
-	label       string
-	key         string
-	destructive bool
+var integInfoActions = []listAction{
+	{label: "Edit", key: "e", desc: "name, kind, description, URL, projects, tags, protection"},
+	{label: "Remove", key: "r", desc: "removes the integration and the grants that use it"},
 }
 
-func (v *integrationListView) currentActions() []integAction {
-	if v.selectedName() == "" {
-		return nil
-	}
-	return []integAction{
-		{label: "View details", key: "d"},
-		{label: "Remove", key: "r", destructive: true},
-		{label: "Back to list", key: "b"},
-	}
+var credActions = []listAction{
+	{label: "Edit scope note", key: "s", desc: "the note that says what this credential can do"},
+	{label: "Rotate value", key: "o", desc: "replace the upstream secret with a new value"},
+	{label: "Rename", key: "n", desc: "a new name; the grants that use it follow"},
+	{label: "Remove credential", key: "x", desc: "removes it and the grants that use it"},
 }
 
 func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.unlocked(msg); ok {
+		return v, cmd
+	}
+	if v.sub != nil {
+		// An embedded view (add credential, grant detail) owns the screen
+		// until it is done; then the integration reloads.
+		if ws, ok := msg.(tea.WindowSizeMsg); ok {
+			v.width, v.height = ws.Width, ws.Height
+		}
+		m, cmd := v.sub.Update(msg)
+		if d, ok := m.(doner); ok && d.Done() {
+			if f, ok := m.(flasher); ok && f.Flash() != "" {
+				v.flash = f.Flash()
+			}
+			v.sub, v.keep = nil, v.selectedName()
+			return v, v.load
+		}
+		v.sub = m
+		return v, cmd
+	}
 	switch mm := msg.(type) {
 	case integListLoadedMsg:
 		v.loaded = true
-		v.err = mm.err
+		v.loadErr = mm.err
 		v.items = mm.items
 		v.grants = mm.grants
 		v.names = v.names[:0]
@@ -184,214 +191,275 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.names = append(v.names, n)
 		}
 		sort.Strings(v.names)
-		if v.cursor >= len(v.names) {
-			v.cursor = 0
+		for i, n := range v.names {
+			if n == v.keep {
+				v.cursor = i
+			}
 		}
+		v.keep = ""
+		v.cursor = max(min(v.cursor, len(v.names)-1), 0)
+		items := make([]list.Item, len(v.names))
+		for i, n := range v.names {
+			items[i] = nameItem{n, v.items[n].Description}
+		}
+		v.list.SetItems(items)
+		v.refreshTokens()
+	case tea.WindowSizeMsg:
+		v.width, v.height = mm.Width, mm.Height
 	case integActionMsg:
 		if mm.err != "" {
-			v.err = mm.err
-			v.mode = integModeAction
+			// Errors stay on the screen that caused them, in plain words.
+			v.err = map[string]string{"remove": "Remove", "scope": "Scope note", "rotate": "Rotate",
+				"remove-cred": "Remove credential", "edit": "Save", "rename-cred": "Rename"}[v.pending] + " failed: " + cliErr(mm.err)
+			v.mode = v.back
 			return v, nil
 		}
-		v.flash = "integration removed · synced with team"
-		v.mode = integModeList
-		return v, v.load
+		v.mode = integModeDone
+		return v, nil
 	case tea.KeyMsg:
-		if !v.loaded {
+		if !v.loaded || v.loadErr != "" {
 			if mm.String() == "esc" || mm.String() == "ctrl+c" {
 				v.done = true
 			}
 			return v, nil
 		}
+		v.flash = "" // one-shot: gone on the next key
 		switch v.mode {
 		case integModeList:
+			if toggleHelp(&v.help, mm) {
+				return v, nil
+			}
 			return v.updateList(mm)
-		case integModeAction:
-			return v.updateAction(mm)
+		case integModeDetail:
+			if toggleHelp(&v.help, mm) {
+				return v, nil
+			}
+			return v.updateDetail(mm)
 		case integModeConfirm:
 			return v.updateConfirm(mm)
-		case integModeDetail:
-			v.mode = integModeList
-		case integModeTokenList:
-			return v.updateTokenList(mm)
+		case integModeDone:
+			if mm.String() != "enter" {
+				return v, nil // done screens leave on enter only
+			}
+			v.mode = integModeDetail
+			if v.pending == "edit" {
+				v.tab = 0
+			}
+			if v.pending == "remove" {
+				v.mode = integModeList
+			}
+			v.pending = ""
+			return v, v.load
 		case integModeTokenAction:
+			if toggleHelp(&v.help, mm) {
+				return v, nil
+			}
 			return v.updateTokenAction(mm)
-		case integModeTokenDetail:
-			v.mode = integModeTokenList
 		case integModeTokenEditScope:
 			return v.updateTokenEditScope(mm)
 		case integModeTokenRotate:
 			return v.updateTokenRotate(mm)
 		case integModeTokenRemoveConfirm:
 			return v.updateTokenRemoveConfirm(mm)
-		case integModeIntEdit:
+		case integModeIntEdit, integModeIntReview:
+			if !v.ieForm.typing() && toggleHelp(&v.help, mm) {
+				return v, nil
+			}
 			return v.updateIntEdit(mm)
+		case integModeTokenRename:
+			return v.updateTokenRename(mm)
 		}
 	}
 	return v, nil
 }
 
+// startRun puts pending in flight; a failure returns to back.
+// startRun runs an action's CLI call; enter is replayed after an unlock.
+func (v *integrationListView) startRun(pending string, back int, cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	if c := v.locked(tea.KeyMsg{Type: tea.KeyEnter}, &v.err); c != nil {
+		return v, c
+	}
+	v.pending, v.back, v.mode, v.err, v.help = pending, back, integModeRun, "", false
+	if v.keep == "" {
+		v.keep = v.selectedName()
+	}
+	return v, cmd
+}
+
 func (v *integrationListView) updateList(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	v.err = ""
 	switch mm.String() {
 	case "esc", "ctrl+c", "q":
 		v.done = true
 	case "up", "k":
-		if v.cursor > 0 {
-			v.cursor--
-		}
+		stepCursor(&v.cursor, len(v.names), -1)
 	case "down", "j":
-		if v.cursor < len(v.names)-1 {
-			v.cursor++
-		}
+		stepCursor(&v.cursor, len(v.names), 1)
 	case "enter":
-		// v1.13.0-rc16 — enter drills down into the integration's
-		// TOKEN picker (not the read-only detail — that's `d`). From
-		// the token picker each token can be viewed / edited / rotated
-		// / removed, parity with grant list.
-		if len(v.names) == 0 {
-			return v, nil
-		}
-		return v.enterTokenList(), nil
-	case "d":
 		if len(v.names) > 0 {
-			v.mode = integModeDetail
+			v.refreshTokens()
+			v.mode, v.tab, v.actionCursor, v.tokenCursor, v.grantCursor = integModeDetail, 0, 0, 0, 0
 		}
-	case "e":
+	case "e", "r":
 		if len(v.names) > 0 {
-			return v.enterIntEdit(), nil
-		}
-	case "r":
-		if len(v.names) > 0 {
-			v.mode = integModeConfirm
-			v.pending = "remove"
+			return v.runInfoAction(mm.String())
 		}
 	}
 	return v, nil
 }
 
-// enterTokenList primes the token-drill-down state for the integration
-// currently under the cursor and switches mode. Reads the integration's
-// Tokens map, sorts the keys, resets cursors.
-func (v *integrationListView) enterTokenList() *integrationListView {
-	name := v.selectedName()
-	if name == "" {
-		return v
-	}
-	it := v.items[name]
+// refreshTokens reloads the credential names of the integration under
+// the cursor.
+func (v *integrationListView) refreshTokens() {
 	v.tokenNames = v.tokenNames[:0]
-	for k := range it.Tokens {
+	for k := range v.items[v.selectedName()].Tokens {
 		v.tokenNames = append(v.tokenNames, k)
 	}
 	sort.Strings(v.tokenNames)
-	v.tokenCursor = 0
-	v.tokenActionCursor = 0
-	v.mode = integModeTokenList
-	return v
+	v.tokenCursor = max(min(v.tokenCursor, len(v.tokenNames)-1), 0)
+	v.grantCursor = max(min(v.grantCursor, len(v.referrers(v.selectedName()))-1), 0)
 }
 
-// enterIntEdit primes the integration-level edit form with the current
-// values of the selected integration.
+func (v *integrationListView) updateDetail(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	v.err = ""
+	refs := v.referrers(v.selectedName())
+	switch k := mm.String(); k {
+	case "esc", "backspace":
+		v.mode = integModeList
+	case "q", "ctrl+c":
+		v.done = true
+	case "tab":
+		v.tab = (v.tab + 1) % 3
+	case "shift+tab":
+		v.tab = (v.tab + 2) % 3
+	case "up", "k", "down", "j":
+		d := 1
+		if k == "up" || k == "k" {
+			d = -1
+		}
+		switch v.tab {
+		case 0:
+			stepCursor(&v.actionCursor, len(integInfoActions), d)
+		case 1:
+			stepCursor(&v.tokenCursor, len(v.tokenNames), d)
+		default:
+			stepCursor(&v.grantCursor, len(refs), d)
+		}
+	case "enter":
+		switch {
+		case v.tab == 0:
+			return v.runInfoAction(integInfoActions[v.actionCursor].key)
+		case v.tab == 1 && len(v.tokenNames) > 0:
+			v.mode, v.tokenActionCursor = integModeTokenAction, 0
+		case v.tab == 2 && len(refs) > 0:
+			g := newGrantListView(v.client, v.paths)
+			g.Update(grantListLoadedMsg{items: v.grants})
+			g.Update(tea.WindowSizeMsg{Width: v.width, Height: v.height})
+			g.cursor = sort.SearchStrings(g.ids, refs[v.grantCursor])
+			g.mode, g.solo = grantModeDetail, true
+			v.sub = g
+		}
+	case "e", "r":
+		return v.runInfoAction(k)
+	case "n":
+		if v.tab == 1 && len(v.tokenNames) > 0 {
+			return v.runTokenAction(listAction{key: "n"})
+		}
+	case "a":
+		// Credentials tab: add a credential (and its grant) to this
+		// integration; Grants tab: add a grant on it.
+		var a tea.Model
+		switch v.tab {
+		case 1:
+			a = newAddCredentialView(v.client, v.paths, v.selectedName())
+		case 2:
+			a = newAddGrantFor(v.client, v.paths, v.selectedName())
+		default:
+			return v, nil
+		}
+		a, _ = a.Update(tea.WindowSizeMsg{Width: v.width, Height: v.height})
+		v.sub = a
+	}
+	return v, nil
+}
+
+// runInfoAction runs an integration-level action: e edit, r remove.
+func (v *integrationListView) runInfoAction(k string) (tea.Model, tea.Cmd) {
+	v.from, v.help = v.mode, false
+	if k == "e" {
+		return v.enterIntEdit(), nil
+	}
+	v.mode = integModeConfirm
+	return v, nil
+}
+
+// enterIntEdit builds the integration edit form from the selected
+// integration and snapshots it for the review.
 func (v *integrationListView) enterIntEdit() *integrationListView {
 	name := v.selectedName()
 	if name == "" {
 		return v
 	}
 	it := v.items[name]
-	v.intEditField = intEditFieldName
-	// v1.14.0-rc3 Phase 5 — Name field (rename support). Snapshot the
-	// current key so doIntEdit can detect "operator typed a different
-	// name" without re-reading the vault.
-	v.intEditNameBuf.SetString(name)
-	v.intEditNameWas = name
-	v.intEditKindChoice = vault.IntegrationKindOf(it)
-	// Pre-position the kind cursor on the current kind.
+	v.ieName, v.ieDesc, v.ieURL, v.ieKind, v.ieScan, v.ieAdv = integRows()
+	v.ieProj, v.ieTags = textRow("projects", "docs, wiki", false, false), textRow("tags", "ro, ci", false, false)
+	v.iePr, v.iePass = pickRow("protection", protectOpts()), textRow("approval passphrase", "", true, true)
+	kind := vault.IntegrationKindOf(it)
 	for i, p := range kindPresets {
-		if p.value == v.intEditKindChoice {
-			v.intEditKindCursor = i
-			break
+		if p.value == kind {
+			v.ieKind.pick = i
 		}
 	}
-	v.intEditDescBuf.SetString(it.Description)
-	switch vault.IntegrationKindOf(it) {
-	case vault.IntegrationKindCLI:
-		v.intEditKindSlotBuf.SetString(it.Metadata["cli_cmd"])
-	case vault.IntegrationKindMCP:
-		if it.Metadata["mcp_url"] != "" {
-			v.intEditKindSlotBuf.SetString(it.Metadata["mcp_url"])
-		} else {
-			v.intEditKindSlotBuf.SetString(it.Metadata["mcp_cmd"])
-		}
-	default: // api, other
-		v.intEditKindSlotBuf.SetString(it.Metadata["base_url"])
+	if it.Protected {
+		v.iePr.pick = 1
 	}
-	// v1.14.0-rc3 — prime projects/tags buffers (Phase 4).
-	v.intEditProjectsBuf.SetString(strings.Join(it.Projects, ","))
-	v.intEditTagsBuf.SetString(strings.Join(it.Tags, ","))
-	// v1.14.0-rc3 — prime protection state + reset passphrase buffer.
-	v.intEditProtectChoice = it.Protected
-	v.intEditProtectWas = it.Protected
-	for i, p := range protectionPresets {
-		if p.value == it.Protected {
-			v.intEditProtectCursor = i
-			break
-		}
+	v.ieName.in.SetValue(name)
+	v.ieDesc.in.SetValue(it.Description)
+	v.ieURL.in.SetValue(slotValue(kind, it.Metadata))
+	v.ieProj.in.SetValue(strings.Join(it.Projects, ","))
+	v.ieTags.in.SetValue(strings.Join(it.Tags, ","))
+	for i, a := range advFieldSpecs {
+		v.ieAdv[i].in.SetValue(it.Metadata[a.metaKey])
 	}
-	v.intEditPassBuf.Reset()
-	v.mode = integModeIntEdit
+	v.ieNameWas, v.ieProtectWas, v.ieAdvTab, v.ieForm = name, it.Protected, false, denseForm{}
+	v.ieWas = snap(append(v.ieAdv, v.ieName, v.ieDesc, v.ieURL, v.ieKind, v.ieScan, v.ieProj, v.ieTags, v.iePr))
+	v.err, v.mode = "", integModeIntEdit
 	return v
 }
 
-func (v *integrationListView) updateAction(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
-	acts := v.currentActions()
-	switch mm.String() {
-	case "esc", "backspace":
-		v.mode = integModeList
-	case "up", "k":
-		if v.actionCursor > 0 {
-			v.actionCursor--
-		}
-	case "down", "j":
-		if v.actionCursor < len(acts)-1 {
-			v.actionCursor++
-		}
-	case "enter":
-		if v.actionCursor < 0 || v.actionCursor >= len(acts) {
-			return v, nil
-		}
-		return v.runAction(acts[v.actionCursor])
-	default:
-		for _, a := range acts {
-			if a.key == mm.String() {
-				return v.runAction(a)
-			}
-		}
+func (v *integrationListView) ieKindVal() string { return kindPresets[v.ieKind.pick].value }
+
+// ieRows are the edit form's rows on the current tab (adv) for the
+// picked kind; the passphrase only when switching to protected.
+func (v *integrationListView) ieRows(adv bool) []*formField {
+	if adv {
+		return advRows(v.ieAdv, v.ieKindVal())
 	}
-	return v, nil
+	r := append([]*formField{v.ieName, v.ieKind, v.ieDesc}, slotRows(v.ieKindVal(), v.ieURL, v.ieScan)...)
+	r = append(r, v.ieProj, v.ieTags, v.iePr)
+	if v.iePr.pick == 1 && !v.ieProtectWas {
+		r = append(r, v.iePass)
+	}
+	return r
 }
 
-func (v *integrationListView) runAction(a integAction) (tea.Model, tea.Cmd) {
-	switch a.key {
-	case "d":
-		v.mode = integModeDetail
-	case "r":
-		v.mode = integModeConfirm
-		v.pending = "remove"
-	case "b":
-		v.mode = integModeList
+// ieChanges are the review rows: every changed row on both tabs.
+func (v *integrationListView) ieChanges() [][2]string {
+	var rows []*formField
+	for _, f := range append(v.ieRows(false), v.ieRows(true)...) {
+		if f != v.iePass {
+			rows = append(rows, f)
+		}
 	}
-	return v, nil
+	return changes(rows, v.ieWas)
 }
 
 func (v *integrationListView) updateConfirm(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch mm.String() {
 	case "y", "Y", "enter":
-		if v.pending == "remove" {
-			v.mode = integModeRun
-			return v, v.doRemove()
-		}
+		return v.startRun("remove", v.from, v.doRemove())
 	case "n", "N", "esc":
-		v.mode = integModeAction
-		v.pending = ""
+		v.mode = v.from
 	}
 	return v, nil
 }
@@ -417,222 +485,268 @@ func (v *integrationListView) doRemove() tea.Cmd {
 }
 
 func (v *integrationListView) View() string {
-	var b strings.Builder
-	// v1.13.0-rc20 — Mole-style title + muted count subtitle.
-	b.WriteString(titleSt.Render("Integrations") + "   " +
-		mutedSt.Render(fmt.Sprintf("%d total", len(v.names))) + "\n\n")
-	if !v.loaded {
-		return b.String() + "loading…"
+	if v.sub != nil {
+		return v.sub.View()
 	}
-	if v.err != "" {
-		return b.String() + failSt.Render(v.err) + "\n\n" + helpSt.Render("esc back")
+	width, height := v.width, v.height
+	if width == 0 || height == 0 {
+		width, height = 80, 24
 	}
-
+	switch {
+	case !v.loaded:
+		return frame(width, height, "Integrations", nil, "", []string{mutedSt.Render("  loading…")}, "", "")
+	case v.loadErr != "":
+		return frame(width, height, "Integrations", nil, "", []string{v.loadErr}, "", footer(width, keyBack))
+	}
 	switch v.mode {
-	case integModeDetail:
-		return v.viewDetail()
+	case integModeDetail, integModeTokenAction:
+		return v.viewDetail(width, height)
 	case integModeConfirm:
-		return v.viewConfirm()
+		return v.viewConfirm(width, height)
 	case integModeRun:
-		return titleSt.Render("working…") + "\n\n" + mutedSt.Render("running dop CLI…")
-	case integModeTokenList, integModeTokenAction:
-		return v.viewTokenList()
-	case integModeTokenDetail:
-		return v.viewTokenDetail()
+		return v.viewRun(width, height)
+	case integModeDone:
+		return v.viewDone(width, height)
 	case integModeTokenEditScope:
-		return v.viewTokenEditScope()
+		return v.viewTokenEditScope(width, height)
 	case integModeTokenRotate:
-		return v.viewTokenRotate()
+		return v.viewTokenRotate(width, height)
 	case integModeTokenRemoveConfirm:
-		return v.viewTokenRemoveConfirm()
-	case integModeIntEdit:
-		return v.viewIntEdit()
+		return v.viewTokenRemoveConfirm(width, height)
+	case integModeIntEdit, integModeIntReview:
+		return v.viewIntEdit(width, height)
+	case integModeTokenRename:
+		return v.viewTokenRename(width, height)
 	}
 
+	km := integListKeys
+	st := status{err: v.err, flash: v.flash}
+	var body []string
 	if len(v.names) == 0 {
-		b.WriteString(mutedSt.Render("(no integrations yet — use `Add integration` from the main menu)"))
-	}
-	// v1.13.0-rc20 — dynamic label width (longest name + 2) so long
-	// service names like `boiler_skills-registry` don't collide with
-	// the description column.
-	labelWidth := 12
-	for _, n := range v.names {
-		if w := lipgloss.Width(n); w > labelWidth {
-			labelWidth = w
-		}
-	}
-	labelWidth += 2
-	for i, n := range v.names {
-		it := v.items[n]
-		prefix := "    "
-		disp := n
-		if i == v.cursor && v.mode == integModeList {
-			prefix = "  " + cursorSt.Render("➤ ")
-			disp = cursorSt.Render(n)
-		}
-		// v1.13.0-rc7 — lipgloss.Width-based padding so the cursor
-		// style doesn't shrink the visible column (ANSI escapes don't
-		// count toward Width()).
-		// v1.13.0-rc12 — prepend a muted lock glyph on protected rows.
-		// v1.14.0-rc3 — glyph slot pinned to a fixed cell width via
-		// lipgloss.Width to defeat the "emoji is 2 cells, empty is 2
-		// spaces, with-space is 3" misalignment. Row-to-row columns
-		// now line up regardless of terminal emoji rendering.
-		lockGlyph := ""
-		if it.Protected {
-			lockGlyph = mutedSt.Render("🔒")
-		}
-		lock := lipgloss.NewStyle().Width(3).Render(lockGlyph)
-		desc := it.Description
-		if desc == "" {
-			desc = "-"
-		}
-		// v1.13.0-rc20 — row shows only `name + desc`. The
-		// grants/tokens counts moved to the status bar below so each
-		// row stays scannable.
-		dispPad := lipgloss.NewStyle().Width(labelWidth).Render(disp)
-		b.WriteString(prefix + lock + dispPad + "  " + mutedSt.Render(desc) + "\n")
-	}
-
-	// v1.13.0-rc20 — status bar: contextual details for the cursor row.
-	// Shown ABOVE the help legend so it reads like "selected row info".
-	if len(v.names) > 0 && v.cursor >= 0 && v.cursor < len(v.names) {
-		selName := v.names[v.cursor]
-		selIt := v.items[selName]
-		nrefs := len(v.referrers(selName))
-		bar := fmt.Sprintf("selected: %s  |  kind=%s  |  grants=%d  |  tokens=%d",
-			selName, vault.IntegrationKindOf(selIt), nrefs, len(selIt.Tokens))
-		if len(selIt.Tags) > 0 {
-			bar += "  |  tags=" + strings.Join(selIt.Tags, ",")
-		}
-		if len(selIt.Projects) > 0 {
-			bar += "  |  projects=" + strings.Join(selIt.Projects, ",")
-		}
-		if selIt.Protected {
-			owner := selIt.Owner
-			if len(owner) > 8 {
-				owner = owner[:8] + "…"
-			}
-			bar += "  |  🔒 owner=" + owner
-		}
-		b.WriteString("\n" + mutedSt.Render(bar) + "\n")
-	}
-
-	// v1.13.0-rc4 — unified footer: help first, then flash/error.
-	// v1.13.0-rc16 — enter drills into TOKENS list. Keys: d details,
-	// e edit integration, r remove.
-	if v.mode == integModeAction {
-		b.WriteString("\n" + v.renderActionMenu())
+		body = []string{bodySt.Render("  No integrations yet. Add one from the menu: Add › Integration.")}
+		km.short = km.short[1:] // nothing to open
 	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move | enter manage tokens | d details | e edit | r remove | esc back"))
-	}
-	if v.flash != "" {
-		b.WriteString("\n" + okSt.Render(v.flash))
-		v.flash = ""
-	}
-	return b.String()
-}
-
-func (v *integrationListView) renderActionMenu() string {
-	name := v.selectedName()
-	if name == "" {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString(mutedSt.Render(fmt.Sprintf("─── actions for %q ───", name)) + "\n")
-	for i, a := range v.currentActions() {
-		prefix := "    "
-		lbl := a.label
-		if i == v.actionCursor {
-			prefix = "  " + cursorSt.Render("➤ ")
-			lbl = cursorSt.Render(lbl)
-			if a.destructive {
-				lbl = failSt.Render(a.label)
-			}
-		} else if a.destructive {
-			lbl = failSt.Render(a.label)
+		rows := frameRows(height)
+		if v.help {
+			rows -= len(km.helpLines(width)) + 1
 		}
-		b.WriteString(fmt.Sprintf("%s%s\n", prefix, lbl))
+		body = nameListBody(&v.list, "description", v.cursor, width, rows)
+		st.setHint(v.rowHint(v.selectedName()))
 	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move | enter run | backspace back"))
-	return b.String()
+	body = km.overlay(body, width, frameRows(height), v.help)
+	return frame(width, height, "Integrations", nil, fmt.Sprintf("%d total", len(v.names)), body, st.String(), km.footerLine(width, v.help))
 }
 
-func (v *integrationListView) viewDetail() string {
-	name := v.selectedName()
-	if name == "" {
-		return "no selection"
-	}
+// rowHint is the status line for an integration row: full name when
+// truncated, kind, credentials, grants, protected.
+func (v *integrationListView) rowHint(name string) string {
 	it := v.items[name]
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Integration: "+name) + "\n")
-	// v1.13.0-rc17.1 — share the metadata block with the token
-	// drill-down (viewTokenList) so both views look identical. Keeps
-	// field order + "only non-empty" logic in one place.
-	b.WriteString(integrationMetaBlock(it, len(it.Tokens)))
-	b.WriteString("\n")
-	if len(it.Tokens) > 0 {
-		b.WriteString("  tokens:\n")
-		names := make([]string, 0, len(it.Tokens))
-		for tn := range it.Tokens {
-			names = append(names, tn)
-		}
-		sort.Strings(names)
-		for _, tn := range names {
-			t := it.Tokens[tn]
-			val := t.Value
-			// Mask everything except the last 4 chars so the operator
-			// can eyeball whether it looks real vs a placeholder.
-			if len(val) > 4 {
-				val = strings.Repeat("•", len(val)-4) + val[len(val)-4:]
-			}
-			// v1.10.1 — placeholder-token nudge. Short, all-lowercase
-			// values almost always mean the operator seeded the vault
-			// with `read`/`test`/`xxx`/etc and never dropped a real key.
-			warn := ""
-			if isPlaceholderTokenValue(t.Value) {
-				warn = "  " + failSt.Render("⚠ looks like a placeholder — replace with the real upstream token")
-			}
-			note := t.ScopeNote
-			if note == "" {
-				note = "-"
-			}
-			b.WriteString(fmt.Sprintf("    %s: %s (%s)%s\n", tn, val, note, warn))
-		}
+	var parts []string
+	if lipgloss.Width(name) > nameColW {
+		parts = append(parts, name)
 	}
-	refs := v.referrers(name)
-	if len(refs) > 0 {
-		b.WriteString("  grants referencing this integration:\n")
-		for _, gid := range refs {
-			b.WriteString("    - " + gid + "\n")
-		}
-	} else {
-		b.WriteString("  " + mutedSt.Render("(no grants reference this integration yet)") + "\n")
+	parts = append(parts, "kind "+vault.IntegrationKindOf(it), plural(len(it.Tokens), "credential"), plural(len(v.referrers(name)), "grant"))
+	if it.Protected {
+		parts = append(parts, "protected")
 	}
-	b.WriteString(mutedSt.Render("\n  To edit token values: `dop integration add --name "+name+" --token TN=NEW_VALUE`\n"))
-	b.WriteString(mutedSt.Render("  Or open the plaintext YAML: `dop vault edit`\n"))
-	b.WriteString("\n" + helpSt.Render("any key back"))
-	return b.String()
+	return strings.Join(parts, " · ")
 }
 
-func (v *integrationListView) viewConfirm() string {
-	name := v.selectedName()
-	refs := v.referrers(name)
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Remove integration?") + "\n\n")
-	b.WriteString(fmt.Sprintf("  name: %s\n\n", name))
-	if len(refs) > 0 {
-		b.WriteString(failSt.Render("⚠  These grants reference it and will be removed with it:") + "\n")
-		for _, gid := range refs {
-			b.WriteString("  - " + gid + "\n")
+var integListKeys = keyMap{
+	short: []key.Binding{keyOpen, keyBack},
+	full: [][]key.Binding{
+		{keyMove, hint("enter", "open integration"), hint("e", "edit"), hint("r", "remove")},
+		{keyBack, keyQuit},
+	},
+}
+
+// integDetailKeys is the detail's expanded help; short is per tab.
+var integDetailKeys = keyMap{
+	full: [][]key.Binding{
+		{keyMove, hint("enter", "run / open"), hint("tab", "next tab"), hint("shift+tab", "previous tab")},
+		{hint("e", "edit"), hint("r", "remove"), hint("a", "add credential / grant"), hint("n", "rename credential"), keyBack, keyQuit},
+	},
+	notes: []string{
+		"Projects and tags group integrations and grants; they are not permissions.",
+		"Edit every credential value at once with dop vault edit.",
+	},
+}
+
+// infoBody is the Info tab's kv block: primary fields, then the rest of
+// the metadata in muted.
+func (v *integrationListView) infoBody(name string, it vault.Integration, width int) []string {
+	var rows [][2]string
+	add := func(l, val string) {
+		if val != "" {
+			rows = append(rows, [2]string{l, val})
 		}
-		b.WriteString("\n")
 	}
-	if v.err != "" {
-		b.WriteString(failSt.Render(v.err) + "\n\n")
+	if lipgloss.Width(name) > max(width-46, 12) {
+		add("name", name) // the title is truncated
 	}
-	b.WriteString(helpSt.Render("y/enter confirm | n/esc cancel"))
-	return b.String()
+	add("kind", vault.IntegrationKindOf(it))
+	m := it.Metadata
+	add("description", it.Description)
+	add("base URL", m["base_url"])
+	add("command", m["cli_cmd"])
+	add("MCP URL", m["mcp_url"])
+	add("MCP command", m["mcp_cmd"])
+	add("protection", protectWord(it.Protected))
+	add("projects", strings.Join(it.Projects, ", "))
+	add("tags", strings.Join(it.Tags, ", "))
+	primary := len(rows)
+	var keys []string
+	for k, val := range m {
+		switch k {
+		case "base_url", "cli_cmd", "mcp_url", "mcp_cmd", "mcp_probe_result":
+		default:
+			if val != "" {
+				keys = append(keys, k)
+			}
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		val := m[k]
+		if k == "mcp_probed_at" && m["mcp_probe_result"] != "" {
+			val += " (" + m["mcp_probe_result"] + ")"
+		}
+		add(strings.ReplaceAll(k, "_", " "), mutedSt.Render(val))
+	}
+	lines := strings.Split(strings.TrimRight(kv(rows...), "\n"), "\n")
+	if len(lines) > primary {
+		lines = append(append(append([]string{}, lines[:primary]...), ""), lines[primary:]...)
+	}
+	return lines
+}
+
+// maskLen hides a credential value and shows only its length.
+func maskLen(s string) string { return "•••• " + plural(len([]rune(s)), "char") }
+
+func (v *integrationListView) viewDetail(width, height int) string {
+	name := v.selectedName()
+	it := v.items[name]
+	refs := v.referrers(name)
+	tabs := []tab{{"Info", -1, v.tab == 0}, {"Credentials", len(v.tokenNames), v.tab == 1}, {"Grants", len(refs), v.tab == 2}}
+	st := status{err: v.err, flash: v.flash}
+	km := integDetailKeys
+	var body []string
+	switch v.tab {
+	case 0:
+		body = append(append(v.infoBody(name, it, width), ""), actionRows(integInfoActions, v.actionCursor, &st)...)
+		km.short = []key.Binding{hint("enter", "run"), hint("tab", "credentials"), keyBack}
+	case 1:
+		km.short = []key.Binding{hint("enter", "open"), hint("a", "add"), hint("tab", "grants"), keyBack}
+		if len(v.tokenNames) == 0 {
+			body = []string{bodySt.Render("  No credentials yet. Press a to add one.")}
+			km.short = km.short[1:]
+			break
+		}
+		acting := v.mode == integModeTokenAction
+		body = []string{"  " + mutedSt.Render(padTrunc("name", 24)+"  "+padTrunc("value", 14)+"  scope note")}
+		for i, tn := range v.tokenNames {
+			t := it.Tokens[tn]
+			cells, note := padTrunc(tn, 24)+"  "+padTrunc(maskLen(t.Value), 14), "  "+t.ScopeNote
+			switch {
+			case i == v.tokenCursor && !acting:
+				body = append(body, focusSt.Render("› "+cells+note))
+			case i == v.tokenCursor:
+				body = append(body, "  "+bodySt.Render(cells+note))
+			case acting:
+				body = append(body, "  "+mutedSt.Render(cells+note))
+			default:
+				body = append(body, "  "+bodySt.Render(cells)+mutedSt.Render(note))
+			}
+		}
+		tn := v.tokenNames[v.tokenCursor]
+		hintParts := []string{}
+		if lipgloss.Width(tn) > 24 {
+			hintParts = append(hintParts, tn)
+		}
+		if it.Protected {
+			hintParts = append(hintParts, "protected")
+		}
+		st.setHint(strings.Join(hintParts, " · "))
+		if isPlaceholderTokenValue(it.Tokens[tn].Value) && st.err == "" {
+			st.setError("This value looks like a placeholder. Rotate in the real one.")
+		}
+		if acting {
+			body = append(append(body, ""), actionRows(credActions, v.tokenActionCursor, &st)...)
+			km.short = []key.Binding{hint("enter", "run"), keyBack}
+		}
+	default:
+		km.short = []key.Binding{hint("enter", "open"), hint("a", "add"), hint("tab", "info"), keyBack}
+		if len(refs) == 0 {
+			body = []string{bodySt.Render("  No grant uses it yet. Press a to add one.")}
+			km.short = km.short[1:]
+			break
+		}
+		body = []string{"  " + mutedSt.Render(padTrunc("name", nameColW)+"  credential")}
+		for i, gid := range refs {
+			cred := v.grants[gid].Token
+			if i == v.grantCursor {
+				body = append(body, focusSt.Render("› "+padTrunc(gid, nameColW)+"  "+cred))
+			} else {
+				body = append(body, "  "+bodySt.Render(padTrunc(gid, nameColW))+"  "+mutedSt.Render(cred))
+			}
+		}
+		st.setHint(grantHint(refs[v.grantCursor], v.grants[refs[v.grantCursor]]))
+	}
+	ctx := ""
+	if it.Protected {
+		ctx = "protected"
+	}
+	body = km.overlay(body, width, frameRows(height), v.help)
+	title := ansi.Truncate(name, max(width-46, 12), "…")
+	return frame(width, height, title, tabs, ctx, body, st.String(), km.footerLine(width, v.help))
+}
+
+func (v *integrationListView) viewConfirm(width, height int) string {
+	name := v.selectedName()
+	it := v.items[name]
+	body := strings.Split(kv([2]string{"kind", vault.IntegrationKindOf(it)},
+		[2]string{"credentials", fmt.Sprint(len(it.Tokens))}), "\n")
+	if refs := v.referrers(name); len(refs) > 0 {
+		body = append(append(body, mutedSt.Render("  Removed with it")), upTo5(refs)...)
+	}
+	return frame(width, height, "Remove "+name+"?", nil, "", body, "", confirmFoot("remove"))
+}
+
+// viewRun is the in-flight screen: one present-tense title, no footer
+// (the subprocess can't be cancelled).
+func (v *integrationListView) viewRun(width, height int) string {
+	what := v.selectedTokenName()
+	verb := map[string]string{"remove": "Removing %s…", "scope": "Saving the scope note of %s…",
+		"rotate": "Rotating %s…", "remove-cred": "Removing %s…"}[v.pending]
+	if v.pending == "remove" {
+		what = v.selectedName()
+	}
+	title := fmt.Sprintf(verb, what)
+	switch v.pending {
+	case "edit":
+		title = "Saving integration…"
+	case "rename-cred":
+		title = "Renaming credential…"
+	}
+	return frame(width, height, title, nil, "", nil, "", "")
+}
+
+// viewDone is the ✓ outcome of an integration action; any key returns.
+func (v *integrationListView) viewDone(width, height int) string {
+	title := map[string]string{"remove": "✓ Integration removed", "scope": "✓ Scope note saved",
+		"rotate": "✓ Credential rotated", "remove-cred": "✓ Credential removed", "edit": "✓ Integration saved",
+		"rename-cred": "✓ Credential renamed"}[v.pending]
+	rows := [][2]string{{"integration", v.keep}}
+	switch v.pending {
+	case "scope":
+		rows = append(rows, [2]string{"credential", v.selectedTokenName()}, [2]string{"scope note", v.tokenEditBuf.String()})
+	case "rotate", "remove-cred":
+		rows = append(rows, [2]string{"credential", v.selectedTokenName()})
+	case "rename-cred":
+		rows = append(rows, [2]string{"credential", strings.TrimSpace(v.renameIn.Value())}, [2]string{"was", v.selectedTokenName()})
+	}
+	body := append(strings.Split(kv(rows...), "\n"), mutedSt.Render("  The vault is synced with the team."))
+	return frame(width, height, title, nil, "", body, "", footer(width, hint("enter", "done")))
 }
 
 // isPlaceholderTokenValue heuristically flags common placeholder strings
@@ -672,6 +786,7 @@ func isPlaceholderTokenValue(s string) bool {
 // ---------- Integration remove ----------
 
 type integrationRemoveView struct {
+	wiz
 	client *admin.Client
 	paths  *config.Paths
 
@@ -680,14 +795,15 @@ type integrationRemoveView struct {
 	//   1 multi-select tokens within the service
 	//   2 confirm (shows cascade preview: grants dropped + bearers affected)
 	//   3 running
-	step   int
-	loaded bool
-	err    string
-	names  []string
-	items  map[string]vault.Integration
-	grants map[string]vault.Grant
-	caps   map[string]vault.Capability
-	cursor int
+	//   4 done
+	step      int
+	loaded    bool
+	err       string
+	names     []string
+	items     map[string]vault.Integration
+	grants    map[string]vault.Grant
+	caps      map[string]vault.Capability
+	cursor    int
 	referrers []string // grants referencing the picked service (legacy; still used by preview)
 	// Multi-select token state (step 1).
 	tokenNames    []string
@@ -698,8 +814,8 @@ type integrationRemoveView struct {
 	previewReseal []string // subjects
 	previewStale  []string // subjects
 	previewEmpty  []string // subjects
-	flash  string
-	done   bool
+	flash         string
+	done          bool
 }
 
 func newIntegrationRemoveView(c *admin.Client, p *config.Paths) *integrationRemoveView {
@@ -813,6 +929,9 @@ func (v *integrationRemoveView) selectedTokenCount() int {
 }
 
 func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.wizMsg(msg, false); ok {
+		return v, cmd
+	}
 	switch mm := msg.(type) {
 	case integListLoadedMsg:
 		v.loaded = true
@@ -826,15 +945,22 @@ func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		sort.Strings(v.names)
 	case integrationRemoveResultMsg:
 		if mm.err != "" {
-			v.err = mm.err
+			v.err = "Remove failed: " + firstLine(mm.err)
 			v.step = 2
 			return v, nil
 		}
-		v.flash = "credentials removed · synced with team"
-		v.done = true
+		v.flash = "Credentials removed"
+		v.step = 4
 	case tea.KeyMsg:
 		switch mm.String() {
 		case "esc", "ctrl+c":
+			if v.step == 4 || mm.String() == "ctrl+c" {
+				v.done = true
+				return v, nil
+			}
+			if v.step == 3 {
+				return v, nil
+			}
 			if v.step == 0 {
 				v.done = true
 				return v, nil
@@ -844,20 +970,23 @@ func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.err = ""
 			return v, nil
 		}
-		if !v.loaded {
+		if v.step == 4 {
+			v.done = true
 			return v, nil
+		}
+		if !v.loaded || v.step == 3 {
+			return v, nil
+		}
+		if v.step == 1 && mm.String() != "enter" {
+			v.err = ""
 		}
 		switch v.step {
 		case 0:
 			switch mm.String() {
 			case "up", "k":
-				if v.cursor > 0 {
-					v.cursor--
-				}
+				stepCursor(&v.cursor, len(v.names), -1)
 			case "down", "j":
-				if v.cursor < len(v.names)-1 {
-					v.cursor++
-				}
+				stepCursor(&v.cursor, len(v.names), 1)
 			case "enter":
 				if len(v.names) == 0 {
 					return v, nil
@@ -869,13 +998,9 @@ func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Multi-select tokens: space toggles, a/n bulk, enter advances.
 			switch mm.String() {
 			case "up", "k":
-				if v.tokenCursor > 0 {
-					v.tokenCursor--
-				}
+				stepCursor(&v.tokenCursor, len(v.tokenNames), -1)
 			case "down", "j":
-				if v.tokenCursor < len(v.tokenNames)-1 {
-					v.tokenCursor++
-				}
+				stepCursor(&v.tokenCursor, len(v.tokenNames), 1)
 			case " ":
 				if v.tokenCursor >= 0 && v.tokenCursor < len(v.tokenNames) {
 					tn := v.tokenNames[v.tokenCursor]
@@ -891,7 +1016,7 @@ func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "enter":
 				if v.selectedTokenCount() == 0 {
-					v.err = "select at least one credential (space to toggle)"
+					v.err = "Select at least one credential with space"
 					return v, nil
 				}
 				v.err = ""
@@ -902,8 +1027,11 @@ func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Confirm cascade preview.
 			switch mm.String() {
 			case "y", "Y", "enter":
-				v.step = 3
-				return v, v.doRemove()
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
+				v.step, v.err = 3, ""
+				return v, tea.Batch(v.spinStart(), v.doRemove())
 			case "n", "N":
 				v.step = 1
 			}
@@ -938,236 +1066,106 @@ func (v *integrationRemoveView) doRemove() tea.Cmd {
 }
 
 func (v *integrationRemoveView) View() string {
-	var b strings.Builder
-	// v1.13.0-rc20 — title + muted subtitle count, matching other
-	// top-level list views.
-	b.WriteString(titleSt.Render("Remove credentials") + "   " +
-		mutedSt.Render(fmt.Sprintf("%d service(s)", len(v.names))) + "\n\n")
-	if !v.loaded {
-		return b.String() + "loading…"
+	const title = "Remove credentials"
+	switch {
+	case !v.loaded:
+		return v.notice(title, "  loading…")
+	case v.err != "" && len(v.names) == 0:
+		return v.notice(title, v.err)
+	case len(v.names) == 0:
+		return v.notice(title, mutedSt.Render("  No integrations yet. Add one from the menu: Add › Integration."))
 	}
-	if len(v.names) == 0 {
-		b.WriteString(mutedSt.Render("(nothing to remove)") + "\n\n" + helpSt.Render("esc back"))
-		return b.String()
-	}
+	target := v.names[v.cursor]
+	integ := v.items[target]
 	switch v.step {
 	case 0:
-		// v1.13.0-rc20 — dynamic label width + 4-space indent to match
-		// the rc20 Integrations list row shape.
-		labelWidth := 12
+		var opts [][2]string
 		for _, n := range v.names {
-			if w := lipgloss.Width(n); w > labelWidth {
-				labelWidth = w
-			}
+			opts = append(opts, [2]string{ansi.Truncate(n, 40, "…"), v.items[n].Description})
 		}
-		labelWidth += 2
-		for i, n := range v.names {
-			it := v.items[n]
-			prefix := "    "
-			disp := n
-			if i == v.cursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				disp = cursorSt.Render(n)
-			}
-			// v1.14.0-rc3 — Width(3)-pinned slot, same as the integration
-			// list render above. Keeps rows aligned across terminal emoji
-			// widths.
-			lockGlyph := ""
-			if it.Protected {
-				lockGlyph = mutedSt.Render("🔒")
-			}
-			lock := lipgloss.NewStyle().Width(3).Render(lockGlyph)
-			desc := it.Description
-			if desc == "" {
-				desc = "-"
-			}
-			dispPad := lipgloss.NewStyle().Width(labelWidth).Render(disp)
-			b.WriteString(prefix + lock + dispPad + "  " + mutedSt.Render(desc) + "\n")
-		}
-		// Status bar for selected service (parity with Integrations list).
-		if v.cursor >= 0 && v.cursor < len(v.names) {
-			selName := v.names[v.cursor]
-			selIt := v.items[selName]
-			bar := fmt.Sprintf("selected: %s  |  kind=%s  |  tokens=%d",
-				selName, vault.IntegrationKindOf(selIt), len(selIt.Tokens))
-			b.WriteString("\n" + mutedSt.Render(bar) + "\n")
-		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move | enter next | esc back"))
+		return v.pick(title, plural(len(v.names), "service"), opts, v.cursor,
+			strings.Join([]string{target, vault.IntegrationKindOf(integ), plural(len(integ.Tokens), "credential")}, " · "), "", pickKeys("next"))
 	case 1:
-		target := v.names[v.cursor]
-		// v1.13.0-rc20 — breadcrumb header (title + context + subtitle)
-		// instead of the inline "Pick credentials under %q" sentence.
-		// Mirrors the token drill-down header style.
-		b.WriteString(mutedSt.Render(fmt.Sprintf("Service: %s   %d credential(s)", target, len(v.tokenNames))) + "\n\n")
-		// Dynamic label width from longest token name.
-		tokLabelWidth := 14
-		for _, tn := range v.tokenNames {
-			if w := lipgloss.Width(tn); w > tokLabelWidth {
-				tokLabelWidth = w
-			}
-		}
-		tokLabelWidth += 2
+		body := []string{mutedSt.Render("  Credentials of " + ansi.Truncate(target, 50, "…"))}
 		for i, tn := range v.tokenNames {
-			tok := v.items[target].Tokens[tn]
-			prefix := "    "
-			marker := mutedSt.Render("○")
+			mark, name := mutedSt.Render("○"), bodySt.Render(padTrunc(tn, 28))
 			if v.tokenSelected[tn] {
-				marker = okSt.Render("●")
+				mark = okSt.Render("●")
 			}
-			label := tn
+			scope := mutedSt.Render("  " + integ.Tokens[tn].ScopeNote)
 			if i == v.tokenCursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				label = cursorSt.Render(tn)
+				body = append(body, focusSt.Render("› ")+mark+" "+focusSt.Render(padTrunc(tn, 28))+scope)
+			} else {
+				body = append(body, "  "+mark+" "+name+scope)
 			}
-			scope := tok.ScopeNote
-			if scope == "" {
-				scope = "-"
-			}
-			labelPad := lipgloss.NewStyle().Width(tokLabelWidth).Render(label)
-			b.WriteString(prefix + marker + "  " + labelPad + "  " + mutedSt.Render("("+scope+")") + "\n")
 		}
-		// Status bar with selected count.
-		b.WriteString("\n" + mutedSt.Render(fmt.Sprintf("%d / %d selected", v.selectedTokenCount(), len(v.tokenNames))) + "\n")
-		b.WriteString("\n" + helpSt.Render("↑↓ move | space toggle | a all | n none | enter next | esc back"))
-		if v.err != "" {
-			b.WriteString("\n" + failSt.Render(v.err))
-		}
+		st := status{err: v.err}
+		st.setHint(fmt.Sprintf("%d of %d selected · space toggles", v.selectedTokenCount(), len(v.tokenNames)))
+		km := keyMap{short: []key.Binding{hint("enter", "next"), keyBack},
+			full: [][]key.Binding{{keySpace, hint("enter", "next"), keyBack}, {keyMove, hint("a", "all"), hint("n", "none")}}}
+		body = km.overlay(body, v.width, frameRows(v.height), v.help)
+		return frame(v.width, v.height, title, nil, ansi.Truncate(target, 30, "…"), body, st.String(), km.footerLine(v.width, v.help))
 	case 2:
-		target := v.names[v.cursor]
 		picked := []string{}
 		for _, tn := range v.tokenNames {
 			if v.tokenSelected[tn] {
 				picked = append(picked, tn)
 			}
 		}
-		b.WriteString(fmt.Sprintf("Remove %d credential(s) from %q: %s\n\n",
-			len(picked), target, strings.Join(picked, ", ")))
-		// Cascade preview.
-		if len(v.previewGrants) > 0 {
-			b.WriteString(failSt.Render(fmt.Sprintf("⚠ %d grant(s) will be removed:", len(v.previewGrants))) + "\n")
-			for _, g := range v.previewGrants {
-				b.WriteString("    - " + g + "\n")
+		var body []string
+		section := func(st lipgloss.Style, glyph, head string, names []string) {
+			if len(names) > 0 {
+				body = append(append(append(body, st.Render(glyph+" "+head)), upTo5(names)...), "")
 			}
 		}
-		if len(v.previewReseal) > 0 {
-			b.WriteString("\n" + okSt.Render(fmt.Sprintf("✓ %d bearer(s) will be resealed (P-256 — env updated live):", len(v.previewReseal))) + "\n")
-			for _, s := range v.previewReseal {
-				b.WriteString("    - " + s + "\n")
-			}
-		}
-		if len(v.previewStale) > 0 {
-			b.WriteString("\n" + failSt.Render(fmt.Sprintf("⚠ %d ed25519 bearer(s) will have STALE env (bundle can't be rewritten):", len(v.previewStale))) + "\n")
-			for _, s := range v.previewStale {
-				b.WriteString("    - " + s + "\n")
-			}
-		}
-		if len(v.previewEmpty) > 0 {
-			b.WriteString("\n" + failSt.Render(fmt.Sprintf("⚠ %d bearer(s) will have NO grants left and be revoked:", len(v.previewEmpty))) + "\n")
-			for _, s := range v.previewEmpty {
-				b.WriteString("    - " + s + "\n")
-			}
-		}
-		// Integration-wide notice.
-		integ := v.items[target]
+		section(dangerSt, "!", plural(len(v.previewGrants), "grant")+" will be removed", v.previewGrants)
+		section(okSt, "✓", plural(len(v.previewReseal), "bearer")+" will be resealed (env updated live)", v.previewReseal)
+		section(dangerSt, "!", plural(len(v.previewStale), "bearer")+" will keep a stale env (bundle cannot be rewritten)", v.previewStale)
+		section(dangerSt, "!", plural(len(v.previewEmpty), "bearer")+" will have no grants left and be revoked", v.previewEmpty)
 		if len(picked) == len(integ.Tokens) {
-			b.WriteString("\n" + failSt.Render("All credentials of this service are selected — the service entry will be removed too.") + "\n")
+			body = append(body, dangerSt.Render("! The integration is removed too: all its credentials are selected."))
 		}
-		if v.err != "" {
-			b.WriteString("\n" + failSt.Render(v.err) + "\n")
+		if len(body) == 0 {
+			body = []string{mutedSt.Render("  Nothing else changes.")}
 		}
-		b.WriteString("\n" + helpSt.Render("y/enter confirm | n/esc cancel"))
+		return v.confirmScreen("Remove "+plural(len(picked), "credential")+" from "+ansi.Truncate(target, 36, "…")+"?", body, "remove", v.err)
 	case 3:
-		b.WriteString("removing…\n")
+		return v.running(title, "Removing credentials from "+target)
 	}
-	return b.String()
+	return v.doneScreen("Credentials removed", [][2]string{{"integration", target}}, "The vault is synced with the team.", "")
 }
 
-// ---------- v1.13.0-rc16 — Token drill-down (sub-view of integrationListView) ----------
-
-// updateTokenList handles key input while in the token picker.
-func (v *integrationListView) updateTokenList(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch mm.String() {
-	case "esc", "backspace":
-		v.mode = integModeList
-	case "up", "k":
-		if v.tokenCursor > 0 {
-			v.tokenCursor--
-		}
-	case "down", "j":
-		if v.tokenCursor < len(v.tokenNames)-1 {
-			v.tokenCursor++
-		}
-	case "enter":
-		if len(v.tokenNames) == 0 {
-			return v, nil
-		}
-		v.mode = integModeTokenAction
-		v.tokenActionCursor = 0
-	case "e":
-		return v.enterIntEdit(), nil
-	case "r":
-		v.mode = integModeConfirm
-		v.pending = "remove"
-	}
-	return v, nil
-}
-
-// tokenActions returns the per-token menu, parity with grantListView.
-func (v *integrationListView) tokenActions() []integAction {
-	if v.tokenCursor < 0 || v.tokenCursor >= len(v.tokenNames) {
-		return nil
-	}
-	return []integAction{
-		{label: "View details", key: "d"},
-		{label: "Edit scope note", key: "s"},
-		{label: "Rotate value", key: "o"},
-		{label: "Remove", key: "r", destructive: true},
-		{label: "Back to tokens", key: "b"},
-	}
-}
+// ---------- Credentials (Credentials tab of the integration detail) ----------
 
 func (v *integrationListView) updateTokenAction(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
-	acts := v.tokenActions()
+	v.err = ""
 	switch mm.String() {
 	case "esc", "backspace":
-		v.mode = integModeTokenList
+		v.mode = integModeDetail
+	case "q", "ctrl+c":
+		v.done = true
 	case "up", "k":
-		if v.tokenActionCursor > 0 {
-			v.tokenActionCursor--
-		}
+		stepCursor(&v.tokenActionCursor, len(credActions), -1)
 	case "down", "j":
-		if v.tokenActionCursor < len(acts)-1 {
-			v.tokenActionCursor++
-		}
+		stepCursor(&v.tokenActionCursor, len(credActions), 1)
 	case "enter":
-		if v.tokenActionCursor < 0 || v.tokenActionCursor >= len(acts) {
-			return v, nil
-		}
-		return v.runTokenAction(acts[v.tokenActionCursor])
-	default:
-		for _, a := range acts {
-			if a.key == mm.String() {
-				return v.runTokenAction(a)
-			}
-		}
+		return v.runTokenAction(credActions[v.tokenActionCursor])
+	case "n":
+		return v.runTokenAction(listAction{key: "n"})
 	}
 	return v, nil
 }
 
-func (v *integrationListView) runTokenAction(a integAction) (tea.Model, tea.Cmd) {
+func (v *integrationListView) runTokenAction(a listAction) (tea.Model, tea.Cmd) {
 	tokenName := v.selectedTokenName()
 	if tokenName == "" {
 		return v, nil
 	}
+	v.help = false
 	switch a.key {
-	case "d":
-		v.mode = integModeTokenDetail
 	case "s":
-		// v1.13.0-rc17 — enter the scope editor in PICKER mode by
-		// default, mirroring the add-integration flow. Position the
-		// cursor on the matching preset if the current scope exactly
-		// equals one; else land on "other…" (last entry) so the
-		// operator sees "pick a preset OR drop to free-text."
+		// Scope editor opens on the preset picker, on the current note's
+		// preset, else on "other…".
 		cur := v.items[v.selectedName()].Tokens[tokenName].ScopeNote
 		v.tokenEditBuf.Reset()
 		v.tokenEditBuf.WriteString(cur)
@@ -1183,13 +1181,72 @@ func (v *integrationListView) runTokenAction(a integAction) (tea.Model, tea.Cmd)
 	case "o":
 		v.tokenEditBuf.Reset()
 		v.mode = integModeTokenRotate
-	case "r":
+	case "x":
 		v.mode = integModeTokenRemoveConfirm
-		v.tokenPending = "remove-token"
-	case "b":
-		v.mode = integModeTokenList
+	case "n":
+		v.renameIn, v.renamePass, v.renameAt = newFormInput(false), newFormInput(true), 0
+		v.renameIn.SetValue(tokenName)
+		v.renameIn.CursorEnd()
+		v.err, v.mode = "", integModeTokenRename
 	}
 	return v, nil
+}
+
+// updateTokenRename is the rename step: enter saves; a protected
+// integration asks its approval passphrase on the same screen first.
+func (v *integrationListView) updateTokenRename(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	v.err = ""
+	integ, from := v.selectedName(), v.selectedTokenName()
+	to := strings.TrimSpace(v.renameIn.Value())
+	switch mm.String() {
+	case "esc":
+		if v.renameAt == 1 {
+			v.renameAt = 0
+			return v, nil
+		}
+		v.mode = integModeTokenAction
+	case "enter":
+		_, taken := v.items[integ].Tokens[to]
+		switch {
+		case to == "":
+			v.err = "Enter a name."
+		case to == from:
+			v.err = "That is its current name."
+		case taken:
+			v.err = integ + " already has a credential " + to
+		case v.items[integ].Protected && v.renameAt == 0:
+			v.renameAt = 1
+		case v.items[integ].Protected && v.renamePass.Value() == "":
+			v.err = "Enter the approval passphrase."
+		default:
+			args, pass := []string{"integration", "rename-token", "--integration", integ, "--from", from, "--to", to}, ""
+			if v.items[integ].Protected {
+				args, pass = append(args, "--passphrase-stdin"), v.renamePass.Value()
+			}
+			return v.startRun("rename-cred", integModeTokenRename, func() tea.Msg {
+				_, err := runDop(pass, args...)
+				return integActionMsg{err: err}
+			})
+		}
+	default:
+		if v.renameAt == 1 {
+			edit(&v.renamePass, mm)
+		} else {
+			edit(&v.renameIn, mm)
+		}
+	}
+	return v, nil
+}
+
+func (v *integrationListView) viewTokenRename(width, height int) string {
+	w := wiz{width: width, height: height}
+	in := []string{inputRow(&v.renameIn)}
+	if v.renameAt == 1 {
+		v.renameIn.Blur()
+		in = []string{"  " + v.renameIn.View(), "", mutedSt.Render("Approval passphrase"), inputRow(&v.renamePass)}
+	}
+	return w.screen("Rename credential", v.selectedName(), "New name for "+v.selectedTokenName(), in,
+		"The grants that use it follow the new name.", v.err, "", keyMap{short: []key.Binding{hint("enter", "save"), keyBack}})
 }
 
 func (v *integrationListView) selectedTokenName() string {
@@ -1199,53 +1256,42 @@ func (v *integrationListView) selectedTokenName() string {
 	return v.tokenNames[v.tokenCursor]
 }
 
-// updateTokenEditScope handles the scope note editor. v1.13.0-rc17 —
-// now with preset-picker parity to add-integration. Operator starts
-// in picker mode; "other…" drops to free-text; empty + backspace
-// returns to picker.
+// updateTokenEditScope: preset picker first; "other…" drops to free
+// text; empty + backspace returns to the picker.
 func (v *integrationListView) updateTokenEditScope(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	v.err = ""
 	if v.tokenScopeMode {
 		switch mm.String() {
 		case "esc":
 			v.mode = integModeTokenAction
 		case "up", "k":
-			if v.tokenScopePickCursor > 0 {
-				v.tokenScopePickCursor--
-			}
+			stepCursor(&v.tokenScopePickCursor, len(scopePresets), -1)
 		case "down", "j":
-			if v.tokenScopePickCursor < len(scopePresets)-1 {
-				v.tokenScopePickCursor++
-			}
+			stepCursor(&v.tokenScopePickCursor, len(scopePresets), 1)
 		case "enter":
 			sel := scopePresets[v.tokenScopePickCursor]
 			if sel.value == "" {
-				// "other…" — drop into free-text input, preserve
-				// current buffer so the operator can tweak the value
-				// they already have.
+				// "other…" — free text, starting from the current note.
 				v.tokenScopeMode = false
 				return v, nil
 			}
 			v.tokenEditBuf.Reset()
 			v.tokenEditBuf.WriteString(sel.value)
-			v.mode = integModeRun
-			return v, v.doTokenSetScope()
+			return v.startRun("scope", integModeTokenEditScope, v.doTokenSetScope())
 		}
 		return v, nil
 	}
-	// Free-text mode.
 	switch mm.String() {
 	case "esc":
-		v.mode = integModeTokenAction
+		v.tokenScopeMode = true // back to the preset picker
 	case "enter":
-		v.mode = integModeRun
-		return v, v.doTokenSetScope()
+		return v.startRun("scope", integModeTokenEditScope, v.doTokenSetScope())
 	case "backspace":
 		s := v.tokenEditBuf.String()
 		if len(s) > 0 {
 			v.tokenEditBuf.Reset()
 			v.tokenEditBuf.WriteString(s[:len(s)-1])
 		} else {
-			// Empty + backspace returns to the preset picker.
 			v.tokenScopeMode = true
 		}
 	default:
@@ -1258,17 +1304,16 @@ func (v *integrationListView) updateTokenEditScope(mm tea.KeyMsg) (tea.Model, te
 
 // updateTokenRotate handles the masked new-value editor.
 func (v *integrationListView) updateTokenRotate(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	v.err = ""
 	switch mm.String() {
 	case "esc":
 		v.mode = integModeTokenAction
 	case "enter":
 		if v.tokenEditBuf.Len() == 0 {
-			v.err = "new value required"
+			v.err = "Enter the new value."
 			return v, nil
 		}
-		v.err = ""
-		v.mode = integModeRun
-		return v, v.doTokenRotate()
+		return v.startRun("rotate", integModeTokenRotate, v.doTokenRotate())
 	case "backspace":
 		s := v.tokenEditBuf.String()
 		if len(s) > 0 {
@@ -1286,11 +1331,9 @@ func (v *integrationListView) updateTokenRotate(mm tea.KeyMsg) (tea.Model, tea.C
 func (v *integrationListView) updateTokenRemoveConfirm(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch mm.String() {
 	case "y", "Y", "enter":
-		v.mode = integModeRun
-		return v, v.doTokenRemove()
+		return v.startRun("remove-cred", integModeTokenAction, v.doTokenRemove())
 	case "n", "N", "esc":
 		v.mode = integModeTokenAction
-		v.tokenPending = ""
 	}
 	return v, nil
 }
@@ -1354,675 +1397,214 @@ func (v *integrationListView) doTokenRemove() tea.Cmd {
 	}
 }
 
-// updateIntEdit handles the integration-level edit form.
-// v1.14.0-rc3 — see field constants above intEditField declaration.
-// Text fields: Desc, KindSlot, Projects, Tags, Passphrase.
-// Picker fields: Kind (0), Protection (5).
-// Passphrase (6) is conditional on flipping unprotected → protected.
+// updateIntEdit: the dense form (tab flips Normal / Advanced), then the
+// review; enter there saves, or closes when nothing changed.
 func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
-	needsPass := v.intEditProtectChoice && !v.intEditProtectWas
-
-	// Field 1 — Kind picker (previously 0, shifted by Name).
-	if v.intEditField == intEditFieldKind {
-		switch mm.String() {
-		case "esc":
-			v.mode = integModeList
-		case "up", "k":
-			if v.intEditKindCursor > 0 {
-				v.intEditKindCursor--
-			}
-		case "down", "j":
-			if v.intEditKindCursor < len(kindPresets)-1 {
-				v.intEditKindCursor++
-			}
+	k := mm.String()
+	if v.mode == integModeIntReview {
+		switch k {
 		case "enter":
-			v.intEditKindChoice = kindPresets[v.intEditKindCursor].value
-			v.intEditField = intEditFieldDesc
-		case "shift+tab":
-			v.intEditField = intEditFieldName
+			if len(v.ieChanges()) == 0 {
+				v.mode, v.tab = integModeDetail, 0
+				return v, nil
+			}
+			v.keep = vault.NormalizeIntegrationName(v.ieName.val()) // cursor follows a rename
+			return v.startRun("edit", integModeIntReview, v.doIntEdit())
+		case "esc", "shift+tab":
+			v.mode, v.err = integModeIntEdit, ""
 		}
 		return v, nil
 	}
-	// Field 5 — Protection picker.
-	if v.intEditField == intEditFieldProtection {
-		switch mm.String() {
-		case "esc":
-			v.mode = integModeList
-		case "up", "k":
-			if v.intEditProtectCursor > 0 {
-				v.intEditProtectCursor--
-			}
-		case "down", "j":
-			if v.intEditProtectCursor < len(protectionPresets)-1 {
-				v.intEditProtectCursor++
-			}
-		case "enter":
-			v.intEditProtectChoice = protectionPresets[v.intEditProtectCursor].value
-			if v.intEditProtectChoice && !v.intEditProtectWas {
-				v.intEditField = intEditFieldPassphrase
-			} else {
-				v.mode = integModeRun
-				return v, v.doIntEdit()
-			}
-		case "tab":
-			v.intEditProtectChoice = protectionPresets[v.intEditProtectCursor].value
-			if v.intEditProtectChoice && !v.intEditProtectWas {
-				v.intEditField = intEditFieldPassphrase
-			}
-		case "shift+tab":
-			v.intEditField = intEditFieldTags
-		}
+	v.err = ""
+	f := &v.ieForm
+	if f.open == 0 && (k == "tab" || k == "shift+tab") {
+		v.ieAdvTab, f.cur = !v.ieAdvTab, 0
 		return v, nil
 	}
-	// Text input fields: Name (0), Desc (2), KindSlot (3), Projects (4),
-	// Tags (5), Passphrase (7). rc6f — the current field's textField
-	// gets first dibs on caret keys (left/right/home/end/delete/backspace
-	// and rune insert) so operators can edit the pre-filled content in
-	// place. Only navigation keys (tab/enter/esc/up/down/shift+tab) fall
-	// through to the view's own switch.
-	key := mm.String()
-	if buf := v.intEditCurBuf(); buf != nil {
-		switch key {
-		case "left", "right", "home", "end", "ctrl+a", "ctrl+e", "backspace", "delete", "ctrl+d":
-			buf.handleKey(key, mm.Runes)
-			return v, nil
-		default:
-			// Rune insert — tea delivers the typed runes in mm.Runes
-			// alongside a key string like "a" or "@". Only consume if
-			// there are actual runes (filters out named navigation keys).
-			if len(mm.Runes) > 0 && key != "enter" && key != "tab" && key != "shift+tab" && key != "up" && key != "down" && key != "esc" {
-				buf.InsertRunes(mm.Runes)
-				return v, nil
-			}
+	kindWas := v.ieKind.pick
+	r := f.key(v.ieRows(v.ieAdvTab), mm)
+	if v.ieKind.pick != kindWas {
+		v.ieURL.in.SetValue("") // a base URL is never sent as --cmd
+	}
+	switch r {
+	case formBack:
+		v.mode = v.from
+	case formNext:
+		v.ieAdvTab = false
+		if v.err = f.missing(v.ieRows(false)); v.err == "" {
+			v.mode = integModeIntReview
 		}
 	}
-	switch key {
-	case "esc":
-		v.mode = integModeList
-	case "enter":
-		switch v.intEditField {
-		case intEditFieldName:
-			v.intEditField = intEditFieldKind
-		case intEditFieldDesc, intEditFieldKindSlot, intEditFieldProjects:
-			v.intEditField++
-		case intEditFieldTags:
-			v.intEditField = intEditFieldProtection
-		case intEditFieldPassphrase:
-			if v.intEditPassBuf.Len() == 0 {
-				v.err = "approval passphrase required to lock"
-				return v, nil
-			}
-			v.err = ""
-			v.mode = integModeRun
-			return v, v.doIntEdit()
-		}
-	case "tab", "down":
-		switch v.intEditField {
-		case intEditFieldName:
-			v.intEditField = intEditFieldKind
-		case intEditFieldDesc, intEditFieldKindSlot, intEditFieldProjects:
-			v.intEditField++
-		case intEditFieldTags:
-			v.intEditField = intEditFieldProtection
-		}
-	case "shift+tab", "up":
-		switch v.intEditField {
-		case intEditFieldPassphrase:
-			v.intEditField = intEditFieldProtection
-		case intEditFieldDesc:
-			v.intEditField = intEditFieldKind
-		case intEditFieldName:
-			// top; no-op
-		default:
-			if v.intEditField > intEditFieldName {
-				v.intEditField--
-			}
-		}
-	}
-	_ = needsPass
 	return v, nil
 }
 
-func (v *integrationListView) intEditCurBuf() *textField {
-	switch v.intEditField {
-	case intEditFieldName:
-		return &v.intEditNameBuf
-	case intEditFieldDesc:
-		return &v.intEditDescBuf
-	case intEditFieldKindSlot:
-		return &v.intEditKindSlotBuf
-	case intEditFieldProjects:
-		return &v.intEditProjectsBuf
-	case intEditFieldTags:
-		return &v.intEditTagsBuf
-	case intEditFieldPassphrase:
-		return &v.intEditPassBuf
-	}
-	return nil
-}
-
+// doIntEdit renames first when the name changed (its own subcommand,
+// audit event and grant rewrite), then `integration add` with every
+// row. The CLI merges and keeps metadata it is not given, so an
+// Advanced row goes only when changed (cleared: an empty metadata key).
 func (v *integrationListView) doIntEdit() tea.Cmd {
-	nameWas := v.intEditNameWas
-	nameNew := strings.TrimSpace(v.intEditNameBuf.String())
-	// v1.14.0-rc3 Phase 5 — if the operator typed a different name,
-	// rename FIRST, then update the renamed integration with every
-	// other field. Rename runs through its own CLI subcommand with its
-	// own audit event and coordinated grant rewrite.
-	name := nameWas
-	if nameNew != "" && nameNew != nameWas {
-		name = nameNew
+	from, to := v.ieNameWas, v.ieName.val()
+	kind := v.ieKindVal()
+	args := []string{"integration", "add", "--name", to, "--kind", kind}
+	if d := v.ieDesc.val(); d != "" {
+		args = append(args, "--description", d)
 	}
-	kind := v.intEditKindChoice
-	desc := v.intEditDescBuf.String()
-	slot := v.intEditKindSlotBuf.String()
-	projects := strings.TrimSpace(v.intEditProjectsBuf.String())
-	tags := strings.TrimSpace(v.intEditTagsBuf.String())
-	protectChoice := v.intEditProtectChoice
-	protectWas := v.intEditProtectWas
-	passphrase := v.intEditPassBuf.String()
+	args = append(args, slotArgs(kind, v.ieURL.val())...)
+	if v.ieScan.pick == 1 && (kind == vault.IntegrationKindAPI || kind == vault.IntegrationKindMCP) {
+		args = append(args, "--probe-endpoints")
+	}
+	// Always pass projects + tags (empty clears, nonempty replaces).
+	args = append(args, "--projects", v.ieProj.val(), "--tags", v.ieTags.val())
+	for _, i := range advFieldsForKind(kind) {
+		if f := v.ieAdv[i]; f.val() != v.ieWas[f] {
+			if f.val() == "" {
+				args = append(args, "--metadata", advFieldSpecs[i].metaKey+"=")
+			} else {
+				args = append(args, advFieldSpecs[i].cliFlag, f.val())
+			}
+		}
+	}
+	protect, pass := v.iePr.pick == 1, ""
+	switch {
+	case protect && !v.ieProtectWas:
+		args, pass = append(args, "--protected", "--passphrase-stdin"), v.iePass.in.Value()
+	case !protect && v.ieProtectWas:
+		args = append(args, "--protected=false")
+	}
 	return func() tea.Msg {
-		self, _ := os.Executable()
-		if nameNew != "" && nameNew != nameWas {
-			rename := exec.Command(self, "integration", "rename", "--from", nameWas, "--to", nameNew)
-			rename.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
-			var rstderr bytes.Buffer
-			rename.Stderr = &rstderr
-			if err := rename.Run(); err != nil {
-				return integActionMsg{err: "rename: " + strings.TrimSpace(rstderr.String())}
+		if to != from {
+			if _, err := runDop("", "integration", "rename", "--from", from, "--to", to); err != "" {
+				return integActionMsg{err: err}
 			}
 		}
-		args := []string{"integration", "add", "--name", name, "--kind", kind}
-		if desc != "" {
-			args = append(args, "--description", desc)
-		}
-		if slot != "" {
-			switch kind {
-			case vault.IntegrationKindCLI:
-				args = append(args, "--cmd", slot)
-			case vault.IntegrationKindMCP:
-				if strings.HasPrefix(slot, "http://") || strings.HasPrefix(slot, "https://") {
-					args = append(args, "--mcp-url", slot)
-				} else {
-					args = append(args, "--mcp-cmd", slot)
-				}
-			default:
-				args = append(args, "--base-url", slot)
-			}
-		}
-		// v1.14.0-rc3 Phase 4 — always pass projects + tags so the TUI
-		// can edit them (empty string clears the field, nonempty replaces).
-		args = append(args, "--projects", projects, "--tags", tags)
-		switch {
-		case protectChoice && !protectWas:
-			args = append(args, "--protected", "--passphrase-stdin")
-		case !protectChoice && protectWas:
-			args = append(args, "--protected=false")
-		}
-		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
-		if protectChoice && !protectWas {
-			cmd.Stdin = strings.NewReader(passphrase + "\n")
-		}
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return integActionMsg{err: strings.TrimSpace(stderr.String())}
-		}
-		return integActionMsg{}
+		_, err := runDop(pass, args...)
+		return integActionMsg{err: err}
 	}
 }
 
-// viewTokenList renders the token picker for the integration under
-// the main cursor. When in integModeTokenAction the action menu
-// renders below the list.
-func (v *integrationListView) viewTokenList() string {
-	name := v.selectedName()
-	it := v.items[name]
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Tokens on "+name) + "\n")
-	// v1.13.0-rc17 — render the full metadata block right under the
-	// title (kind, description, protection, kind-specific hints,
-	// shared/advanced fields). Only non-empty rows render.
-	b.WriteString(integrationMetaBlock(it, len(v.tokenNames)))
-	b.WriteString("\n")
-	if len(v.tokenNames) == 0 {
-		b.WriteString(mutedSt.Render("(no tokens — add one with `dop integration add --token`)") + "\n")
-	}
-	// v1.13.0-rc20 — dynamic label width from longest token name so
-	// names like `boiler_skills-registry` don't collide with scope.
-	tokLabelWidth := 14
-	for _, tn := range v.tokenNames {
-		if w := lipgloss.Width(tn); w > tokLabelWidth {
-			tokLabelWidth = w
-		}
-	}
-	tokLabelWidth += 2
-	for i, tn := range v.tokenNames {
-		tok := it.Tokens[tn]
-		prefix := "    "
-		disp := tn
-		if i == v.tokenCursor && v.mode == integModeTokenList {
-			prefix = "  " + cursorSt.Render("➤ ")
-			disp = cursorSt.Render(tn)
-		}
-		scope := tok.ScopeNote
-		if scope == "" {
-			scope = "-"
-		}
-		dispPad := lipgloss.NewStyle().Width(tokLabelWidth).Render(disp)
-		b.WriteString(prefix + dispPad + "  " + mutedSt.Render("("+scope+")") + "\n")
-	}
-	if v.mode == integModeTokenAction {
-		b.WriteString("\n" + v.renderTokenActionMenu())
-	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move | enter actions | e edit integration | r remove integration | esc back"))
-	}
-	if v.flash != "" {
-		b.WriteString("\n" + okSt.Render(v.flash))
-		v.flash = ""
-	}
-	return b.String()
-}
-
-// integrationMetaBlock renders a compact metadata summary for an
-// integration, shown both at the top of the token drill-down view
-// AND inside the integration detail pane so the two places look
-// identical. Only non-empty fields render; order is: kind, token
-// count, description, protection, then kind-specific fields (base
-// URL / endpoints / command / MCP URL / etc.), then shared advanced
-// fields (server root, allowed, auth style, CLI install/help).
-// v1.13.0-rc17 — folds Cam's field-report ask: operators drilling
-// into a token want full context on the parent integration before
-// picking a token. v1.13.0-rc17.1 — reused in viewDetail for
-// visual parity.
-func integrationMetaBlock(it vault.Integration, tokenCount int) string {
-	var b strings.Builder
-	// v1.13.0-rc18 — label-aligned via shared kvLine. The widest
-	// label in the api/cli/mcp set is `endpoints_probed_at` at 19
-	// chars; use that as the column width so every row aligns.
-	const w = 19
-	// Header: kind + token count on one line (no label, no padding).
-	b.WriteString("  " + mutedSt.Render(fmt.Sprintf("kind=%s · %d token(s)", vault.IntegrationKindOf(it), tokenCount)) + "\n")
-	b.WriteString(kvLine("description", it.Description, w))
-	if it.Protected {
-		owner := it.Owner
-		if len(owner) > 8 {
-			owner = owner[:8] + "…"
-		}
-		b.WriteString(kvLine("protection", "🔒 owner-locked (owner="+owner+")", w))
-	}
-	// Kind-specific primary fields.
-	kind := vault.IntegrationKindOf(it)
-	switch kind {
-	case vault.IntegrationKindAPI:
-		b.WriteString(kvLine("base_url", it.Metadata["base_url"], w))
-		b.WriteString(kvLine("endpoints_url", it.Metadata["endpoints_url"], w))
-		b.WriteString(kvLine("auth_header", it.Metadata["auth_header"], w))
-		b.WriteString(kvLine("auth_style", it.Metadata["auth_style"], w))
-	case vault.IntegrationKindCLI:
-		b.WriteString(kvLine("cmd", it.Metadata["cli_cmd"], w))
-		b.WriteString(kvLine("args_hint", it.Metadata["cli_args_hint"], w))
-		b.WriteString(kvLine("cli_auth_env", it.Metadata["cli_auth_env"], w))
-		b.WriteString(kvLine("cli_install", it.Metadata["cli_install"], w))
-		b.WriteString(kvLine("cli_help", it.Metadata["cli_help"], w))
-	case vault.IntegrationKindMCP:
-		b.WriteString(kvLine("mcp_url", it.Metadata["mcp_url"], w))
-		b.WriteString(kvLine("mcp_cmd", it.Metadata["mcp_cmd"], w))
-	}
-	// Any-kind advanced fields.
-	b.WriteString(kvLine("server_root", it.Metadata["server_root"], w))
-	b.WriteString(kvLine("allowed", it.Metadata["allowed"], w))
-	// Free-form metadata that isn't promoted: dump under one line
-	// so operators see what else was stored.
-	promoted := map[string]bool{
-		"base_url": true, "endpoints_url": true, "auth_header": true, "auth_style": true,
-		"cli_cmd": true, "cli_args_hint": true, "cli_auth_env": true, "cli_install": true, "cli_help": true,
-		"mcp_url": true, "mcp_cmd": true,
-		"server_root": true, "allowed": true,
-		// probe stamps — surface for transparency
-		"endpoints_probed_at": true, "mcp_probed_at": true, "mcp_probe_result": true,
-	}
-	var extras []string
-	for k, v := range it.Metadata {
-		if promoted[k] || v == "" {
-			continue
-		}
-		extras = append(extras, k+"="+v)
-	}
-	if len(extras) > 0 {
-		sort.Strings(extras)
-		b.WriteString(kvLine("metadata", strings.Join(extras, ", "), w))
-	}
-	// Probe stamps (if present) — small nod to the probe feature.
-	b.WriteString(kvLine("endpoints_probed_at", it.Metadata["endpoints_probed_at"], w))
-	if it.Metadata["mcp_probed_at"] != "" {
-		b.WriteString(kvLine("mcp_probed_at", it.Metadata["mcp_probed_at"]+" ("+it.Metadata["mcp_probe_result"]+")", w))
-	}
-	return b.String()
-}
-
-func (v *integrationListView) renderTokenActionMenu() string {
-	tok := v.selectedTokenName()
-	if tok == "" {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString(mutedSt.Render(fmt.Sprintf("─── actions for token %q ───", tok)) + "\n")
-	for i, a := range v.tokenActions() {
-		prefix := "    "
-		lbl := a.label
-		if i == v.tokenActionCursor {
-			prefix = "  " + cursorSt.Render("➤ ")
-			lbl = cursorSt.Render(lbl)
-			if a.destructive {
-				lbl = failSt.Render(a.label)
-			}
-		} else if a.destructive {
-			lbl = failSt.Render(a.label)
-		}
-		b.WriteString(fmt.Sprintf("%s%s\n", prefix, lbl))
-	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move | enter run | backspace back"))
-	return b.String()
-}
-
-func (v *integrationListView) viewTokenDetail() string {
-	name := v.selectedName()
-	tn := v.selectedTokenName()
-	tok := v.items[name].Tokens[tn]
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Token: "+name+"/"+tn) + "\n\n")
-	val := tok.Value
-	if len(val) > 4 {
-		val = strings.Repeat("•", len(val)-4) + val[len(val)-4:]
-	} else {
-		val = strings.Repeat("•", len(val))
-	}
-	b.WriteString(fmt.Sprintf("  value:      %s\n", val))
-	scope := tok.ScopeNote
-	if scope == "" {
-		scope = "-"
-	}
-	b.WriteString(fmt.Sprintf("  scope_note: %s\n", scope))
-	b.WriteString("\n" + helpSt.Render("any key back"))
-	return b.String()
-}
-
-func (v *integrationListView) viewTokenEditScope() string {
-	tn := v.selectedTokenName()
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Edit scope note: "+tn) + "\n\n")
+func (v *integrationListView) viewTokenEditScope(width, height int) string {
+	var body []string
 	if v.tokenScopeMode {
-		// Preset picker — mirrors add-integration scope step shape.
-		b.WriteString(cursorSt.Render("Scope note") + "\n")
-		for i, p := range scopePresets {
-			prefix := "    "
-			label := p.label
-			if i == v.tokenScopePickCursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				label = cursorSt.Render(p.label)
-			}
-			b.WriteString(prefix + label + "\n")
+		var opts [][2]string
+		for _, p := range scopePresets {
+			opts = append(opts, [2]string{p.label, ""})
 		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move | enter select | esc cancel"))
+		body = pickRows("scope note", opts, v.tokenScopePickCursor)
 	} else {
-		b.WriteString(cursorSt.Render("Scope note") + ": " + v.tokenEditBuf.String() + cursorSt.Render("▎") + "\n")
-		b.WriteString("    " + mutedSt.Render("free text · empty + backspace → return to presets") + "\n")
-		b.WriteString("\n" + helpSt.Render("enter save | esc cancel"))
+		body = []string{formRow(true, "scope note", v.tokenEditBuf.String(), ""),
+			mutedSt.Render("  Free text. Empty + backspace returns to the presets.")}
 	}
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err))
-	}
-	return b.String()
+	foot := footer(width, hint("enter", "save"), keyBack)
+	return frame(width, height, "Scope note of "+v.selectedTokenName(), nil, v.selectedName(), body, status{err: v.err}.String(), foot)
 }
 
-func (v *integrationListView) viewTokenRotate() string {
-	tn := v.selectedTokenName()
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Rotate value: "+tn) + "\n\n")
-	masked := strings.Repeat("•", v.tokenEditBuf.Len())
-	b.WriteString(cursorSt.Render("New value") + ": " + masked + cursorSt.Render("▎") + "\n")
-	b.WriteString("    " + mutedSt.Render("the new credential — never echoed; sent to the CLI via stdin") + "\n")
-	b.WriteString("\n" + helpSt.Render("enter save | esc cancel"))
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err))
-	}
-	return b.String()
+func (v *integrationListView) viewTokenRotate(width, height int) string {
+	body := []string{formRow(true, "new value", strings.Repeat("•", v.tokenEditBuf.Len()), ""),
+		mutedSt.Render("  Sent to the CLI on stdin, never shown.")}
+	foot := footer(width, hint("enter", "save"), keyBack)
+	return frame(width, height, "Rotate "+v.selectedTokenName(), nil, v.selectedName(), body, status{err: v.err}.String(), foot)
 }
 
-func (v *integrationListView) viewTokenRemoveConfirm() string {
-	name := v.selectedName()
-	tn := v.selectedTokenName()
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Remove token "+name+"/"+tn+"?") + "\n\n")
-	b.WriteString(failSt.Render("Grants referencing this token will be dropped and bearers resealed where possible.") + "\n")
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err) + "\n")
+func (v *integrationListView) viewTokenRemoveConfirm(width, height int) string {
+	name, tn := v.selectedName(), v.selectedTokenName()
+	body := strings.Split(kv([2]string{"integration", name},
+		[2]string{"scope note", v.items[name].Tokens[tn].ScopeNote}), "\n")
+	var refs []string
+	for _, gid := range v.referrers(name) {
+		if v.grants[gid].Token == tn {
+			refs = append(refs, gid)
+		}
 	}
-	b.WriteString("\n" + helpSt.Render("y/enter confirm | n/esc cancel"))
-	return b.String()
+	if len(refs) > 0 {
+		body = append(append(body, mutedSt.Render("  Removed with it")), upTo5(refs)...)
+		body = append(body, "", mutedSt.Render("  Bearers holding these grants are resealed where possible."))
+	}
+	return frame(width, height, "Remove credential "+tn+"?", nil, "", body, status{err: v.err}.String(), confirmFoot("remove"))
 }
 
-func (v *integrationListView) viewIntEdit() string {
-	name := v.selectedName()
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Edit integration: "+name) + "\n\n")
-
-	// v1.14.0-rc3 Phase 5 — Name field (rename). Changing it triggers
-	// `dop integration rename` at save time (coordinated grant rewrite).
-	nameLbl := "Name"
-	if v.intEditField == intEditFieldName {
-		nameLbl = cursorSt.Render(nameLbl)
-	} else {
-		nameLbl = mutedSt.Render(nameLbl)
-	}
-	if v.intEditField == intEditFieldName {
-		before, after := v.intEditNameBuf.Split()
-		b.WriteString(nameLbl + ": " + before + cursorSt.Render("▎") + after)
-	} else {
-		b.WriteString(nameLbl + ": " + v.intEditNameBuf.String())
-	}
-	b.WriteString("\n")
-	if v.intEditField == intEditFieldName {
-		b.WriteString("    " + mutedSt.Render("changing the name renames every referring grant") + "\n")
-	}
-
-	// Kind picker (field intEditFieldKind). rc6m-fix: the literal `0`
-	// and `1` here predated the Name field (which took slot 0), so Kind
-	// highlighting + picker drew on Name focus, and Desc highlighting
-	// drew on Kind focus. The handler was always correct — only the
-	// renderer lied, so arrow keys silently adjusted the kind cursor
-	// behind an invisible picker.
-	kindLbl := "Kind"
-	kindVal := v.intEditKindChoice
-	if v.intEditField == intEditFieldKind {
-		kindLbl = cursorSt.Render("Kind")
-	} else {
-		kindLbl = mutedSt.Render("Kind")
-	}
-	b.WriteString(kindLbl + ": " + kindVal + "\n")
-	if v.intEditField == intEditFieldKind {
-		for i, p := range kindPresets {
-			prefix := "    "
-			label := p.label
-			if i == v.intEditKindCursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				label = cursorSt.Render(p.label)
-			}
-			b.WriteString(prefix + label + "    " + mutedSt.Render(p.hint) + "\n")
+// viewIntEdit is the integration edit form: dense rows, tabs Normal /
+// Advanced on the title row, the review after it.
+func (v *integrationListView) viewIntEdit(width, height int) string {
+	title := "Edit " + ansi.Truncate(v.ieNameWas, max(width-40, 12), "…")
+	w := wiz{width: width, height: height, help: v.help}
+	if v.mode == integModeIntReview {
+		if ch := v.ieChanges(); len(ch) > 0 {
+			return w.review(title, "Save "+v.ieName.val()+"?", ch, "save", false, v.err)
 		}
+		return w.review(title, "No changes.", nil, "close", false, v.err)
 	}
-
-	// Description (field intEditFieldDesc).
-	descLbl := mutedSt.Render("What it's for")
-	if v.intEditField == intEditFieldDesc {
-		descLbl = cursorSt.Render("What it's for")
+	rows, f := v.ieRows(v.ieAdvTab), &v.ieForm
+	tabs := []tab{{"Normal", -1, !v.ieAdvTab}, {"Advanced", -1, v.ieAdvTab}}
+	km := f.formKeys(rows, "Review", hint("tab", map[bool]string{true: "normal", false: "advanced"}[v.ieAdvTab]))
+	hintTxt := ""
+	switch {
+	case v.ieAdvTab:
+		hintTxt = "Optional, stored on the integration."
+	case f.cur < len(rows) && rows[f.cur] == v.ieName:
+		hintTxt = "Renaming also renames the grants that use it."
+	case f.cur < len(rows) && (rows[f.cur] == v.ieProj || rows[f.cur] == v.ieTags):
+		hintTxt = "Comma-separated."
 	}
-	if v.intEditField == intEditFieldDesc {
-		before, after := v.intEditDescBuf.Split()
-		b.WriteString(descLbl + ": " + before + cursorSt.Render("▎") + after)
-	} else {
-		b.WriteString(descLbl + ": " + v.intEditDescBuf.String())
-	}
-	b.WriteString("\n")
-
-	// KindSlot (field 2) — label depends on kind.
-	slotLbl, slotHint := kindSlotLabel(v.intEditKindChoice)
-	st := mutedSt
-	if v.intEditField == intEditFieldKindSlot {
-		st = cursorSt
-	}
-	if v.intEditField == intEditFieldKindSlot {
-		before, after := v.intEditKindSlotBuf.Split()
-		b.WriteString(st.Render(slotLbl) + ": " + before + cursorSt.Render("▎") + after)
-	} else {
-		b.WriteString(st.Render(slotLbl) + ": " + v.intEditKindSlotBuf.String())
-	}
-	b.WriteString("\n")
-	if v.intEditField == intEditFieldKindSlot {
-		b.WriteString("    " + mutedSt.Render(slotHint) + "\n")
-	}
-
-	// v1.14.0-rc3 — Projects + Tags rows (Phase 4). Grouping metadata,
-	// no inheritance to grants. Comma-separated input.
-	projLbl := mutedSt.Render("Projects (comma-separated)")
-	if v.intEditField == intEditFieldProjects {
-		projLbl = cursorSt.Render("Projects (comma-separated)")
-	}
-	if v.intEditField == intEditFieldProjects {
-		before, after := v.intEditProjectsBuf.Split()
-		b.WriteString(projLbl + ": " + before + cursorSt.Render("▎") + after)
-	} else {
-		b.WriteString(projLbl + ": " + v.intEditProjectsBuf.String())
-	}
-	b.WriteString("\n")
-	tagsLbl := mutedSt.Render("Tags (comma-separated)")
-	if v.intEditField == intEditFieldTags {
-		tagsLbl = cursorSt.Render("Tags (comma-separated)")
-	}
-	if v.intEditField == intEditFieldTags {
-		before, after := v.intEditTagsBuf.Split()
-		b.WriteString(tagsLbl + ": " + before + cursorSt.Render("▎") + after)
-	} else {
-		b.WriteString(tagsLbl + ": " + v.intEditTagsBuf.String())
-	}
-	b.WriteString("\n")
-
-	// v1.14.0-rc3 — Protection picker (field 5).
-	protectLbl := "Protection"
-	protectVal := "default"
-	if v.intEditProtectChoice {
-		protectVal = "protected"
-	}
-	if v.intEditField == intEditFieldProtection {
-		protectLbl = cursorSt.Render(protectLbl)
-	} else {
-		protectLbl = mutedSt.Render(protectLbl)
-	}
-	b.WriteString(protectLbl + ": " + protectVal + "\n")
-	if v.intEditField == intEditFieldProtection {
-		for i, p := range protectionPresets {
-			prefix := "    "
-			label := p.label
-			hint := p.hint
-			if i == v.intEditProtectCursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				label = cursorSt.Render(p.label)
-			}
-			b.WriteString(prefix + label + "    " + mutedSt.Render(hint) + "\n")
-		}
-	}
-
-	// v1.14.0-rc3 — Passphrase (field 6). Rendered only when flipping
-	// from unprotected → protected. For unlock + no-change, enter at
-	// Protection commits directly without this row ever showing.
-	needsPass := v.intEditProtectChoice && !v.intEditProtectWas
-	if needsPass {
-		passLbl := mutedSt.Render("Approval passphrase")
-		if v.intEditField == intEditFieldPassphrase {
-			passLbl = cursorSt.Render("Approval passphrase")
-		}
-		if v.intEditField == intEditFieldPassphrase {
-			before, after := v.intEditPassBuf.SplitMasked("•")
-			b.WriteString(passLbl + ": " + before + cursorSt.Render("▎") + after)
-		} else {
-			b.WriteString(passLbl + ": " + strings.Repeat("•", v.intEditPassBuf.Len()))
-		}
-		b.WriteString("\n")
-	}
-
-	b.WriteString("\n" + helpSt.Render("enter next/save · tab/↑↓ jump field · ←→ move caret · home/end jump · esc cancel"))
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err))
-	}
-	return b.String()
+	body := km.overlay(f.view(rows, width, "Review"), width, frameRows(height), v.help)
+	return frame(width, height, title, tabs, "", body, status{err: v.err, hint: hintTxt}.String(), km.footerLine(width, v.help))
 }
 
-// ---------- Grant list (v1.10.1 picker) ----------
+// ---------- Grant list ----------
 
 const (
 	grantModeList    = 0
-	grantModeAction  = 1
+	grantModeDetail  = 1 // detail + actions
 	grantModeConfirm = 2
 	grantModeRun     = 3
-	grantModeDetail  = 4
+	grantModeDone    = 4
 	grantModeEdit    = 5
-)
-
-// Edit sub-steps: field selection is by row.
-// v1.14.0-rc3 adds Protection + optional Passphrase; grant-level
-// protection becomes independently settable (per rc3-plan.md Phase 3).
-const (
-	grantEditFieldProjects   = 0
-	grantEditFieldTags       = 1
-	grantEditFieldEnvPrefix  = 2
-	grantEditFieldProtection = 3
-	grantEditFieldPassphrase = 4
-	grantEditFieldSave       = 5
+	grantModeReview  = 6
+	grantModeRename  = 7
 )
 
 type grantListView struct {
-	client *admin.Client
-	paths  *config.Paths
-	loaded bool
-	err    string
-	ids    []string
-	items  map[string]vault.Grant
-	done   bool
+	sessionGuard
+	client  *admin.Client
+	paths   *config.Paths
+	loaded  bool
+	loadErr string
+	err     string // last action's failure, on the status line
+	ids     []string
+	items   map[string]vault.Grant
+	done    bool
+	solo    bool // opened from an integration's Grants tab: esc from the detail is done
 
-	// rc6c — viewer pubkey primed at load so row renderer can draw
-	// perspective-sensitive owner glyphs (👤 mine / 🔒 another admin's)
-	// on protected grants. See rc3-smoke-retakes [S1].
-	viewerPubkey string
+	mode          int
+	cursor        int
+	actionCursor  int
+	help          bool
+	flash         string
+	pending       string // remove, edit
+	from          int    // mode a confirm or the edit form returns to
+	list          list.Model
+	width, height int
 
-	mode         int
-	cursor       int
-	actionCursor int
-	flash        string
-	pending      string
+	// edit: a dense form, then a review of the changed rows.
+	editForm                            denseForm
+	edProj, edTags, edEnv, edPr, edPass *formField
+	edWas                               map[*formField]string
 
-	editField   int
-	editProject strings.Builder
-	editTags    strings.Builder
-	editPrefix  strings.Builder
-	// v1.14.0-rc3 — grant-level protection toggle in edit form.
-	editProtectCursor int
-	editProtectChoice bool
-	editProtectWas    bool
-	editPassBuf       strings.Builder
+	// rename: one input; a protected grant asks the passphrase after it.
+	renameIn, renamePass textinput.Model
+	renameAt             int    // 1: the passphrase input has the caret
+	keep                 string // id the cursor lands on after the next load
 }
 
 func newGrantListView(c *admin.Client, p *config.Paths) *grantListView {
-	return &grantListView{client: c, paths: p}
+	return &grantListView{client: c, paths: p, list: newNameList()}
 }
 func (v *grantListView) Init() tea.Cmd { return v.load }
 func (v *grantListView) Done() bool    { return v.done }
 func (v *grantListView) Flash() string { return v.flash }
 
 type grantListLoadedMsg struct {
-	items        map[string]vault.Grant
-	viewerPubkey string
-	err          string
+	items map[string]vault.Grant
+	err   string
 }
 
 type grantActionMsg struct {
@@ -2041,14 +1623,7 @@ func (v *grantListView) load() tea.Msg {
 		}
 		return grantListLoadedMsg{err: err.Error()}
 	}
-	// rc6c — viewer pubkey for perspective-sensitive owner glyphs on
-	// protected grant rows. Best-effort — missing status just renders
-	// without the icon instead of crashing.
-	viewerPubkey := ""
-	if st, serr := v.client.Status(); serr == nil {
-		viewerPubkey = st.AdminPubkey
-	}
-	return grantListLoadedMsg{items: vlt.Grants, viewerPubkey: viewerPubkey}
+	return grantListLoadedMsg{items: vlt.Grants}
 }
 
 func (v *grantListView) selectedID() string {
@@ -2058,316 +1633,304 @@ func (v *grantListView) selectedID() string {
 	return v.ids[v.cursor]
 }
 
-type grantAction struct {
-	label       string
-	key         string
-	destructive bool
+var grantActions = []listAction{
+	{label: "Edit", key: "e", desc: "projects, tags, env prefix, protection"},
+	{label: "Rename", key: "n", desc: "bearers carrying it follow"},
+	{label: "Remove", key: "r", desc: "bearers holding it fail on their next exec"},
 }
 
-func (v *grantListView) currentActions() []grantAction {
-	if v.selectedID() == "" {
-		return nil
+// grantHint is the status line for a grant: full id when truncated,
+// integration · credential · env prefix · projects · protected.
+func grantHint(id string, g vault.Grant) string {
+	var parts []string
+	if lipgloss.Width(id) > nameColW {
+		parts = append(parts, id)
 	}
-	return []grantAction{
-		{label: "View details", key: "d"},
-		{label: "Edit projects / tags / env_prefix", key: "e"},
-		{label: "Remove", key: "r", destructive: true},
-		{label: "Back to list", key: "b"},
+	parts = append(parts, g.Integration, g.Token, g.EffectivePrefix())
+	if len(g.Projects) > 0 {
+		parts = append(parts, strings.Join(g.Projects, ", "))
 	}
+	if g.Protected {
+		parts = append(parts, "protected")
+	}
+	return strings.Join(parts, " · ")
 }
 
 func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.unlocked(msg); ok {
+		return v, cmd
+	}
 	switch mm := msg.(type) {
+	case tea.WindowSizeMsg:
+		v.width, v.height = mm.Width, mm.Height
 	case grantListLoadedMsg:
 		v.loaded = true
-		v.err = mm.err
+		v.loadErr = mm.err
 		v.items = mm.items
-		v.viewerPubkey = mm.viewerPubkey
 		v.ids = v.ids[:0]
 		for id := range v.items {
 			v.ids = append(v.ids, id)
 		}
 		sort.Strings(v.ids)
-		if v.cursor >= len(v.ids) {
-			v.cursor = 0
+		if i := slices.Index(v.ids, v.keep); i >= 0 {
+			v.cursor = i
 		}
+		v.keep = ""
+		v.cursor = max(min(v.cursor, len(v.ids)-1), 0)
+		items := make([]list.Item, len(v.ids))
+		for i, id := range v.ids {
+			items[i] = nameItem{id, v.items[id].Integration}
+		}
+		v.list.SetItems(items)
 	case grantActionMsg:
 		if mm.err != "" {
-			v.err = mm.err
-			if mm.kind == "edit" {
-				v.mode = grantModeEdit
-			} else {
-				v.mode = grantModeAction
+			// Errors stay on the screen that caused them, in plain words.
+			switch mm.kind {
+			case "edit":
+				v.err, v.mode = "Save failed: "+cliErr(mm.err), grantModeReview
+			case "rename":
+				v.err, v.mode = "Rename failed: "+cliErr(mm.err), grantModeRename
+			default:
+				v.err, v.mode = "Remove failed: "+cliErr(mm.err), v.from
 			}
 			return v, nil
 		}
-		if mm.kind == "edit" {
-			v.flash = "grant metadata updated · synced with team"
-		} else {
-			v.flash = "grant removed · synced with team"
-		}
-		v.mode = grantModeList
-		return v, v.load
+		v.pending, v.mode = mm.kind, grantModeDone
 	case tea.KeyMsg:
-		if !v.loaded {
+		if !v.loaded || v.loadErr != "" {
 			if mm.String() == "esc" || mm.String() == "ctrl+c" {
 				v.done = true
 			}
 			return v, nil
 		}
+		v.flash = ""
 		switch v.mode {
 		case grantModeList:
+			if toggleHelp(&v.help, mm) {
+				return v, nil
+			}
 			return v.updateList(mm)
-		case grantModeAction:
-			return v.updateAction(mm)
+		case grantModeDetail:
+			if toggleHelp(&v.help, mm) {
+				return v, nil
+			}
+			return v.updateDetail(mm)
 		case grantModeConfirm:
 			return v.updateConfirm(mm)
-		case grantModeDetail:
-			v.mode = grantModeList
-		case grantModeEdit:
+		case grantModeRename:
+			return v.updateRename(mm)
+		case grantModeEdit, grantModeReview:
+			if !v.editForm.typing() && toggleHelp(&v.help, mm) {
+				return v, nil
+			}
 			return v.updateEdit(mm)
+		case grantModeDone:
+			if mm.String() != "enter" {
+				return v, nil // done screens leave on enter only
+			}
+			v.done, v.mode = v.solo, grantModeList
+			switch v.pending {
+			case "edit":
+				v.done, v.mode = false, grantModeDetail
+			case "rename":
+				v.keep = strings.TrimSpace(v.renameIn.Value())
+			}
+			v.pending = ""
+			return v, v.load
 		}
 	}
 	return v, nil
 }
 
 func (v *grantListView) updateList(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch mm.String() {
+	v.err = ""
+	switch k := mm.String(); k {
 	case "esc", "ctrl+c", "q":
 		v.done = true
 	case "up", "k":
-		if v.cursor > 0 {
-			v.cursor--
-		}
+		stepCursor(&v.cursor, len(v.ids), -1)
 	case "down", "j":
-		if v.cursor < len(v.ids)-1 {
-			v.cursor++
-		}
+		stepCursor(&v.cursor, len(v.ids), 1)
 	case "enter":
-		if len(v.ids) == 0 {
-			return v, nil
+		if len(v.ids) > 0 {
+			v.mode, v.actionCursor = grantModeDetail, 0
 		}
-		v.mode = grantModeAction
-		v.actionCursor = 0
-	case "d":
-		if v.selectedID() != "" {
-			v.mode = grantModeDetail
-		}
-	case "e":
-		if v.selectedID() != "" {
-			v.openEditor()
-		}
-	case "r":
-		if v.selectedID() != "" {
-			v.mode = grantModeConfirm
-			v.pending = "remove"
+	case "e", "n", "r":
+		if len(v.ids) > 0 {
+			return v.runAction(k)
 		}
 	}
 	return v, nil
 }
 
-func (v *grantListView) updateAction(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
-	acts := v.currentActions()
-	switch mm.String() {
+func (v *grantListView) updateDetail(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	v.err = ""
+	switch k := mm.String(); k {
 	case "esc", "backspace":
 		v.mode = grantModeList
+		v.done = v.solo
+	case "q", "ctrl+c":
+		v.done = true
 	case "up", "k":
-		if v.actionCursor > 0 {
-			v.actionCursor--
-		}
+		stepCursor(&v.actionCursor, len(grantActions), -1)
 	case "down", "j":
-		if v.actionCursor < len(acts)-1 {
-			v.actionCursor++
-		}
+		stepCursor(&v.actionCursor, len(grantActions), 1)
 	case "enter":
-		if v.actionCursor < 0 || v.actionCursor >= len(acts) {
+		return v.runAction(grantActions[v.actionCursor].key)
+	case "e", "n", "r":
+		return v.runAction(k)
+	}
+	return v, nil
+}
+
+// runAction: e opens the edit form, n the rename, r the remove confirm.
+func (v *grantListView) runAction(k string) (tea.Model, tea.Cmd) {
+	v.from, v.help = v.mode, false
+	switch k {
+	case "e":
+		v.openEditor()
+	case "n":
+		v.renameIn, v.renamePass, v.renameAt = newFormInput(false), newFormInput(true), 0
+		v.renameIn.SetValue(v.selectedID())
+		v.renameIn.CursorEnd()
+		v.err, v.mode = "", grantModeRename
+	default:
+		v.mode = grantModeConfirm
+	}
+	return v, nil
+}
+
+// updateRename is the rename step: enter saves; a protected grant asks
+// its approval passphrase on the same screen first.
+func (v *grantListView) updateRename(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	v.err = ""
+	from, to := v.selectedID(), strings.TrimSpace(v.renameIn.Value())
+	prot := v.items[from].Protected
+	switch mm.String() {
+	case "esc":
+		if v.renameAt == 1 {
+			v.renameAt = 0
 			return v, nil
 		}
-		return v.runAction(acts[v.actionCursor])
-	default:
-		for _, a := range acts {
-			if a.key == mm.String() {
-				return v.runAction(a)
+		v.mode = v.from
+	case "enter":
+		_, taken := v.items[to]
+		switch {
+		case to == "":
+			v.err = "Enter a name."
+		case to == from:
+			v.err = "That is its current name."
+		case taken:
+			v.err = "A grant named " + to + " already exists."
+		case prot && v.renameAt == 0:
+			v.renameAt = 1
+		case prot && v.renamePass.Value() == "":
+			v.err = "Enter the approval passphrase."
+		default:
+			if cmd := v.locked(mm, &v.err); cmd != nil {
+				return v, cmd
 			}
+			args, pass := []string{"grant", "rename", "--from", from, "--to", to}, ""
+			if prot {
+				args, pass = append(args, "--passphrase-stdin"), v.renamePass.Value()
+			}
+			v.mode, v.pending = grantModeRun, "rename"
+			return v, func() tea.Msg {
+				_, err := runDop(pass, args...)
+				return grantActionMsg{kind: "rename", err: err}
+			}
+		}
+	default:
+		if v.renameAt == 1 {
+			edit(&v.renamePass, mm)
+		} else {
+			edit(&v.renameIn, mm)
 		}
 	}
 	return v, nil
 }
 
-func (v *grantListView) runAction(a grantAction) (tea.Model, tea.Cmd) {
-	switch a.key {
-	case "d":
-		v.mode = grantModeDetail
-	case "e":
-		v.openEditor()
-	case "r":
-		v.mode = grantModeConfirm
-		v.pending = "remove"
-	case "b":
-		v.mode = grantModeList
+func (v *grantListView) viewRename(width, height int) string {
+	w := wiz{width: width, height: height}
+	in := []string{inputRow(&v.renameIn)}
+	if v.renameAt == 1 {
+		v.renameIn.Blur()
+		in = []string{"  " + v.renameIn.View(), "", mutedSt.Render("Approval passphrase"), inputRow(&v.renamePass)}
 	}
-	return v, nil
+	return w.screen("Rename grant", "", "New id for "+v.selectedID(), in,
+		"Bearers carrying it follow the new id.", v.err, "", keyMap{short: []key.Binding{hint("enter", "save"), keyBack}})
 }
 
 func (v *grantListView) openEditor() {
-	id := v.selectedID()
-	g := v.items[id]
-	v.editProject.Reset()
-	v.editProject.WriteString(strings.Join(g.Projects, ","))
-	v.editTags.Reset()
-	v.editTags.WriteString(strings.Join(g.Tags, ","))
-	v.editPrefix.Reset()
-	v.editPrefix.WriteString(g.EnvPrefix)
-	// v1.14.0-rc3 — prime protection + reset passphrase buffer.
-	v.editProtectChoice = g.Protected
-	v.editProtectWas = g.Protected
-	for i, p := range protectionPresets {
-		if p.value == g.Protected {
-			v.editProtectCursor = i
-			break
-		}
+	g := v.items[v.selectedID()]
+	v.edProj, v.edTags = textRow("projects", "docs, wiki", false, false), textRow("tags", "ro, ci", false, false)
+	v.edEnv, v.edPr = textRow("env prefix", g.EffectivePrefix(), false, false), pickRow("protection", protectOpts())
+	v.edPass = textRow("approval passphrase", "", true, true)
+	v.edProj.in.SetValue(strings.Join(g.Projects, ","))
+	v.edTags.in.SetValue(strings.Join(g.Tags, ","))
+	v.edEnv.in.SetValue(g.EnvPrefix)
+	if g.Protected {
+		v.edPr.pick = 1
 	}
-	v.editPassBuf.Reset()
-	v.editField = grantEditFieldProjects
-	v.mode = grantModeEdit
-	v.err = ""
+	v.editForm, v.edWas = denseForm{}, snap([]*formField{v.edProj, v.edTags, v.edEnv, v.edPr})
+	v.mode, v.err = grantModeEdit, ""
 }
 
-func (v *grantListView) updateEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Passphrase field (4) is only visited when flipping unprotected →
-	// protected. Everything else skips over it.
-	needsPass := v.editProtectChoice && !v.editProtectWas
+// editRows: the passphrase only when switching to protected.
+func (v *grantListView) editRows() []*formField {
+	r := []*formField{v.edProj, v.edTags, v.edEnv, v.edPr}
+	if v.edPr.pick == 1 && !v.items[v.selectedID()].Protected {
+		r = append(r, v.edPass)
+	}
+	return r
+}
 
-	// Field 3 — Protection preset picker.
-	if v.editField == grantEditFieldProtection {
+func (v *grantListView) editChanges() [][2]string {
+	return changes(v.editRows()[:4], v.edWas)
+}
+
+// updateEdit: the dense form, then the review; enter there saves, or
+// closes when nothing changed.
+func (v *grantListView) updateEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if v.mode == grantModeReview {
 		switch mm.String() {
-		case "esc":
-			v.mode = grantModeAction
-			return v, nil
-		case "up", "k":
-			if v.editProtectCursor > 0 {
-				v.editProtectCursor--
-			}
-		case "down", "j":
-			if v.editProtectCursor < len(protectionPresets)-1 {
-				v.editProtectCursor++
-			}
 		case "enter":
-			v.editProtectChoice = protectionPresets[v.editProtectCursor].value
-			if v.editProtectChoice && !v.editProtectWas {
-				v.editField = grantEditFieldPassphrase
-			} else {
-				v.editField = grantEditFieldSave
+			if len(v.editChanges()) == 0 {
+				v.mode = grantModeDetail
+				return v, nil
 			}
-		case "tab":
-			v.editProtectChoice = protectionPresets[v.editProtectCursor].value
-			if v.editProtectChoice && !v.editProtectWas {
-				v.editField = grantEditFieldPassphrase
-			} else {
-				v.editField = grantEditFieldSave
+			if cmd := v.locked(mm, &v.err); cmd != nil {
+				return v, cmd
 			}
-		case "shift+tab":
-			v.editField = grantEditFieldEnvPrefix
+			v.mode, v.help, v.pending, v.err = grantModeRun, false, "edit", ""
+			return v, v.doEdit()
+		case "esc", "shift+tab":
+			v.mode, v.err = grantModeEdit, ""
 		}
 		return v, nil
 	}
-	switch mm.String() {
-	case "esc":
-		v.mode = grantModeAction
-		return v, nil
-	case "tab", "down":
-		if v.editField == grantEditFieldPassphrase {
-			if needsPass {
-				v.editField = grantEditFieldSave
-			}
-		} else if v.editField < grantEditFieldSave {
-			v.editField++
-			// Skip passphrase row when it doesn't apply.
-			if v.editField == grantEditFieldPassphrase && !needsPass {
-				v.editField = grantEditFieldSave
-			}
-		}
-		return v, nil
-	case "shift+tab", "up":
-		if v.editField == grantEditFieldSave && !needsPass {
-			v.editField = grantEditFieldProtection
-		} else if v.editField > grantEditFieldProjects {
-			v.editField--
-		}
-		return v, nil
-	case "enter":
-		if v.editField == grantEditFieldSave {
-			if needsPass && v.editPassBuf.Len() == 0 {
-				v.editField = grantEditFieldPassphrase
-				v.err = "approval passphrase required to lock"
-				return v, nil
-			}
-			v.err = ""
-			v.mode = grantModeRun
-			return v, v.doEdit()
-		}
-		if v.editField == grantEditFieldPassphrase {
-			if v.editPassBuf.Len() == 0 {
-				v.err = "approval passphrase required to lock"
-				return v, nil
-			}
-			v.err = ""
-			v.editField = grantEditFieldSave
-			return v, nil
-		}
-		// otherwise advance to next field (skipping passphrase if N/A).
-		if v.editField < grantEditFieldSave {
-			v.editField++
-			if v.editField == grantEditFieldPassphrase && !needsPass {
-				v.editField = grantEditFieldSave
-			}
-		}
-		return v, nil
-	case "backspace":
-		buf := v.editBuf()
-		if buf == nil {
-			return v, nil
-		}
-		s := buf.String()
-		if len(s) > 0 {
-			buf.Reset()
-			buf.WriteString(s[:len(s)-1])
-		}
-	default:
-		if len(mm.Runes) > 0 {
-			buf := v.editBuf()
-			if buf != nil {
-				buf.WriteString(string(mm.Runes))
-			}
+	v.err = ""
+	switch v.editForm.key(v.editRows(), mm) {
+	case formBack:
+		v.mode = v.from
+	case formNext:
+		if v.err = v.editForm.missing(v.editRows()); v.err == "" {
+			v.mode = grantModeReview
 		}
 	}
 	return v, nil
-}
-
-func (v *grantListView) editBuf() *strings.Builder {
-	switch v.editField {
-	case grantEditFieldProjects:
-		return &v.editProject
-	case grantEditFieldTags:
-		return &v.editTags
-	case grantEditFieldEnvPrefix:
-		return &v.editPrefix
-	case grantEditFieldPassphrase:
-		return &v.editPassBuf
-	}
-	return nil
 }
 
 func (v *grantListView) updateConfirm(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch mm.String() {
 	case "y", "Y", "enter":
-		if v.pending == "remove" {
-			v.mode = grantModeRun
-			return v, v.doRemove()
+		if cmd := v.locked(mm, &v.err); cmd != nil {
+			return v, cmd
 		}
+		v.mode, v.err, v.pending = grantModeRun, "", "remove"
+		return v, v.doRemove()
 	case "n", "N", "esc":
-		v.mode = grantModeAction
-		v.pending = ""
+		v.mode = v.from
 	}
 	return v, nil
 }
@@ -2390,311 +1953,177 @@ func (v *grantListView) doRemove() tea.Cmd {
 func (v *grantListView) doEdit() tea.Cmd {
 	id := v.selectedID()
 	g := v.items[id]
-	projects := strings.TrimSpace(v.editProject.String())
-	tags := strings.TrimSpace(v.editTags.String())
-	prefix := strings.TrimSpace(v.editPrefix.String())
-	// v1.14.0-rc3 — propagate grant-level protection choice through the
-	// CLI's tri-state --protected. Only lock-flips feed a passphrase.
-	protectChoice := v.editProtectChoice
-	protectWas := v.editProtectWas
-	passphrase := v.editPassBuf.String()
-	return func() tea.Msg {
-		self, _ := os.Executable()
-		// `dop grant add` is upsert; passing the same id + integration +
-		// token with new metadata overwrites the record in place.
-		args := []string{
-			"grant", "add",
-			"--id", id,
-			"--integration", g.Integration,
-			"--token", g.Token,
-			"--projects", projects,
-			"--tags", tags,
-		}
-		if prefix != "" {
-			args = append(args, "--env-prefix", prefix)
-		}
-		switch {
-		case protectChoice && !protectWas:
-			args = append(args, "--protected", "--passphrase-stdin")
-		case !protectChoice && protectWas:
-			args = append(args, "--protected=false")
-		}
-		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
-		if protectChoice && !protectWas {
-			cmd.Stdin = strings.NewReader(passphrase + "\n")
-		}
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return grantActionMsg{kind: "edit", err: strings.TrimSpace(stderr.String())}
-		}
-		return grantActionMsg{kind: "edit"}
+	// `dop grant add` is upsert: the same id + integration + credential
+	// with new fields overwrites the record in place.
+	args := []string{"grant", "add", "--id", id, "--integration", g.Integration, "--token", g.Token,
+		"--projects", v.edProj.val(), "--tags", v.edTags.val()}
+	if p := v.edEnv.val(); p != "" {
+		args = append(args, "--env-prefix", p)
 	}
+	// Grant-level protection rides the CLI's tri-state --protected; only
+	// a switch to protected feeds a passphrase.
+	protect, pass := v.edPr.pick == 1, ""
+	switch {
+	case protect && !g.Protected:
+		args, pass = append(args, "--protected", "--passphrase-stdin"), v.edPass.in.Value()
+	case !protect && g.Protected:
+		args = append(args, "--protected=false")
+	}
+	return func() tea.Msg {
+		_, err := runDop(pass, args...)
+		return grantActionMsg{kind: "edit", err: err}
+	}
+}
+
+var grantListKeys = keyMap{
+	short: []key.Binding{keyOpen, keyBack},
+	full: [][]key.Binding{
+		{keyMove, hint("enter", "open grant"), hint("e", "edit"), hint("n", "rename"), hint("r", "remove")},
+		{keyBack, keyQuit},
+	},
+	notes: []string{"Projects and tags group grants; they are not permissions."},
+}
+
+var grantDetailKeys = keyMap{
+	short: []key.Binding{hint("enter", "run"), hint("e", "edit"), keyBack},
+	full: [][]key.Binding{
+		{keyMove, hint("enter", "run action"), hint("e", "edit"), hint("n", "rename"), hint("r", "remove")},
+		{keyBack, keyQuit},
+	},
+	notes: []string{"Projects and tags group grants; they are not permissions."},
 }
 
 func (v *grantListView) View() string {
-	var b strings.Builder
-	// v1.13.0-rc20 — Mole-style title + muted count subtitle.
-	b.WriteString(titleSt.Render("Grants") + "   " +
-		mutedSt.Render(fmt.Sprintf("%d total", len(v.ids))) + "\n\n")
-	if !v.loaded {
-		return b.String() + "loading…"
+	width, height := v.width, v.height
+	if width == 0 || height == 0 {
+		width, height = 80, 24
 	}
-	if v.err != "" && v.mode == grantModeList {
-		b.WriteString(failSt.Render(v.err) + "\n\n")
-		v.err = ""
+	switch {
+	case !v.loaded:
+		return frame(width, height, "Grants", nil, "", []string{mutedSt.Render("  loading…")}, "", "")
+	case v.loadErr != "":
+		return frame(width, height, "Grants", nil, "", []string{v.loadErr}, "", footer(width, keyBack))
 	}
-
-	switch v.mode {
-	case grantModeDetail:
-		return v.viewDetail()
-	case grantModeConfirm:
-		return v.viewConfirm()
-	case grantModeRun:
-		return titleSt.Render("Working…") + "\n\n" + mutedSt.Render("saving…")
-	case grantModeEdit:
-		return v.viewEdit()
-	}
-
-	if len(v.ids) == 0 {
-		b.WriteString(mutedSt.Render("(no grants yet — use `Add grant` from the main menu)"))
-	}
-	// v1.13.0-rc20 — dynamic label width.
-	labelWidth := 14
-	for _, id := range v.ids {
-		if w := lipgloss.Width(id); w > labelWidth {
-			labelWidth = w
-		}
-	}
-	labelWidth += 2
-	for i, id := range v.ids {
-		g := v.items[id]
-		prefix := "    "
-		disp := id
-		if i == v.cursor && v.mode == grantModeList {
-			prefix = "  " + cursorSt.Render("➤ ")
-			disp = cursorSt.Render(id)
-		}
-		// rc6c — perspective-sensitive owner glyph. Protected grants
-		// show 👤 (yours) when g.Owner matches the viewer's admin
-		// pubkey, 🔒 (another admin's) otherwise. Unprotected grants
-		// get a blank slot. Width-pinned via lipgloss per contract 14.
-		ownerRaw := ""
-		if g.Protected {
-			if g.Owner != "" && v.viewerPubkey != "" && g.Owner == v.viewerPubkey {
-				ownerRaw = "👤"
-			} else {
-				ownerRaw = mutedSt.Render("🔒")
-			}
-		}
-		ownerGlyph := lipgloss.NewStyle().Width(3).Render(ownerRaw)
-		// v1.13.0-rc20 — row shows id + target only. Projects moved to
-		// the status bar so the row stays clean.
-		dispPad := lipgloss.NewStyle().Width(labelWidth).Render(disp)
-		b.WriteString(prefix + ownerGlyph + dispPad +
-			fmt.Sprintf("  → %s.%s\n", g.Integration, g.Token))
-	}
-
-	// v1.13.0-rc20 — status bar for the cursor row.
-	if len(v.ids) > 0 && v.cursor >= 0 && v.cursor < len(v.ids) {
-		selID := v.ids[v.cursor]
-		selG := v.items[selID]
-		projTag := "(none)"
-		if len(selG.Projects) > 0 {
-			projTag = strings.Join(selG.Projects, ",")
-		}
-		tagTag := "(none)"
-		if len(selG.Tags) > 0 {
-			tagTag = strings.Join(selG.Tags, ",")
-		}
-		bar := fmt.Sprintf("selected: %s  |  projects=%s  |  tags=%s",
-			selID, projTag, tagTag)
-		if selG.Protected {
-			owner := selG.Owner
-			if len(owner) > 8 {
-				owner = owner[:8] + "…"
-			}
-			bar += "  |  🔒 owner=" + owner
-		}
-		b.WriteString("\n" + mutedSt.Render(bar) + "\n")
-	}
-
-	// v1.13.0-rc4 — unified footer: help first, then flash/error.
-	if v.mode == grantModeAction {
-		b.WriteString("\n" + v.renderActionMenu())
-	} else {
-		b.WriteString("\n" + helpSt.Render("↑↓ move | enter actions | esc back") +
-			"\n" + helpSt.Render("👤 yours · 🔒 another admin's"))
-	}
-	if v.flash != "" {
-		b.WriteString("\n" + okSt.Render(v.flash))
-		v.flash = ""
-	}
-	return b.String()
-}
-
-func (v *grantListView) renderActionMenu() string {
-	id := v.selectedID()
-	if id == "" {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString(mutedSt.Render(fmt.Sprintf("─── actions for %q ───", id)) + "\n")
-	for i, a := range v.currentActions() {
-		prefix := "    "
-		lbl := a.label
-		if i == v.actionCursor {
-			prefix = "  " + cursorSt.Render("➤ ")
-			lbl = cursorSt.Render(lbl)
-			if a.destructive {
-				lbl = failSt.Render(a.label)
-			}
-		} else if a.destructive {
-			lbl = failSt.Render(a.label)
-		}
-		b.WriteString(fmt.Sprintf("%s%s\n", prefix, lbl))
-	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move | enter run | backspace back"))
-	return b.String()
-}
-
-func (v *grantListView) viewDetail() string {
 	id := v.selectedID()
 	g := v.items[id]
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Grant: "+id) + "\n\n")
-	// v1.13.0-rc18 — kvLine for alignment parity with integration
-	// detail. Widest label here is `integration` (11 chars); keep the
-	// column width consistent with the shared pattern.
-	const w = 11
-	b.WriteString(kvLine("integration", g.Integration, w))
-	b.WriteString(kvLine("token", g.Token, w))
-	prefix := g.EnvPrefix
-	if prefix == "" {
-		prefix = mutedSt.Render(fmt.Sprintf("(default: %s)", g.EffectivePrefix()))
-	}
-	b.WriteString(kvLine("env_prefix", prefix, w))
-	// v1.13.0-rc12 — surface owner-lock state when protected.
-	if g.Protected {
-		owner := g.Owner
-		if len(owner) > 8 {
-			owner = owner[:8] + "…"
+	switch v.mode {
+	case grantModeDetail:
+		return v.viewDetail(width, height)
+	case grantModeConfirm:
+		body := strings.Split(kv([2]string{"integration", g.Integration}, [2]string{"credential", g.Token}), "\n")
+		body = append(body, mutedSt.Render("  Bearers holding it fail on their next exec."))
+		return frame(width, height, "Remove "+id+"?", nil, "", body, "", confirmFoot("remove"))
+	case grantModeRun:
+		title := map[string]string{"edit": "Saving grant…", "rename": "Renaming grant…"}[v.pending]
+		if title == "" {
+			title = "Removing " + id + "…"
 		}
-		b.WriteString(kvLine("protection", "🔒 owner-locked (owner="+owner+")", w))
-	}
-	// Projects + tags: always render; absence is informative.
-	b.WriteString(kvLineAlways("projects", strings.Join(g.Projects, ", "), "(none — press `e` to add)", w))
-	b.WriteString(kvLineAlways("tags", strings.Join(g.Tags, ", "), "(none)", w))
-	b.WriteString(mutedSt.Render("\n  Projects and tags are metadata for grouping.\n"))
-	b.WriteString(mutedSt.Render("  They do NOT act as permission boundaries — the grant is the unit of permission.\n"))
-	b.WriteString("\n" + helpSt.Render("any key back"))
-	return b.String()
-}
-
-func (v *grantListView) viewConfirm() string {
-	id := v.selectedID()
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Remove grant?") + "\n\n")
-	b.WriteString(fmt.Sprintf("  id: %s\n\n", id))
-	b.WriteString(failSt.Render("Any bearer that references this grant will fail on next exec.") + "\n")
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err) + "\n")
-	}
-	b.WriteString("\n" + helpSt.Render("y confirm | n cancel"))
-	return b.String()
-}
-
-func (v *grantListView) viewEdit() string {
-	id := v.selectedID()
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Edit grant: "+id) + "\n\n")
-
-	rows := []struct {
-		label string
-		val   string
-	}{
-		{"Projects (comma-separated)", v.editProject.String()},
-		{"Tags (comma-separated)", v.editTags.String()},
-		{"Env prefix (blank = default)", v.editPrefix.String()},
-	}
-	for i, r := range rows {
-		style := mutedSt
-		if i == v.editField {
-			style = cursorSt
+		return frame(width, height, title, nil, "", nil, "", "")
+	case grantModeDone:
+		title := map[string]string{"remove": "✓ Grant removed", "edit": "✓ Grant saved", "rename": "✓ Grant renamed"}[v.pending]
+		rows := [][2]string{{"grant", id}}
+		if v.pending == "rename" {
+			rows = [][2]string{{"grant", strings.TrimSpace(v.renameIn.Value())}, {"was", id}}
 		}
-		b.WriteString(style.Render(r.label) + ": " + r.val)
-		if i == v.editField {
-			b.WriteString(cursorSt.Render("▎"))
-		}
-		b.WriteString("\n")
+		body := append(strings.Split(kv(rows...), "\n"), mutedSt.Render("  The vault is synced with the team."))
+		return frame(width, height, title, nil, "", body, "", footer(width, hint("enter", "done")))
+	case grantModeEdit, grantModeReview:
+		return v.viewEdit(width, height)
+	case grantModeRename:
+		return v.viewRename(width, height)
 	}
 
-	// v1.14.0-rc3 — Protection preset picker (field 3).
-	protectLbl := "Protection"
-	protectVal := "default"
-	if v.editProtectChoice {
-		protectVal = "protected"
-	}
-	if v.editField == grantEditFieldProtection {
-		protectLbl = cursorSt.Render(protectLbl)
+	km := grantListKeys
+	st := status{err: v.err, flash: v.flash}
+	var body []string
+	if len(v.ids) == 0 {
+		body = []string{bodySt.Render("  No grants yet. Add one from the menu: Add › Grant.")}
+		km.short = km.short[1:]
 	} else {
-		protectLbl = mutedSt.Render(protectLbl)
+		rows := frameRows(height)
+		if v.help {
+			rows -= len(km.helpLines(width)) + 1
+		}
+		body = nameListBody(&v.list, "integration", v.cursor, width, rows)
+		st.setHint(grantHint(id, g))
 	}
-	b.WriteString(protectLbl + ": " + protectVal + "\n")
-	if v.editField == grantEditFieldProtection {
-		for i, p := range protectionPresets {
-			prefix := "    "
-			label := p.label
-			hint := p.hint
-			if i == v.editProtectCursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				label = cursorSt.Render(p.label)
-			}
-			b.WriteString(prefix + label + "    " + mutedSt.Render(hint) + "\n")
+	body = km.overlay(body, width, frameRows(height), v.help)
+	return frame(width, height, "Grants", nil, fmt.Sprintf("%d total", len(v.ids)), body, st.String(), km.footerLine(width, v.help))
+}
+
+// viewDetail is the grant detail with its actions merged in.
+func (v *grantListView) viewDetail(width, height int) string {
+	id := v.selectedID()
+	g := v.items[id]
+	none := mutedSt.Render("none")
+	or := func(s string) string {
+		if s == "" {
+			return none
+		}
+		return s
+	}
+	prefix := g.EffectivePrefix()
+	if g.EnvPrefix == "" {
+		prefix += mutedSt.Render("  default")
+	}
+	title := ansi.Truncate(id, max(width-13, 12), "…")
+	var rows [][2]string
+	if title != id {
+		rows = append(rows, [2]string{"name", id}) // the title is truncated
+	}
+	body := strings.Split(kv(append(rows,
+		[2]string{"integration", g.Integration}, [2]string{"credential", g.Token},
+		[2]string{"env prefix", prefix}, [2]string{"projects", or(strings.Join(g.Projects, ", "))},
+		[2]string{"tags", or(strings.Join(g.Tags, ", "))}, [2]string{"protection", protectWord(g.Protected)},
+	)...), "\n")
+	st := status{err: v.err, flash: v.flash}
+	body = append(body, actionRows(grantActions, v.actionCursor, &st)...)
+	ctx := ""
+	if g.Protected {
+		ctx = "protected"
+	}
+	km := grantDetailKeys
+	body = km.overlay(body, width, frameRows(height), v.help)
+	return frame(width, height, title, nil, ctx, body, st.String(), km.footerLine(width, v.help))
+}
+
+// viewEdit is the grant edit form (dense rows), then its review.
+func (v *grantListView) viewEdit(width, height int) string {
+	title := "Edit " + ansi.Truncate(v.selectedID(), max(width-20, 12), "…")
+	if v.mode == grantModeReview {
+		w := wiz{width: width, height: height, help: v.help}
+		if ch := v.editChanges(); len(ch) > 0 {
+			return w.review(title, "Save "+v.selectedID()+"?", ch, "save", false, v.err)
+		}
+		return w.review(title, "No changes.", nil, "close", false, v.err)
+	}
+	rows, f := v.editRows(), &v.editForm
+	hintTxt := ""
+	if f.cur < len(rows) {
+		switch rows[f.cur] {
+		case v.edProj, v.edTags:
+			hintTxt = "Comma-separated."
+		case v.edEnv:
+			hintTxt = "Blank keeps the default, " + v.edEnv.in.Placeholder + "."
 		}
 	}
-
-	// v1.14.0-rc3 — Passphrase (field 4). Only rendered when flipping
-	// unprotected → protected (same shape as integration edit).
-	needsPass := v.editProtectChoice && !v.editProtectWas
-	if needsPass {
-		passLbl := mutedSt.Render("Approval passphrase")
-		if v.editField == grantEditFieldPassphrase {
-			passLbl = cursorSt.Render("Approval passphrase")
-		}
-		masked := strings.Repeat("•", v.editPassBuf.Len())
-		b.WriteString(passLbl + ": " + masked)
-		if v.editField == grantEditFieldPassphrase {
-			b.WriteString(cursorSt.Render("▎"))
-		}
-		b.WriteString("\n")
-	}
-
-	b.WriteString("\n")
-	saveStyle := mutedSt
-	if v.editField == grantEditFieldSave {
-		saveStyle = cursorSt
-	}
-	b.WriteString("    " + saveStyle.Render("[ Save ]") + "\n")
-
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err) + "\n")
-	}
-	b.WriteString("\n" + helpSt.Render("tab/↑↓ field · enter save (on [Save]) · esc cancel"))
-	return b.String()
+	km := f.formKeys(rows, "Review")
+	body := km.overlay(f.view(rows, width, "Review"), width, frameRows(height), v.help)
+	return frame(width, height, title, nil, "", body, status{err: v.err, hint: hintTxt}.String(), km.footerLine(width, v.help))
 }
 
 // ---------- Grant remove ----------
 
 type grantRemoveView struct {
+	wiz
 	client *admin.Client
 	paths  *config.Paths
 
-	step   int // 0 = pick, 1 = confirm, 2 = running
+	step   int // 0 = pick, 1 = confirm, 2 = running, 3 = done
 	loaded bool
 	err    string
 	ids    []string
+	grants map[string]vault.Grant
 	cursor int
 	flash  string
 	done   bool
@@ -2723,56 +2152,62 @@ func (v *grantRemoveView) load() tea.Msg {
 	return grantListLoadedMsg{items: vlt.Grants}
 }
 func (v *grantRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.wizMsg(msg, false); ok {
+		return v, cmd
+	}
 	switch mm := msg.(type) {
 	case grantListLoadedMsg:
 		v.loaded = true
 		v.err = mm.err
+		v.grants = mm.items
 		for id := range mm.items {
 			v.ids = append(v.ids, id)
 		}
 		sort.Strings(v.ids)
 	case grantRemoveResultMsg:
 		if mm.err != "" {
-			v.err = mm.err
+			v.err = "Remove failed: " + firstLine(mm.err)
 			v.step = 1
 			return v, nil
 		}
-		v.flash = "grant removed · synced with team"
-		v.done = true
+		v.flash = "Grant removed"
+		v.step = 3
 	case tea.KeyMsg:
-		switch mm.String() {
-		case "esc", "ctrl+c":
+		k := mm.String()
+		switch {
+		case k == "ctrl+c", v.step == 3:
 			v.done = true
 			return v, nil
-		}
-		if !v.loaded {
+		case !v.loaded, v.step == 2:
+			return v, nil
+		case k == "esc" && v.step == 1:
+			v.step, v.err = 0, ""
+			return v, nil
+		case k == "esc":
+			v.done = true
 			return v, nil
 		}
 		switch v.step {
 		case 0:
-			switch mm.String() {
+			switch k {
 			case "up", "k":
-				if v.cursor > 0 {
-					v.cursor--
-				}
+				stepCursor(&v.cursor, len(v.ids), -1)
 			case "down", "j":
-				if v.cursor < len(v.ids)-1 {
-					v.cursor++
-				}
+				stepCursor(&v.cursor, len(v.ids), 1)
 			case "enter":
-				if len(v.ids) == 0 {
-					return v, nil
+				if len(v.ids) > 0 {
+					v.step = 1
 				}
-				v.step = 1
 			}
 		case 1:
-			// v1.13.0-rc6 — unified confirm keybindings:
-			// y/Y/enter confirm · n/N/esc cancel.
-			switch mm.String() {
+			switch k {
 			case "y", "Y", "enter":
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
 				v.step = 2
-				return v, v.doRemove()
-			case "n", "N", "esc":
+				return v, tea.Batch(v.spinStart(), v.doRemove())
+			case "n", "N":
 				v.step = 0
 			}
 		}
@@ -2794,35 +2229,36 @@ func (v *grantRemoveView) doRemove() tea.Cmd {
 		return grantRemoveResultMsg{}
 	}
 }
+
 func (v *grantRemoveView) View() string {
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Remove grant") + "\n\n")
-	if !v.loaded {
-		return b.String() + "loading…"
+	const title = "Remove grant"
+	switch {
+	case !v.loaded:
+		return v.notice(title, "  loading…")
+	case v.err != "" && len(v.ids) == 0:
+		return v.notice(title, v.err)
+	case len(v.ids) == 0:
+		return v.notice(title, mutedSt.Render("  No grants yet. Add one from the menu: Add › Grant."))
 	}
-	if len(v.ids) == 0 {
-		b.WriteString(mutedSt.Render("(nothing to remove)") + "\n\n" + helpSt.Render("esc back"))
-		return b.String()
-	}
+	id := v.ids[v.cursor]
+	g := v.grants[id]
 	switch v.step {
 	case 0:
-		b.WriteString("Pick grant to remove:\n\n")
-		for i, id := range v.ids {
-			prefix := "  "
-			if i == v.cursor {
-				prefix = cursorSt.Render("➤ ")
-			}
-			b.WriteString(prefix + id + "\n")
+		var opts [][2]string
+		for _, id := range v.ids {
+			opts = append(opts, [2]string{ansi.Truncate(id, 40, "…"), v.grants[id].Integration})
 		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move | enter next | esc cancel"))
+		hintTxt := ""
+		if lipgloss.Width(id) > 40 {
+			hintTxt = id
+		}
+		return v.pick(title, fmt.Sprintf("%d total", len(v.ids)), opts, v.cursor, hintTxt, "", pickKeys("remove"))
 	case 1:
-		b.WriteString(fmt.Sprintf("Remove grant %q?\n\n", v.ids[v.cursor]))
-		if v.err != "" {
-			b.WriteString(failSt.Render(v.err) + "\n\n")
-		}
-		b.WriteString(helpSt.Render("y/enter confirm | n/esc cancel"))
+		body := strings.Split(strings.TrimRight(kv([2]string{"grant", midTrunc(id, 60)},
+			[2]string{"integration", g.Integration}, [2]string{"credential", g.Token}), "\n"), "\n")
+		return v.confirmScreen("Remove this grant?", body, "remove", v.err)
 	case 2:
-		b.WriteString("removing…\n")
+		return v.running(title, "Removing "+midTrunc(id, 50))
 	}
-	return b.String()
+	return v.doneScreen("Grant removed", [][2]string{{"grant", midTrunc(id, 60)}}, "The vault is synced with the team.", "")
 }

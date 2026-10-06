@@ -7,9 +7,9 @@ Every `dop` command, grouped by what you're trying to do. Bare `dop` launches th
 - [Top-level](#top-level) — `dop`, `version`, `help`, `uninstall`
 - [Admin session](#admin-session) — `init`, `login`, `logout`, `status`, `set-approval`, `join`, `reset`
 - [Vault attach + sync](#vault-attach--sync) — `init`, `pull`, `push`, `vault edit`, `doctor`
-- [Integrations](#integrations) — `add`, `list`, `remove`, `remove-token`, `set-token`
-- [Grants](#grants) — `add`, `list`, `show`, `remove`
-- [Tokens](#tokens-bearers) — `issue`, `list`, `show`, `revoke`, `repin`, `reseal`, `add-grant`, `remove-grant`, `rotate`
+- [Integrations](#integrations) — `add`, `list`, `remove`, `remove-token`, `set-token`, `rename-token`
+- [Grants](#grants) — `add`, `list`, `show`, `rename`, `remove`
+- [Tokens](#tokens-bearers) — `issue`, `list`, `show`, `revoke`, `prune`, `repin`, `reseal`, `add-grant`, `remove-grant`, `rotate`
 - [Claim + approval](#claim--approval) — `claim`, `pending`, `approve`, `reject`, `approve-remote`
 - [Agent keys](#agent-keys) — `list`, `info`, `migrate`, `sweep`, `delete`
 - [Execution plane](#execution-plane) — `exec`, `whoami`, `env`
@@ -300,6 +300,23 @@ dop integration set-token --name <N> --token-name <T>
 
 P-256 bearers see the new value on next `dop exec`. ed25519 bearers need `dop token reseal <subject>`.
 
+### `dop integration rename-token`
+
+Rename a credential on an integration. Every grant on that integration that uses the old name is rewritten to the new one, in the same save. Refuses when the new name already exists. A protected integration takes its owner's session and the approval passphrase.
+
+```
+dop integration rename-token --integration <N> --from <OLD> --to <NEW> [--passphrase-stdin]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--integration` | "" | Integration (required). |
+| `--from` | "" | Current credential name (required). |
+| `--to` | "" | New credential name (required). |
+| `--passphrase-stdin` | false | Read the approval passphrase from stdin (protected integrations). |
+
+Prints `dop integration rename-token: <integration>: "<old>" → "<new>" (updated <n> grant reference(s))` on stderr and logs a `token_rename` audit event. Bearers keep working: they resolve the credential through the grant at exec.
+
 ---
 
 ## Grants
@@ -351,6 +368,22 @@ dop grant show <grant-id> [--all] [--json]
 |---|---|---|
 | `--all` | false | Include revoked tokens. |
 | `--json` | false | JSON instead of human-readable. |
+
+### `dop grant rename`
+
+Rename a grant id. Every active bearer whose record lists the old id gets the new id and a fresh signature.
+
+```
+dop grant rename --from <ID> --to <ID> [--passphrase-stdin]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--from` | "" | Current grant id (required; must exist). |
+| `--to` | "" | New grant id (required; must not exist). |
+| `--passphrase-stdin` | false | Read the approval passphrase from stdin (protected grants: owner only). |
+
+Prints `dop grant rename: "<from>" → "<to>" (updated <n> bearer(s))` on stderr and logs a `grant_rename` audit event. Bearers of every key type keep working without a reseal or re-issue: the env holds no grant ids (env keys come from the grant's prefix, which defaults to integration + credential), so the bundle env and `env_wrapped` stay valid and the generation is not bumped.
 
 ### `dop grant remove`
 
@@ -425,21 +458,55 @@ dop token revoke <subject|cap-id-prefix|lookup-prefix>
 
 Deletes bundle, record sidecar, local agent key file. Bumps generation.
 
-### `dop token repin`
+### `dop token prune`
 
-Reissue a PIN for a PIN-bound capability that hasn't been claimed yet.
+Delete old revoked and rotated records.
 
 ```
-dop token repin --subject <S> [--token-file <PATH>] [--pin-ttl 1h]
+dop token prune [--older-than 30d] [--dry-run] [--yes]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--older-than` | `30d` | Cutoff. Go durations plus `d` and `w`. |
+| `--dry-run` | false | Print the candidates (subject, status, age, lookup id) and change nothing. |
+| `--yes` | false | Skip the `prune N records? [y/N]` prompt (`DOP_FROM_TUI=1` skips it too). |
+
+A record is a candidate when it is revoked or rotated and it was revoked (`revoked_at`) or rotated (the rotation seal) longer ago than the cutoff, so a rotated bearer's agent keeps the full cutoff to pick up the new bearer. Records revoked before `revoked_at` existed age from their newest creation, claim or seal time. Active records are never pruned. Removes the records from the vault, deletes their bundle, record and local agent key files, saves the vault once and writes one `prune` audit event. Generation counters stay. Prints `pruned N records (older than 30d)`, or `nothing to prune`.
+
+### `dop token repin`
+
+Give an unclaimed PIN-bound bearer a new PIN, for example when the first one expired before the agent claimed.
+
+```
+dop token repin --subject <S> [--pin-ttl 1h] [--passphrase-stdin]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--subject` | "" | Required. |
-| `--token-file` | "" | Current bearer path. Else `$DOP_TOKEN`. |
 | `--pin-ttl` | `1h` | New PIN window. |
+| `--passphrase-stdin` | false | Read the approval passphrase from stdin (asked only when the bearer holds a protected grant). |
 
-Refuses to repin an already-claimed capability (revoke + reissue to rebind).
+DOP never keeps a bearer it has handed out, so repin re-issues it the way `dop token portable --on` does for an unclaimed bearer: a new bearer with the same subject, grants, expiry and binding policy and a new PIN, the old record revoked in the same save (its bundle and record files removed). A portable copy, when the old bearer had one, is stored again from the new bearer. Prints the bearer and PIN once, like `dop token issue`; hand both to the agent.
+
+Refuses a claimed bearer (use `dop token rotate`), a bearer that is not PIN-bound, and a revoked or expired one.
+
+### `dop token portable`
+
+Make a bearer portable (`--on`) or remove its portable copy (`--off`), the copy wrapped to your admin age key that `dop use` reads.
+
+DOP never keeps a bearer it has handed out, so `--on` re-issues it with the same subject, grants, expiry and binding, and stores the portable copy from the fresh value:
+
+- **Claimed** (bound pubkey): rotated exactly like `dop token rotate`. The old record becomes `rotated` with the new bearer sealed to the agent's key; the agent switches on its next `dop exec`, nothing to hand over.
+- **Unclaimed** (PIN, or unbound): a new bearer is issued (with a new PIN, valid `1h`) and the old one is revoked. The new bearer and PIN print once, same format as `dop token issue`.
+- **Revoked or expired**: refused.
+
+`--on` asks the approval passphrase only when the bearer holds a protected grant; `--off` always asks it.
+
+```
+dop token portable --subject <S> (--on | --off) [--passphrase-stdin]
+```
 
 ### `dop token reseal`
 

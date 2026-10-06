@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/capability"
@@ -128,13 +129,13 @@ func cascadeGrantRemoval(
 
 		// Zero-grant bearer → revoke outright.
 		if len(c.Grants) == 0 {
-			c.Status = capability.RecordStatusRevoked
+			c.Status, c.RevokedAt = capability.RecordStatusRevoked, time.Now().UTC().Truncate(time.Second)
 			out.FullyEmptied = append(out.FullyEmptied, c.Subject)
 			rec := vaultCapability2Record(c, capID)
 			if err := signRecordViaDaemon(client, &rec); err != nil {
 				return out, fmt.Errorf("sign revoke %s: %w", c.LookupID, err)
 			}
-			v.Capabilities[capID] = capability2VaultCapability(rec)
+			putCapability(v, capID, rec)
 			// Clean the on-disk sidecar + bundle.
 			_ = os.Remove(paths.Vault + "/capabilities/" + c.LookupID + ".bundle")
 			_ = os.Remove(paths.Vault + "/capabilities/" + c.LookupID + ".record")
@@ -159,7 +160,7 @@ func cascadeGrantRemoval(
 			if err := signRecordViaDaemon(client, &rec); err != nil {
 				return out, fmt.Errorf("sign %s: %w", c.LookupID, err)
 			}
-			v.Capabilities[capID] = capability2VaultCapability(rec)
+			putCapability(v, capID, rec)
 			if err := writeRecordSidecar(paths, rec); err != nil {
 				return out, fmt.Errorf("write sidecar %s: %w", c.LookupID, err)
 			}
@@ -167,12 +168,12 @@ func cascadeGrantRemoval(
 
 		case vault.KeyTypeEd25519:
 			if forceRevokeEd25519 {
-				c.Status = capability.RecordStatusRevoked
+				c.Status, c.RevokedAt = capability.RecordStatusRevoked, time.Now().UTC().Truncate(time.Second)
 				rec := vaultCapability2Record(c, capID)
 				if err := signRecordViaDaemon(client, &rec); err != nil {
 					return out, fmt.Errorf("sign ed25519 revoke %s: %w", c.LookupID, err)
 				}
-				v.Capabilities[capID] = capability2VaultCapability(rec)
+				putCapability(v, capID, rec)
 				_ = os.Remove(paths.Vault + "/capabilities/" + c.LookupID + ".bundle")
 				_ = os.Remove(paths.Vault + "/capabilities/" + c.LookupID + ".record")
 				out.Ed25519Revoked = append(out.Ed25519Revoked, c.Subject)
@@ -181,19 +182,28 @@ func cascadeGrantRemoval(
 				// list — exec will see the shorter grants on the
 				// record, but the bundle env (which is bearer-
 				// encrypted) still holds the stale credential.
-				rec := vaultCapability2Record(c, capID)
-				if err := signRecordViaDaemon(client, &rec); err != nil {
-					return out, fmt.Errorf("sign %s: %w", c.LookupID, err)
-				}
-				v.Capabilities[capID] = capability2VaultCapability(rec)
-				if err := writeRecordSidecar(paths, rec); err != nil {
-					return out, fmt.Errorf("write sidecar %s: %w", c.LookupID, err)
+				if err := resignCapability(client, paths, v, capID, c); err != nil {
+					return out, err
 				}
 				out.Ed25519Stale = append(out.Ed25519Stale, c.Subject)
 			}
 		}
 	}
 	return out, nil
+}
+
+// resignCapability re-signs c through the daemon, stores it with
+// putCapability and rewrites its sidecar. Env payloads are untouched.
+func resignCapability(client *admin.Client, paths *config.Paths, v *vault.Vault, capID string, c vault.Capability) error {
+	rec := vaultCapability2Record(c, capID)
+	if err := signRecordViaDaemon(client, &rec); err != nil {
+		return fmt.Errorf("sign %s: %w", c.LookupID, err)
+	}
+	putCapability(v, capID, rec)
+	if err := writeRecordSidecar(paths, rec); err != nil {
+		return fmt.Errorf("write sidecar %s: %w", c.LookupID, err)
+	}
+	return nil
 }
 
 // cascadePreview is a non-mutating variant used by the TUI

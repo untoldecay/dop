@@ -14,7 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/fray/dop/internal/config"
@@ -22,19 +23,33 @@ import (
 )
 
 type pendingView struct {
+	wiz
 	paths *config.Paths
 
-	claims  []*pendingclaim.Record
-	cursor  int
-	passBuf strings.Builder
-	step    int // 0 = pick, 1 = passphrase for selected
-	err     string
-	done    bool
-	flash   string
+	claims []*pendingclaim.Record
+	cursor int
+	pass   textinput.Model
+	step   int // pendingStep*
+	err    string
+	done   bool
+	flash  string
+}
+
+const (
+	pendingStepPick = iota
+	pendingStepPass
+	pendingStepReject // confirm
+	pendingStepRun
+	pendingStepDone
+)
+
+type pendingResultMsg struct {
+	reject bool
+	err    string
 }
 
 func (m *rootModel) openPendingApprove() (tea.Model, tea.Cmd) {
-	v := &pendingView{paths: m.paths}
+	v := &pendingView{paths: m.paths, pass: newFormInput(true)}
 	all, err := pendingclaim.List(m.paths)
 	if err != nil {
 		v.err = err.Error()
@@ -54,120 +69,152 @@ func (v *pendingView) Init() tea.Cmd { return nil }
 func (v *pendingView) Done() bool    { return v.done }
 func (v *pendingView) Flash() string { return v.flash }
 
+// run shells out in a Cmd, never inside Update.
+func (v *pendingView) run(reject bool) tea.Cmd {
+	sas, pass := pendingclaim.NormalizeSAS(v.claims[v.cursor].SAS), v.pass.Value()
+	return func() tea.Msg {
+		if reject {
+			return pendingResultMsg{reject: true, err: errStr(runDopReject(sas))}
+		}
+		return pendingResultMsg{err: errStr(runDopApprove(sas, pass))}
+	}
+}
+
+func errStr(err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
 func (v *pendingView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	km, ok := msg.(tea.KeyMsg)
-	if !ok {
-		return v, nil
+	if ok, cmd := v.wizMsg(msg, v.step == pendingStepPass && v.pass.Value() != ""); ok {
+		return v, cmd
 	}
-	switch km.String() {
-	case "esc", "ctrl+c":
-		v.done = true
+	switch mm := msg.(type) {
+	case pendingResultMsg:
+		if mm.err != "" {
+			v.err = firstLine(mm.err)
+			v.step = pendingStepPick
+			if !mm.reject {
+				v.step = pendingStepPass
+				v.pass.Reset()
+			}
+			return v, nil
+		}
+		v.flash = "Claim approved"
+		if mm.reject {
+			v.flash = "Claim rejected"
+		}
+		v.step = pendingStepDone
 		return v, nil
-	}
-	if v.step == 0 {
-		switch km.String() {
-		case "up", "k":
-			if v.cursor > 0 {
-				v.cursor--
-			}
-		case "down", "j":
-			if v.cursor < len(v.claims)-1 {
-				v.cursor++
-			}
-		case "r":
-			// Reject (no passphrase required — reject is safe).
-			if len(v.claims) == 0 {
-				return v, nil
-			}
-			sas := pendingclaim.NormalizeSAS(v.claims[v.cursor].SAS)
-			if err := runDopReject(sas); err != nil {
-				v.err = err.Error()
-				return v, nil
-			}
-			v.flash = "rejected " + v.claims[v.cursor].Subject
+	case tea.KeyMsg:
+		k := mm.String()
+		if v.step == pendingStepRun {
+			return v, nil
+		}
+		if v.step == pendingStepDone {
 			v.done = true
 			return v, nil
-		case "enter", "a":
-			if len(v.claims) == 0 {
-				return v, nil
-			}
-			v.step = 1
-			v.passBuf.Reset()
-			v.err = ""
 		}
-		return v, nil
-	}
-	// step 1 — passphrase entry
-	switch km.String() {
-	case "enter":
-		sas := pendingclaim.NormalizeSAS(v.claims[v.cursor].SAS)
-		if err := runDopApprove(sas, v.passBuf.String()); err != nil {
-			v.err = err.Error()
-			v.passBuf.Reset()
+		if k == "ctrl+c" {
+			v.done = true
 			return v, nil
 		}
-		v.flash = "approved " + v.claims[v.cursor].Subject
-		v.done = true
-	case "backspace":
-		s := v.passBuf.String()
-		v.passBuf.Reset()
-		if len(s) > 0 {
-			v.passBuf.WriteString(s[:len(s)-1])
+		if k != "enter" {
+			v.err = ""
 		}
-	default:
-		if len(km.Runes) > 0 {
-			v.passBuf.WriteString(string(km.Runes))
+		switch v.step {
+		case pendingStepPick:
+			switch k {
+			case "esc":
+				v.done = true
+			case "up", "k":
+				stepCursor(&v.cursor, len(v.claims), -1)
+			case "down", "j":
+				stepCursor(&v.cursor, len(v.claims), 1)
+			case "r", "d":
+				if len(v.claims) > 0 {
+					v.step = pendingStepReject
+				}
+			case "enter", "a":
+				if len(v.claims) > 0 {
+					v.step = pendingStepPass
+					v.pass.Reset()
+				}
+			}
+		case pendingStepReject:
+			switch k {
+			case "enter", "y":
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
+				v.step = pendingStepRun
+				return v, tea.Batch(v.spinStart(), v.run(true))
+			case "esc", "n":
+				v.step = pendingStepPick
+			}
+		case pendingStepPass:
+			switch k {
+			case "esc":
+				v.step = pendingStepPick
+			case "enter":
+				if v.pass.Value() == "" {
+					v.err = "Approval passphrase is required"
+					return v, nil
+				}
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
+				v.step = pendingStepRun
+				return v, tea.Batch(v.spinStart(), v.run(false))
+			default:
+				edit(&v.pass, mm)
+			}
 		}
 	}
 	return v, nil
 }
 
+var pendingKeys = keyMap{
+	short: []key.Binding{hint("enter", "approve"), keyBack},
+	full:  [][]key.Binding{{hint("enter", "approve"), hint("r", "reject"), keyBack}, {keyMove}},
+}
+
 func (v *pendingView) View() string {
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Pending claims") + "\n")
-	b.WriteString(mutedSt.Render(fmt.Sprintf("%d waiting", len(v.claims))) + "\n\n")
-
+	title := "Pending claims"
+	var sel *pendingclaim.Record
+	if len(v.claims) > 0 {
+		sel = v.claims[v.cursor]
+	}
+	switch v.step {
+	case pendingStepRun:
+		return v.running(title, "Working on "+sel.Subject)
+	case pendingStepDone:
+		return v.doneScreen(v.flash, [][2]string{{"bearer", sel.Subject}}, "", "")
+	case pendingStepReject:
+		body := strings.Split(strings.TrimRight(kv([2]string{"bearer", sel.Subject}, [2]string{"pin", sel.SAS}), "\n"), "\n")
+		return frame(v.width, v.height, "Reject "+sel.Subject+"?", nil, "", body, status{err: v.err}.String(), confirmFoot("reject"))
+	case pendingStepPass:
+		return v.screen("Approve "+sel.Subject, "", "Approval passphrase", []string{inputRow(&v.pass)}, "", v.err, "PIN "+sel.SAS, wizKeys("approve"))
+	}
 	if len(v.claims) == 0 {
-		b.WriteString(mutedSt.Render("no pending claims") + "\n")
-		b.WriteString("\n" + helpSt.Render("esc back"))
-		return b.String()
+		return frame(v.width, v.height, title, nil, "", []string{bodySt.Render("  No pending claims. A claim shows here when an agent runs dop claim.")}, status{err: v.err}.String(), footer(v.width, keyBack))
 	}
-
-	if v.step == 0 {
-		// Row: cursor + SAS + subject + host + pubkey-fingerprint + TTL
-		for i, r := range v.claims {
-			cursor := "  "
-			label := lipgloss.NewStyle()
-			if i == v.cursor {
-				cursor = cursorSt.Render("➤ ")
-				label = cursorSt
-			}
-			ttl := r.ExpiresAt.Sub(time.Now()).Round(time.Second).String()
-			pub := r.Pubkey
-			if len(pub) > 10 {
-				pub = pub[:10] + "…"
-			}
-			row := fmt.Sprintf("%-9s %-16s %s  %s", r.SAS, r.Subject, pub, ttl)
-			b.WriteString(cursor + label.Render(row) + "\n")
+	body := []string{"  " + mutedSt.Render(padTrunc("subject", 24)+"  "+padTrunc("pin", 8)+"  expires")}
+	for i, r := range v.claims {
+		cells := padTrunc(r.Subject, 24) + "  " + padTrunc(r.SAS, 8)
+		left := "in " + humanDuration(time.Until(r.ExpiresAt))
+		if i == v.cursor {
+			body = append(body, focusSt.Render("› "+cells+"  "+left))
+		} else {
+			body = append(body, "  "+bodySt.Render(cells)+"  "+mutedSt.Render(left))
 		}
-		if v.err != "" {
-			b.WriteString("\n" + failSt.Render(v.err) + "\n")
-		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move | a/enter approve | r reject | esc back"))
-		return b.String()
 	}
-
-	// step 1 — passphrase entry
-	sel := v.claims[v.cursor]
-	b.WriteString(fmt.Sprintf("Approving %s (SAS %s)\n\n", sel.Subject, sel.SAS))
-	b.WriteString(cursorSt.Render("Approval passphrase") + ":  ")
-	masked := strings.Repeat("•", len(v.passBuf.String()))
-	b.WriteString(masked + cursorSt.Render("▎") + "\n")
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err) + "\n")
-	}
-	b.WriteString("\n" + helpSt.Render("enter confirm | esc cancel"))
-	return b.String()
+	st := status{err: v.err}
+	st.setHint("key " + midTrunc(sel.Pubkey, 24))
+	body = pendingKeys.overlay(body, v.width, frameRows(v.height), v.help)
+	return frame(v.width, v.height, title, nil, fmt.Sprintf("%d waiting", len(v.claims)), body, st.String(), pendingKeys.footerLine(v.width, v.help))
 }
 
 // runDopApprove shells to the CLI `dop approve --passphrase-stdin <SAS>`

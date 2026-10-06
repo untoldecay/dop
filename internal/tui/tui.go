@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -36,17 +37,27 @@ func Run() int {
 
 // --- styles ---
 
+// Theme: fg is painted explicitly, bg never (light terminals keep theirs).
+// One bold per screen (titleSt), one italic (placeholderSt).
 var (
-	brand    = lipgloss.Color("#f5c93a")
-	muted    = lipgloss.Color("#6d7280")
-	ok       = lipgloss.Color("#10b981")
-	danger   = lipgloss.Color("#ef4444")
-	titleSt  = lipgloss.NewStyle().Bold(true).Foreground(brand)
-	mutedSt  = lipgloss.NewStyle().Foreground(muted)
-	okSt     = lipgloss.NewStyle().Foreground(ok).Bold(true)
-	failSt   = lipgloss.NewStyle().Foreground(danger).Bold(true)
-	cursorSt = lipgloss.NewStyle().Bold(true).Foreground(brand)
-	helpSt   = lipgloss.NewStyle().Foreground(muted).Italic(true)
+	fg            = lipgloss.Color("#5c5c5c")
+	brand         = lipgloss.Color("#c2c4cc")
+	muted         = lipgloss.Color("#404040")
+	ok            = lipgloss.Color("#10b981")
+	danger        = lipgloss.Color("#ef4444")
+	titleSt       = lipgloss.NewStyle().Bold(true).Foreground(fg)
+	bodySt        = lipgloss.NewStyle().Foreground(fg)
+	mutedSt       = lipgloss.NewStyle().Foreground(muted)
+	placeholderSt = lipgloss.NewStyle().Foreground(muted).Italic(true)
+	focusSt       = lipgloss.NewStyle().Foreground(brand)
+	okSt          = lipgloss.NewStyle().Foreground(ok)
+	dangerSt      = lipgloss.NewStyle().Foreground(danger)
+
+	// ponytail: old names kept as aliases until every view moves to the
+	// role names above (waves 2-8).
+	failSt   = dangerSt
+	cursorSt = focusSt
+	helpSt   = mutedSt
 )
 
 // --- state detection ---
@@ -83,6 +94,7 @@ const (
 )
 
 type rootModel struct {
+	sized       tea.Model // child that already got the terminal size
 	install     installKind
 	session     sessionState
 	paths       *config.Paths
@@ -102,7 +114,8 @@ type rootModel struct {
 
 	width, height int
 	quitting      bool
-	flashMessage  string // one-shot info message shown below the menu
+	st            status // menu status line (row 23)
+	help          bool   // ? expanded help on the menu
 
 	pendingCount int // v1.7 — surfaced as a banner above the menu
 
@@ -122,11 +135,10 @@ type guiUnlockResultMsg struct {
 }
 
 type menuItem struct {
-	label   string
-	hint    string
-	key     string // single-key shortcut (for the footer legend only)
-	section string // grouping header; empty = ungrouped
-	fn      func(*rootModel) (tea.Model, tea.Cmd)
+	label string
+	hint  string
+	key   string // single-key shortcut (for the footer legend only)
+	fn    func(*rootModel) (tea.Model, tea.Cmd)
 }
 
 // v1.13.0-rc19 — hierarchical menu for the full admin-unlocked state.
@@ -199,7 +211,7 @@ func (m *rootModel) rebuildMenu() {
 		m.menu = []menuItem{
 			{label: "Setup admin", hint: "generate + wrap admin keys", key: "S", fn: (*rootModel).openSetupAdmin},
 			{label: "Attach vault", hint: "join an existing vault as agent", key: "a", fn: (*rootModel).openAttachAgent},
-			{label: "Join existing vault", hint: "become an admin device via invite PIN (v1.9)", key: "j", fn: (*rootModel).openJoin},
+			{label: "Join existing vault", hint: "become an admin device via invite PIN", key: "j", fn: (*rootModel).openJoin},
 			{label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
 			{label: "Uninstall", hint: "wipe DOP from this machine", fn: (*rootModel).openReset},
 			{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},
@@ -226,13 +238,13 @@ func (m *rootModel) rebuildMenu() {
 		m.menu = nil
 		m.groups = []menuGroup{
 			{
-				label: "Add", hint: "register a service, grant, or team member", key: "1",
+				label: "Add", hint: "service, grant, device, team member", key: "1",
 				items: []menuItem{
-					{label: "Integration", hint: "add a service + upstream tokens", fn: (*rootModel).openAddIntegration},
-					{label: "Grant", hint: "map a grant to an integration/token", fn: (*rootModel).openAddGrant},
-					{label: "Device", hint: "invite another machine of yours (v1.9)", fn: (*rootModel).openInviteDevice},
-					{label: "Team member (invite)", hint: "invite another human as admin (v1.9)", fn: (*rootModel).openInviteMember},
-					{label: "Team member (manual)", hint: "add another admin's pubkey directly", fn: (*rootModel).openTeamAdd},
+					{label: "Integration", hint: "a service and its first credential", fn: (*rootModel).openAddIntegration},
+					{label: "Grant", hint: "map a name to a credential", fn: (*rootModel).openAddGrant},
+					{label: "Device", hint: "invite another machine of yours", fn: (*rootModel).openInviteDevice},
+					{label: "Team member", hint: "invite another admin", fn: (*rootModel).openInviteMember},
+					{label: "Team member by key", hint: "add an admin with their public keys", fn: (*rootModel).openTeamAdd},
 				},
 			},
 			{
@@ -240,25 +252,25 @@ func (m *rootModel) rebuildMenu() {
 				direct: (*rootModel).openIssue,
 			},
 			{
-				label: "List", hint: "browse integrations, grants, bearers, team", key: "3",
+				label: "List", hint: "integrations, grants, bearers, team", key: "3",
 				items: []menuItem{
-					{label: "Integrations", hint: "all services + their tokens", fn: (*rootModel).openIntegrationList},
-					{label: "Grants", hint: "named bindings", fn: (*rootModel).openGrantList},
-					{label: "Bearers", hint: "active issued tokens", fn: (*rootModel).openList},
+					{label: "Integrations", hint: "services and their credentials", fn: (*rootModel).openIntegrationList},
+					{label: "Grants", hint: "names mapped to credentials", fn: (*rootModel).openGrantList},
+					{label: "Bearers", hint: "issued bearers", fn: (*rootModel).openList},
 					{label: "Team", hint: "all admins", fn: (*rootModel).openTeamList},
 				},
 			},
 			{
 				label: "Remove", hint: "revoke a bearer, drop a grant, retire a service", key: "4",
 				items: []menuItem{
-					{label: "Bearer", hint: "revoke an issued token", fn: (*rootModel).openRevoke},
+					{label: "Bearer", hint: "revoke an issued bearer", fn: (*rootModel).openRevoke},
 					{label: "Grant", hint: "drop a grant", fn: (*rootModel).openGrantRemove},
-					{label: "Integration", hint: "drill into a service, pick credentials to remove (+ cascade)", fn: (*rootModel).openIntegrationRemove},
+					{label: "Integration", hint: "retire a service or some of its credentials", fn: (*rootModel).openIntegrationRemove},
 					{label: "Team member", hint: "with rotation checklist", fn: (*rootModel).openTeamRemove},
 				},
 			},
 			{
-				label: "Vault", hint: "status · pull · push · doctor", key: "5",
+				label: "Vault", hint: "status, pull, push, doctor", key: "5",
 				items: []menuItem{
 					{label: "Status", hint: "session + vault state", fn: (*rootModel).openStatus},
 					{label: "Pull", hint: "git pull", fn: (*rootModel).openPull},
@@ -267,12 +279,12 @@ func (m *rootModel) rebuildMenu() {
 				},
 			},
 			{
-				label: "More", hint: "settings · update · logout · uninstall · quit", key: "M",
+				label: "More", hint: "settings, update, logout, uninstall", key: "M",
 				items: []menuItem{
-					{label: "Settings", hint: "TUI preferences (file keys, timeout, harness) · press F to toggle", fn: (*rootModel).openSettings},
-					{label: "Update", hint: "check GitHub for a newer dop + install in-place", fn: (*rootModel).openUpdate},
+					{label: "Settings", hint: "file keys, session timeout, harness", fn: (*rootModel).openSettings},
+					{label: "Update", hint: "check for a newer dop (installed " + version.Short() + ")", fn: (*rootModel).openUpdate},
 					{label: "Logout", hint: "end admin session", fn: (*rootModel).doLogout},
-					{label: "Uninstall", hint: "wipe every DOP file on this machine (keeps the vault repo)", fn: (*rootModel).openReset},
+					{label: "Uninstall", hint: "wipe every DOP file on this machine, keep the vault repo", fn: (*rootModel).openReset},
 					{label: "Quit", hint: "exit", fn: (*rootModel).quit},
 				},
 			},
@@ -300,11 +312,25 @@ func (m *rootModel) Init() tea.Cmd {
 // closeChild interface — child views set Done() = true to be popped.
 type doner interface{ Done() bool }
 
+// Update hands a newly opened child the terminal size once (the
+// WindowSizeMsg only arrives at launch and on resize).
 func (m *rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	_, cmd := m.update(msg)
+	if m.child != nil && m.child != m.sized && m.width > 0 {
+		m.child, _ = m.child.Update(tea.WindowSizeMsg{Width: m.width, Height: m.height})
+		m.sized = m.child
+	}
+	return m, cmd
+}
+
+func (m *rootModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch sz := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = sz.Width, sz.Height
 	case guiUnlockResultMsg:
+		if m.child != nil && m.pendingUnlockFn == nil {
+			break // a view's sessionGuard save
+		}
 		// rc7h — session-guard result handler. On success refresh state
 		// so the daemon's new session is visible, then invoke the stashed
 		// leaf fn. On failure print the specific error to stderr (so it
@@ -332,9 +358,10 @@ func (m *rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Post-child: refresh state and go back to the menu.
 			m.child = nil
 			m.screen = screenMenu
+			m.help = false
 			// Pull one-shot flash message from the child if it exposes one.
 			if fm, ok := child.(flasher); ok {
-				m.flashMessage = fm.Flash()
+				m.st.setFlash(fm.Flash())
 			}
 			m.refreshState()
 			m.rebuildMenu()
@@ -345,6 +372,10 @@ func (m *rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	// Root menu key routing.
 	if km, ok := msg.(tea.KeyMsg); ok {
+		m.st.onKey(true) // ponytail: the cursor is the menu's only input
+		if toggleHelp(&m.help, km) {
+			return m, nil
+		}
 		// Hierarchical path when groups are populated (admin-unlocked only).
 		if len(m.groups) > 0 {
 			return m.updateGroupsMenu(km)
@@ -395,7 +426,7 @@ func (m *rootModel) guardAdminAction(fn func(*rootModel) (tea.Model, tea.Cmd)) (
 		return fn(m)
 	}
 	m.pendingUnlockFn = fn
-	m.flashMessage = "admin session expired — unlock prompt opening…"
+	m.st.setFlash("admin session expired, unlock prompt opening…")
 	return m, runGUIUnlock()
 }
 
@@ -419,6 +450,45 @@ func runGUIUnlock() tea.Cmd {
 		}
 		return guiUnlockResultMsg{success: true}
 	}
+}
+
+// lockedNote is a view's status line while the GUI unlock is open.
+const lockedNote = "admin session locked, unlock prompt opening…"
+
+// sessionGuard re-checks the admin session right before a view shells
+// out to the CLI for a mutation (embedded in wiz and the list views).
+type sessionGuard struct {
+	retry tea.Msg // the key that started the save, replayed after the unlock
+	errp  *string // the view's status-line error
+}
+
+// locked is nil when the session is unlocked: run the save now. When it
+// is locked the view stays where it is with lockedNote on its status
+// line and the GUI unlock opens; once that succeeds key is replayed, so
+// the save runs again from the same place.
+func (g *sessionGuard) locked(key tea.Msg, errp *string) tea.Cmd {
+	paths, err := config.Resolve()
+	if err != nil || admin.NewClient(admin.SockPath(paths)).SessionActive() {
+		return nil
+	}
+	g.retry, g.errp, *errp = key, errp, lockedNote
+	return runGUIUnlock()
+}
+
+// unlocked consumes the GUI unlock result of a locked() save.
+func (g *sessionGuard) unlocked(msg tea.Msg) (bool, tea.Cmd) {
+	r, ok := msg.(guiUnlockResultMsg)
+	if !ok || g.errp == nil {
+		return false, nil
+	}
+	errp, key := g.errp, g.retry
+	*g = sessionGuard{}
+	if !r.success {
+		*errp = "Admin session locked: " + displayOr(r.stderr, "unlock failed")
+		return true, nil
+	}
+	*errp = ""
+	return true, func() tea.Msg { return key }
 }
 
 // updateGroupsMenu handles key routing for the v1.13.0-rc19 hierarchical
@@ -526,205 +596,114 @@ func (m *rootModel) View() string {
 	if m.child != nil {
 		return m.child.View()
 	}
-	var b strings.Builder
-
-	// Header — title + version. v1.13.0-rc19: short title (just "dop")
-	// per the Mole-inspired reorg; the longform tagline is in the README.
-	b.WriteString(titleSt.Render("dop") + "  " +
-		mutedSt.Render(version.Short()) + "\n")
-	b.WriteString(mutedSt.Render(m.stateLine()) + "\n")
-
-	// v1.7 — pending-claim banner. Draws attention when an agent is
-	// waiting for approval; `a` from the menu opens the inline approver.
-	if m.pendingCount > 0 {
-		banner := fmt.Sprintf("⚠  %d pending claim(s) — press 'a' to review", m.pendingCount)
-		b.WriteString(lipgloss.NewStyle().Foreground(brand).Bold(true).Render(banner) + "\n")
-	}
-	b.WriteString("\n")
-
-	// v1.13.0-rc19 — hierarchical path.
-	if len(m.groups) > 0 {
-		return b.String() + m.viewGroups()
-	}
-
-	// Flat-menu path (Setup / Locked / NoVault).
-	// Compute label column width across all items so descriptions align.
-	labelWidth := 0
-	for _, it := range m.menu {
-		if l := lipgloss.Width(it.label); l > labelWidth {
-			labelWidth = l
-		}
-	}
-	labelWidth += 2 // padding before description
-
-	// Render items, inserting section headers on transitions.
-	prevSection := ""
-	for i, it := range m.menu {
-		if it.section != prevSection && it.section != "" {
-			if prevSection != "" {
-				b.WriteString("\n")
-			}
-			b.WriteString("  " + mutedSt.Render(it.section) + "\n")
-			prevSection = it.section
-		} else if it.section == "" && prevSection != "" {
-			b.WriteString("\n")
-			prevSection = ""
-		}
-
-		prefix := "    "
-		label := it.label
-		if i == m.cursor {
-			prefix = "  " + cursorSt.Render("➤ ")
-			label = cursorSt.Render(it.label)
-		}
-		pad := labelWidth - lipgloss.Width(it.label)
-		if pad < 1 {
-			pad = 1
-		}
-		b.WriteString(prefix + label + strings.Repeat(" ", pad))
-		b.WriteString(mutedSt.Render(it.hint) + "\n")
-	}
-
-	if m.flashMessage != "" {
-		b.WriteString("\n" + okSt.Render(m.flashMessage) + "\n")
-	}
-
-	// Footer — a small legend of the most useful shortcuts.
-	footer := "↑↓ move · enter select"
-	if m.hasShortcut("s") {
-		footer += " · s status"
-	}
-	if m.hasShortcut("i") {
-		footer += " · i issue"
-	}
-	if m.hasShortcut("l") {
-		footer += " · l login"
-	}
-	footer += " · q quit"
-	b.WriteString("\n" + helpSt.Render(footer))
-	return b.String()
+	return m.viewMenu()
 }
 
-// viewGroups renders the hierarchical menu. Top level shows the six
-// primaries numbered 1-5 + M; inside a group shows numbered leaves
-// 1..N. Flash message + footer legend render below the list.
-func (m *rootModel) viewGroups() string {
-	var b strings.Builder
-
-	// Determine what to render.
-	type row struct {
-		key   string // "1".."5", "M", or "" for leaves beyond 9
-		label string
-		hint  string
-	}
+// viewMenu renders every menu (flat, admin top level, group) through
+// the frame: one row per item, label + muted description, digits kept
+// on the numbered admin menus.
+func (m *rootModel) viewMenu() string {
+	type row struct{ key, label, hint string } // key: "1".."9", "M", or ""
 	var rows []row
-	var breadcrumb string
-	if m.inGroup < 0 {
-		breadcrumb = ""
+	title := "dop"
+	k := keyMap{short: []key.Binding{keyOpen}}
+	switch {
+	case len(m.groups) > 0 && m.inGroup < 0:
 		for _, g := range m.groups {
-			rows = append(rows, row{key: g.key, label: g.label, hint: g.hint})
+			rows = append(rows, row{g.key, g.label, g.hint})
 		}
-	} else {
+		k.full = [][]key.Binding{{keyMove, keyJump, hint("m", "more")}, {keyOpen, keyQuit}}
+	case len(m.groups) > 0:
 		g := m.groups[m.inGroup]
-		breadcrumb = g.label
+		title = g.label
 		for i, it := range g.items {
-			k := ""
-			if i+1 <= 9 {
-				k = fmt.Sprintf("%d", i+1)
-			}
-			rows = append(rows, row{key: k, label: it.label, hint: it.hint})
+			rows = append(rows, row{fmt.Sprintf("%d", i+1), it.label, it.hint})
 		}
+		k.short = []key.Binding{keyOpen, keyBack}
+		jump := hint(fmt.Sprintf("1–%d", min(len(g.items), 9)), "jump")
+		k.full = [][]key.Binding{{keyMove, jump}, {keyOpen, keyBack, keyQuit}}
+	default:
+		var keys []key.Binding
+		for _, it := range m.menu {
+			rows = append(rows, row{"", it.label, it.hint})
+			if it.key != "" && it.key != "q" {
+				keys = append(keys, hint(it.key, strings.ToLower(it.label)))
+			}
+		}
+		k.full = [][]key.Binding{{keyMove, keyOpen, keyQuit}, keys}
+	}
+	if m.pendingCount > 0 {
+		k.full[0] = append(k.full[0], hint("a", "review pending"))
 	}
 
-	if breadcrumb != "" {
-		b.WriteString(cursorSt.Render(breadcrumb) + mutedSt.Render("                                             esc back") + "\n\n")
-	}
-
-	// Alignment: widest "N. Label" wins so hints line up.
 	labelWidth := 0
 	for _, r := range rows {
-		w := lipgloss.Width("    "+r.key+". "+r.label) - 4
-		if w > labelWidth {
-			labelWidth = w
-		}
+		labelWidth = max(labelWidth, lipgloss.Width(r.label))
 	}
-	labelWidth += 3
-
+	body := make([]string, 0, len(rows))
 	for i, r := range rows {
-		prefix := "  "
-		cursor := "  "
-		label := r.label
-		if i == m.cursor {
-			cursor = cursorSt.Render("➤ ")
-			label = cursorSt.Render(r.label)
-		}
-		keyBit := "  "
+		label := r.label + strings.Repeat(" ", labelWidth-lipgloss.Width(r.label)+2)
 		if r.key != "" {
-			keyBit = mutedSt.Render(r.key + ". ")
+			label = r.key + ". " + label
 		}
-		raw := r.key + ". " + r.label
-		pad := labelWidth - lipgloss.Width(raw)
-		if pad < 1 {
-			pad = 1
+		cursor, st := "  ", bodySt
+		if i == m.cursor {
+			cursor, st = "› ", focusSt
 		}
-		b.WriteString(prefix + cursor + keyBit + label + strings.Repeat(" ", pad))
-		b.WriteString(mutedSt.Render(r.hint) + "\n")
+		body = append(body, st.Render(cursor+label)+mutedSt.Render(r.hint))
 	}
+	body = k.overlay(body, m.width, frameRows(m.height), m.help)
 
-	if m.flashMessage != "" {
-		b.WriteString("\n" + okSt.Render(m.flashMessage) + "\n")
+	st := m.st
+	if m.pendingCount > 0 {
+		st.setHint(fmt.Sprintf("! %s pending, press a to review", plural(m.pendingCount, "claim")))
 	}
-
-	// Footer — different per level.
-	var footer string
-	if m.inGroup < 0 {
-		footer = "↑↓ move · 1-5 jump · enter select · M more · q quit"
-	} else {
-		max := len(m.groups[m.inGroup].items)
-		if max > 9 {
-			max = 9
-		}
-		footer = fmt.Sprintf("↑↓ move · 1-%d jump · enter select · esc back · q quit", max)
-	}
-	b.WriteString("\n" + helpSt.Render(footer))
-	return b.String()
-}
-
-// hasShortcut reports whether any current menu item claims that key.
-func (m *rootModel) hasShortcut(k string) bool {
-	for _, it := range m.menu {
-		if it.key == k {
-			return true
-		}
-	}
-	return false
+	return frame(m.width, m.height, title, nil, m.stateLine(), body, st.String(), k.footerLine(m.width, m.help))
 }
 
 func (m *rootModel) stateLine() string {
 	switch {
 	case m.install == installNoKey:
-		return "no admin key — start with Setup admin"
+		return "no admin key"
 	case m.install == installAdmin && m.session == sessionLocked:
-		return "admin · locked"
+		return "locked"
 	case m.install == installAdmin && m.session == sessionUnlocked:
-		st, _ := m.adminClient.Status()
-		if st != nil {
-			return fmt.Sprintf("admin · unlocked · %s idle", remainingHuman(st.IdleTTLSeconds, st.LastActivityUnix))
+		if m.adminClient == nil {
+			return "unlocked"
 		}
-		return "admin · unlocked"
+		st, _ := m.adminClient.Status()
+		if st == nil || !st.Unlocked {
+			return "locked" // expired since the last refreshState
+		}
+		left := min(timeLeft(st.IdleTTLSeconds, st.LastActivityUnix), timeLeft(st.AbsTTLSeconds, st.StartedAtUnix))
+		if left > 10*365*24*time.Hour {
+			return "unlocked · until logout" // ponytail: idle never sets both TTLs to 100 years
+		}
+		return "unlocked · " + shortDuration(left) + " left"
 	}
 	return ""
 }
 
-// remainingHuman is a small helper used by the state line (mirrors what
-// views.go's `remaining` does — kept separate here to avoid circular type
-// concerns).
-func remainingHuman(ttl int64, ref int64) string {
-	r := time.Until(time.Unix(ref, 0).Add(time.Duration(ttl) * time.Second))
-	if r < 0 {
-		r = 0
+// timeLeft is how long until ref + ttl seconds, never negative.
+func timeLeft(ttl int64, ref int64) time.Duration {
+	return max(time.Until(time.Unix(ref, 0).Add(time.Duration(ttl)*time.Second)), 0)
+}
+
+// shortDuration: 45s, 30m, 1h30m, 2h, 7d — no seconds from 1m up, whole
+// days from 24h up.
+func shortDuration(d time.Duration) string {
+	if d < time.Minute {
+		return d.Round(time.Second).String()
 	}
-	return r.Round(time.Second).String()
+	d = d.Round(time.Minute)
+	if d >= 24*time.Hour {
+		return fmt.Sprintf("%dd", d/(24*time.Hour))
+	}
+	s := strings.TrimSuffix(d.String(), "0s")
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }
 
 // --- transitions ---
@@ -765,14 +744,16 @@ func (m *rootModel) openSettings() (tea.Model, tea.Cmd) {
 }
 
 func (m *rootModel) openList() (tea.Model, tea.Cmd) {
-	m.child = newListView(m.adminClient, m.paths)
+	v := newListView(m.adminClient, m.paths)
+	v.width, v.height = m.width, m.height
+	m.child = v
 	m.screen = screenList
 	return m, m.child.Init()
 }
 
 func (m *rootModel) doLogout() (tea.Model, tea.Cmd) {
 	_ = m.adminClient.Logout()
-	m.flashMessage = "logout: session ended"
+	m.st.setFlash("logged out")
 	m.refreshState()
 	// rc6c — the daemon exits ~50ms after returning the logout RPC, so
 	// refreshState() running immediately above sees SessionActive() still
@@ -804,7 +785,9 @@ func (m *rootModel) openAttachAgent() (tea.Model, tea.Cmd) {
 }
 
 func (m *rootModel) openAddIntegration() (tea.Model, tea.Cmd) {
-	m.child = newAddIntegrationView(m.adminClient, m.paths)
+	v := newAddIntegrationView(m.adminClient, m.paths)
+	v.width = m.width
+	m.child = v
 	return m, m.child.Init()
 }
 
@@ -853,7 +836,9 @@ func (m *rootModel) openTeamRemove() (tea.Model, tea.Cmd) {
 
 // --- batch 3 openers ---
 func (m *rootModel) openIntegrationList() (tea.Model, tea.Cmd) {
-	m.child = newIntegrationListView(m.adminClient, m.paths)
+	v := newIntegrationListView(m.adminClient, m.paths)
+	v.width, v.height = m.width, m.height
+	m.child = v
 	return m, m.child.Init()
 }
 func (m *rootModel) openIntegrationRemove() (tea.Model, tea.Cmd) {

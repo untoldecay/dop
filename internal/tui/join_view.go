@@ -9,12 +9,14 @@ package tui
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/fray/dop/internal/admin"
@@ -22,36 +24,37 @@ import (
 	"github.com/fray/dop/internal/userprefs"
 )
 
-// Join steps. Identity is only shown when this machine has no admin
-// key yet (fresh install). If keyExists, we always take the local key,
-// so identity choice is moot.
+// Join steps. Identity is only asked on a fresh install: with a key on
+// disk the local key is unwrapped, so the choice is moot.
 const (
 	joinStepURL         = 0
 	joinStepPIN         = 1
 	joinStepIdentity    = 2 // fresh-install only
-	joinStepAdminPass   = 3 // used both for keyExists (unwrap) and shared-identity (confirm from M1)
+	joinStepAdminPass   = 3 // keyExists (unwrap) or shared identity (inviting machine's)
 	joinStepNewAdmin    = 4 // separate-identity fresh install
 	joinStepNewApproval = 5 // separate-identity fresh install
 	joinStepRunning     = 6
-	joinStepHarness     = 7 // rc7k-join — first-start harness picker on successful join
-	joinStepDone        = 8
+	joinStepHarness     = 7 // first-start harness picker on a successful join
+	joinStepReview      = 8
 )
 
 type joinView struct {
+	wiz
 	paths *config.Paths
 
 	// Whether this machine already has an admin key. Determines if we
 	// need to also collect the *new* admin+approval passphrases.
 	keyExists     bool
-	shareIdentity bool // v1.9.8 — chosen at joinStepIdentity, only for fresh install
+	shareIdentity bool // chosen at joinStepIdentity, only for fresh install
+	identityCur   int
 
 	step          int
-	urlBuf        strings.Builder
-	pinBuf        strings.Builder
-	adminPass     strings.Builder
-	newAdmin1     strings.Builder // if creating fresh + separate identity: admin passphrase
-	newApproval   strings.Builder // if creating fresh + separate identity: approval passphrase
-	harnessCursor int             // rc7k-join — cursor into userprefs.HarnessChoices
+	urlBuf        textinput.Model
+	pinBuf        textinput.Model
+	adminPass     textinput.Model
+	newAdmin1     textinput.Model // fresh + separate identity: admin passphrase
+	newApproval   textinput.Model // fresh + separate identity: approval passphrase
+	harnessCursor int             // cursor into userprefs.HarnessChoices
 	err           string
 	done          bool
 	flash         string
@@ -65,7 +68,9 @@ type joinView struct {
 }
 
 func newJoinView(paths *config.Paths) *joinView {
-	v := &joinView{paths: paths, lineCh: make(chan inviteLine, 32)}
+	v := &joinView{paths: paths, lineCh: make(chan inviteLine, 32), urlBuf: newFormInput(false), pinBuf: newFormInput(false),
+		adminPass: newFormInput(true), newAdmin1: newFormInput(true), newApproval: newFormInput(true)}
+	v.urlBuf.Placeholder, v.pinBuf.Placeholder = "git@github.com:you/dop-vault.git", "AB-CD-EF"
 	v.keyExists = admin.KeyFileExists(paths)
 	return v
 }
@@ -74,7 +79,28 @@ func (v *joinView) Init() tea.Cmd { return nil }
 func (v *joinView) Done() bool    { return v.done }
 func (v *joinView) Flash() string { return v.flash }
 
+// flow is the question steps the answers lead through.
+func (v *joinView) flow() []int {
+	s := []int{joinStepURL, joinStepPIN}
+	switch {
+	case v.keyExists:
+		return append(s, joinStepAdminPass)
+	case v.shareIdentity:
+		return append(s, joinStepIdentity, joinStepAdminPass)
+	}
+	return append(s, joinStepIdentity, joinStepNewAdmin, joinStepNewApproval)
+}
+
+func (v *joinView) curBuf() *textinput.Model {
+	return map[int]*textinput.Model{joinStepURL: &v.urlBuf, joinStepPIN: &v.pinBuf, joinStepAdminPass: &v.adminPass,
+		joinStepNewAdmin: &v.newAdmin1, joinStepNewApproval: &v.newApproval}[v.step]
+}
+
 func (v *joinView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	in := v.curBuf()
+	if ok, cmd := v.wizMsg(msg, in != nil && in.Value() != ""); ok {
+		return v, cmd
+	}
 	switch mm := msg.(type) {
 	case inviteLine:
 		v.linesMu.Lock()
@@ -85,165 +111,137 @@ func (v *joinView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.linesMu.Unlock()
 		return v, v.waitForLine()
 	case inviteDone:
-		v.finalRC = mm.rc
-		v.finalErr = mm.err
+		v.finalRC, v.finalErr = mm.rc, mm.err
 		if mm.rc == 0 {
-			// rc7k-join — on successful join, prompt for harness pick
-			// before marking done. Mirrors the setupAdminView post-login
-			// transition. On failure, go straight to done so the user
-			// sees the error.
-			v.step = joinStepHarness
+			v.step = joinStepHarness // first-start harness pick, as after setup
 			return v, nil
 		}
-		v.step = joinStepDone
+		v.linesMu.Lock()
+		v.err = "Join failed: " + lastOutput(v.lines, v.finalErr)
+		v.linesMu.Unlock()
+		v.step = joinStepReview
 		return v, nil
 	case tea.KeyMsg:
-		switch mm.String() {
-		case "esc", "ctrl+c":
-			if v.step == joinStepRunning && v.cmd != nil && v.cmd.Process != nil {
-				_ = v.cmd.Process.Kill()
+		k := mm.String()
+		if k != "enter" {
+			v.err = ""
+		}
+		switch v.step {
+		case joinStepRunning:
+			if k == "esc" || k == "ctrl+c" {
+				if v.cmd != nil && v.cmd.Process != nil {
+					_ = v.cmd.Process.Kill()
+				}
+				v.done = true
 			}
-			if v.step == joinStepHarness {
-				// rc7k-join — esc on the picker skips (operator can set
-				// via Settings → Harness later).
-				v.flash = "joined — harness pick skipped; set it in Settings → Harness"
+			return v, nil
+		case joinStepHarness:
+			if k == "esc" || k == "ctrl+c" {
+				v.flash = "joined · harness not set (Settings > Harness)"
 				v.done = true
 				return v, nil
 			}
-			v.done = true
-			return v, nil
-		}
-		// rc7k-join — harness picker owns its own key routing.
-		if v.step == joinStepHarness {
 			return v.updateHarnessStep(mm)
-		}
-		if v.step == joinStepDone {
-			v.done = true
+		case joinStepReview:
+			switch k {
+			case "enter":
+				v.step, v.lines = joinStepRunning, nil
+				return v, tea.Batch(v.spinStart(), v.launch(), v.waitForLine())
+			case "esc", "shift+tab":
+				fl := v.flow()
+				v.step = fl[len(fl)-1]
+			case "ctrl+c":
+				v.done = true
+			}
 			return v, nil
 		}
-		switch mm.String() {
+		fl := v.flow()
+		i := stepPos(fl, v.step)
+		switch k {
+		case "ctrl+c":
+			v.done = true
 		case "enter":
 			return v.advance()
-		case "backspace":
-			buf := v.currentBuf()
-			s := buf.String()
-			if len(s) > 0 {
-				buf.Reset()
-				buf.WriteString(s[:len(s)-1])
+		case "esc", "shift+tab":
+			if wizBack(mm, &i) < 0 {
+				v.done = true
+			} else {
+				v.step = fl[i]
 			}
-		case "left", "right", "up", "down", "tab", " ":
+		case "up", "down":
 			if v.step == joinStepIdentity {
-				v.shareIdentity = !v.shareIdentity
+				stepCursor(&v.identityCur, 2, map[string]int{"up": -1, "down": 1}[k])
 			}
 		default:
-			if len(mm.Runes) > 0 && v.step < joinStepRunning && v.step != joinStepIdentity {
-				v.currentBuf().WriteString(string(mm.Runes))
+			if in != nil {
+				edit(in, mm)
 			}
 		}
 	}
 	return v, nil
 }
 
-// updateHarnessStep — rc7k-join. Mirrors setupAdminView's picker.
+// updateHarnessStep mirrors setupAdminView's picker.
 func (v *joinView) updateHarnessStep(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch mm.String() {
-	case "up", "k":
-		if v.harnessCursor > 0 {
-			v.harnessCursor--
-		}
-	case "down", "j":
-		if v.harnessCursor < len(userprefs.HarnessChoices)-1 {
-			v.harnessCursor++
-		}
+	case "up", "down":
+		stepCursor(&v.harnessCursor, len(userprefs.HarnessChoices), map[string]int{"up": -1, "down": 1}[mm.String()])
 	case "enter":
 		pick := userprefs.HarnessChoices[v.harnessCursor]
 		prefs := userprefs.Load(v.paths)
 		prefs.Harness = pick
 		if err := userprefs.Save(v.paths, prefs); err != nil {
-			v.err = "save prefs: " + err.Error()
+			v.err = "Save prefs: " + err.Error()
 			return v, nil
 		}
-		v.flash = "joined — harness set to " + userprefs.HarnessLabel(pick)
+		v.flash = "joined · harness set to " + userprefs.HarnessLabel(pick)
 		v.done = true
-		return v, nil
 	}
 	return v, nil
 }
 
-func (v *joinView) currentBuf() *strings.Builder {
-	switch v.step {
-	case joinStepURL:
-		return &v.urlBuf
-	case joinStepPIN:
-		return &v.pinBuf
-	case joinStepAdminPass:
-		return &v.adminPass
-	case joinStepNewAdmin:
-		return &v.newAdmin1
-	case joinStepNewApproval:
-		return &v.newApproval
-	}
-	return &strings.Builder{}
-}
-
 func (v *joinView) advance() (tea.Model, tea.Cmd) {
+	need := func(t *textinput.Model, what string, n int) bool {
+		switch {
+		case strings.TrimSpace(t.Value()) == "":
+			v.err = what + " is required"
+		case len(t.Value()) < n:
+			v.err = fmt.Sprintf("%s must be at least %d characters", what, n)
+		default:
+			return true
+		}
+		return false
+	}
 	switch v.step {
 	case joinStepURL:
-		if strings.TrimSpace(v.urlBuf.String()) == "" {
-			v.err = "vault URL required"
+		if !need(&v.urlBuf, "Vault URL", 0) {
 			return v, nil
 		}
-		v.err = ""
-		v.step = joinStepPIN
 	case joinStepPIN:
-		if strings.TrimSpace(v.pinBuf.String()) == "" {
-			v.err = "PIN required"
+		if !need(&v.pinBuf, "PIN", 0) {
 			return v, nil
-		}
-		v.err = ""
-		if v.keyExists {
-			// Local key exists — just unwrap it.
-			v.step = joinStepAdminPass
-		} else {
-			// Fresh install: user must tell us if this invite is
-			// same-identity (Flavor Y, one confirm pass) or separate-
-			// identity (Flavor X, two new passphrases).
-			v.step = joinStepIdentity
 		}
 	case joinStepIdentity:
-		v.err = ""
-		if v.shareIdentity {
-			// Shared identity: single confirm passphrase — the SAME one
-			// used on the inviting machine. runAdminJoinShared will
-			// install the encrypted blob then verify unwrap.
-			v.step = joinStepAdminPass
-		} else {
-			// Separate identity: two new passphrases.
-			v.step = joinStepNewAdmin
-		}
+		v.shareIdentity = v.identityCur == 1
 	case joinStepAdminPass:
-		if strings.TrimSpace(v.adminPass.String()) == "" {
-			v.err = "passphrase required"
+		if !need(&v.adminPass, "Passphrase", 0) {
 			return v, nil
 		}
-		v.err = ""
-		v.step = joinStepRunning
-		return v, tea.Batch(v.launch(), v.waitForLine())
 	case joinStepNewAdmin:
-		if len(v.newAdmin1.String()) < 8 {
-			v.err = "admin passphrase must be at least 8 characters"
+		if !need(&v.newAdmin1, "Admin passphrase", 8) {
 			return v, nil
 		}
-		v.err = ""
-		v.step = joinStepNewApproval
 	case joinStepNewApproval:
-		if len(v.newApproval.String()) < 10 {
-			v.err = "approval passphrase must be at least 10 characters"
+		if !need(&v.newApproval, "Approval passphrase", 10) {
 			return v, nil
 		}
-		v.err = ""
-		v.step = joinStepRunning
-		return v, tea.Batch(v.launch(), v.waitForLine())
+	}
+	v.err = ""
+	fl := v.flow()
+	if i := stepPos(fl, v.step) + 1; i < len(fl) {
+		v.step = fl[i]
+	} else {
+		v.step = joinStepReview
 	}
 	return v, nil
 }
@@ -256,8 +254,8 @@ func (v *joinView) launch() tea.Cmd {
 		}
 		v.cmd = exec.Command(self, "admin", "join",
 			"--passphrase-stdin",
-			strings.TrimSpace(v.urlBuf.String()),
-			strings.TrimSpace(v.pinBuf.String()),
+			strings.TrimSpace(v.urlBuf.Value()),
+			strings.TrimSpace(v.pinBuf.Value()),
 		)
 		v.cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		stdin, err := v.cmd.StdinPipe()
@@ -279,11 +277,11 @@ func (v *joinView) launch() tea.Cmd {
 		var lines []string
 		switch {
 		case v.keyExists:
-			lines = []string{v.adminPass.String()}
+			lines = []string{v.adminPass.Value()}
 		case v.shareIdentity:
-			lines = []string{v.adminPass.String()}
+			lines = []string{v.adminPass.Value()}
 		default:
-			lines = []string{v.newAdmin1.String(), v.newApproval.String()}
+			lines = []string{v.newAdmin1.Value(), v.newApproval.Value()}
 		}
 		for _, ln := range lines {
 			_, _ = stdin.Write([]byte(ln + "\n"))
@@ -321,145 +319,65 @@ func (v *joinView) waitForLine() tea.Cmd {
 	}
 }
 
+// harnessScreen is the first-start harness picker shown after setup
+// and join: the ✓ outcome as title, the question, one row per harness.
+func harnessScreen(w wiz, title string, cur int, err string) string {
+	var opts [][2]string
+	for _, c := range userprefs.HarnessChoices {
+		opts = append(opts, [2]string{userprefs.HarnessLabel(c), ""})
+	}
+	body := append([]string{mutedSt.Render("Which AI harness do you use most?")}, optRows(opts, cur)...)
+	body = append(body, "", mutedSt.Render("It picks the session variable the approval cache reads."))
+	return frame(w.width, w.height, "✓ "+title, nil, "", body, status{err: err}.String(),
+		footer(w.width, hint("enter", "save"), keyBack))
+}
+
 func (v *joinView) View() string {
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Join an existing vault") + "\n\n")
-
-	// Field 1: URL
-	b.WriteString(rowStyle(v.step == joinStepURL).Render("Vault URL") + ": " + v.urlBuf.String())
-	if v.step == joinStepURL {
-		b.WriteString(cursorSt.Render("▎"))
-	}
-	b.WriteString("\n")
-
-	// Field 2: PIN
-	if v.step >= joinStepPIN {
-		b.WriteString(rowStyle(v.step == joinStepPIN).Render("Invite PIN") + ": " + v.pinBuf.String())
-		if v.step == joinStepPIN {
-			b.WriteString(cursorSt.Render("▎"))
-		}
-		b.WriteString("\n")
-	}
-
-	// Field 3: Identity mode (fresh install only — with a key on disk we
-	// just unwrap the local one).
-	if !v.keyExists && v.step >= joinStepIdentity {
-		b.WriteString(rowStyle(v.step == joinStepIdentity).Render("Identity") + ":   " +
-			renderIdentityChoice(v.shareIdentity, v.step == joinStepIdentity) + "\n")
-		if v.shareIdentity {
-			b.WriteString("             " + mutedSt.Render("same admin as the inviting machine — no new key created; you'll confirm M1's passphrase") + "\n")
-		} else {
-			b.WriteString("             " + mutedSt.Render("brand-new admin key on this machine — set new admin + approval passphrases") + "\n")
-		}
-	}
-
-	// Passphrase fields — shape depends on mode.
-	switch {
-	case v.keyExists:
-		if v.step >= joinStepAdminPass {
-			b.WriteString(rowStyle(v.step == joinStepAdminPass).Render("Admin passphrase (to unwrap local key)") + ": " +
-				strings.Repeat("•", v.adminPass.Len()))
-			if v.step == joinStepAdminPass {
-				b.WriteString(cursorSt.Render("▎"))
-			}
-			b.WriteString("\n")
-		}
-	case v.shareIdentity:
-		if v.step >= joinStepAdminPass {
-			b.WriteString(rowStyle(v.step == joinStepAdminPass).Render("Confirm the admin passphrase from the inviting machine") + ": " +
-				strings.Repeat("•", v.adminPass.Len()))
-			if v.step == joinStepAdminPass {
-				b.WriteString(cursorSt.Render("▎"))
-			}
-			b.WriteString("\n")
-		}
-	default:
-		if v.step >= joinStepNewAdmin {
-			b.WriteString(rowStyle(v.step == joinStepNewAdmin).Render("NEW admin passphrase (≥ 8 chars)") + ": " +
-				strings.Repeat("•", v.newAdmin1.Len()))
-			if v.step == joinStepNewAdmin {
-				b.WriteString(cursorSt.Render("▎"))
-			}
-			b.WriteString("\n")
-		}
-		if v.step >= joinStepNewApproval {
-			b.WriteString(rowStyle(v.step == joinStepNewApproval).Render("NEW approval passphrase (≥ 10 chars)") + ": " +
-				strings.Repeat("•", v.newApproval.Len()))
-			if v.step == joinStepNewApproval {
-				b.WriteString(cursorSt.Render("▎"))
-			}
-			b.WriteString("\n")
-		}
-	}
-
-	if v.step == joinStepRunning {
-		b.WriteString("\n" + mutedSt.Render("Running… waiting for original admin to approve.") + "\n\n")
-		b.WriteString(mutedSt.Render("Live output (tail):") + "\n")
-		v.linesMu.Lock()
-		start := 0
-		if len(v.lines) > 10 {
-			start = len(v.lines) - 10
-		}
-		for _, ln := range v.lines[start:] {
-			b.WriteString("  " + mutedSt.Render(ln) + "\n")
-		}
-		v.linesMu.Unlock()
-	}
-	// rc7k-join — harness picker step. Appears after a successful join
-	// so new team members / new devices get the same first-start wizard
-	// as `dop admin init`.
-	if v.step == joinStepHarness {
-		b.WriteString("\n" + okSt.Render("✓ joined — this machine is now an admin.") + "\n\n")
-		b.WriteString("One last step: " + cursorSt.Render("which AI harness do you primarily use?") + "\n")
-		b.WriteString(mutedSt.Render("DOP's trust-context cache uses this to consult the right session env var") + "\n")
-		b.WriteString(mutedSt.Render("so `dop use` only pops the approval dialog once per conversation.") + "\n\n")
-		for i, choice := range userprefs.HarnessChoices {
-			prefix := "    "
-			label := userprefs.HarnessLabel(choice)
-			if i == v.harnessCursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				label = cursorSt.Render(label)
-			}
-			b.WriteString(prefix + label + "\n")
-		}
-	}
-	if v.step == joinStepDone {
-		b.WriteString("\n")
-		if v.finalRC == 0 {
-			b.WriteString(okSt.Render("✓ joined — this machine is now an admin.") + "\n")
-			b.WriteString(mutedSt.Render("  run `dop admin login` next time you need to admin the vault.") + "\n")
-		} else {
-			b.WriteString(failSt.Render("✗ join failed: "+v.finalErr) + "\n")
-		}
-	}
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err) + "\n")
-	}
-
+	const title = "Join vault"
+	url := strings.TrimSpace(v.urlBuf.Value())
 	switch v.step {
-	case joinStepIdentity:
-		b.WriteString("\n" + helpSt.Render("← → toggle | enter confirm | esc cancel"))
 	case joinStepRunning:
-		b.WriteString("\n" + helpSt.Render("esc kill | (auto-completes when admin approves)"))
+		if v.help {
+			body := append([]string{mutedSt.Render("Last output")}, outputTail(&v.linesMu, v.lines, 10)...)
+			return frame(v.width, v.height, title, nil, "", body, "", footer(v.width, keyClose))
+		}
+		return frame(v.width, v.height, title, nil, "", []string{v.spin.View() + " " + mutedSt.Render("Joining "+url+", waiting for the inviting admin")},
+			"", footer(v.width, hint("esc", "cancel"), keyMore))
 	case joinStepHarness:
-		b.WriteString("\n" + helpSt.Render("↑↓ pick | enter confirm | esc skip (change later in Settings → Harness)"))
-	case joinStepDone:
-		b.WriteString("\n" + helpSt.Render("any key to return to menu"))
-	default:
-		b.WriteString("\n" + helpSt.Render("enter next | esc cancel"))
+		return harnessScreen(v.wiz, "Joined", v.harnessCursor, v.err)
+	case joinStepReview:
+		if v.help && v.err != "" {
+			body := append([]string{mutedSt.Render("Last output")}, outputTail(&v.linesMu, v.lines, 10)...)
+			return frame(v.width, v.height, title, nil, "review", body, status{err: v.err}.String(), footer(v.width, keyClose))
+		}
+		rows := [][2]string{{"vault", url}, {"PIN", strings.TrimSpace(v.pinBuf.Value())}}
+		if !v.keyExists {
+			rows = append(rows, [2]string{"identity", identityOpts[v.identityCur][0]})
+		}
+		return v.review(title, "Join this vault?", rows, "join", false, v.err)
 	}
-	return b.String()
-}
-
-func rowStyle(active bool) lipglossStyle {
-	if active {
-		return cursorSt
+	var prompt, helper string
+	switch v.step {
+	case joinStepURL:
+		prompt, helper = "Vault URL", "From the admin who invited you."
+	case joinStepPIN:
+		prompt, helper = "Invite PIN", "Shown on the inviting machine."
+	case joinStepIdentity:
+		prompt = "Identity of this machine"
+	case joinStepAdminPass:
+		prompt = "Admin passphrase of this machine"
+		if !v.keyExists {
+			prompt, helper = "Admin passphrase of the inviting machine", "Same identity: no new key is created."
+		}
+	case joinStepNewAdmin:
+		prompt, helper = "New admin passphrase", "At least 8 characters; typed at every login."
+	case joinStepNewApproval:
+		prompt, helper = "New approval passphrase", "At least 10 characters, different from the admin one."
 	}
-	return mutedSt
-}
-
-// lipglossStyle is the local alias we need to keep imports tidy — the
-// styles used here are all from tui/styles.go which is package-local.
-type lipglossStyle = interface {
-	Render(strs ...string) string
+	input := optRows(identityOpts, v.identityCur)
+	if in := v.curBuf(); in != nil {
+		input = []string{inputRow(in)}
+	}
+	fl := v.flow()
+	return v.screen(title, counter(stepPos(fl, v.step), len(fl)), prompt, input, helper, v.err, "", wizKeys("next"))
 }

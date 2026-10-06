@@ -304,7 +304,7 @@ func runClaim(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop claim: sign: %v\n", err)
 		return 1
 	}
-	v.Capabilities[capIDHex] = capability2VaultCapability(rec)
+	putCapability(v, capIDHex, rec)
 
 	// v1.6.2 — Reorder to minimize inconsistency on crash. Priority is
 	// "exec must keep working". Steps:

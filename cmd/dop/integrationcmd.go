@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,7 +24,7 @@ import (
 // runIntegration is the subcommand dispatcher.
 func runIntegration(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop integration <add|list|remove|remove-token|set-token|rename>")
+		fmt.Fprintln(os.Stderr, "usage: dop integration <add|list|remove|remove-token|set-token|rename|rename-token>")
 		return 2
 	}
 	switch args[0] {
@@ -39,6 +40,8 @@ func runIntegration(args []string) int {
 		return runIntegrationSetToken(args[1:])
 	case "rename":
 		return runIntegrationRename(args[1:])
+	case "rename-token":
+		return runIntegrationRenameToken(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop integration: unknown subcommand %q\n", args[0])
 		return 2
@@ -279,12 +282,84 @@ func runIntegrationRemove(args []string) int {
 // tokens (and every active capability whose Grants list touched those
 // grants). Shape:
 //
-//   dop integration remove-token --name boiler --token pensieve --token writes
-//     [--force-revoke-ed25519]
+//	dop integration remove-token --name boiler --token pensieve --token writes
+//	  [--force-revoke-ed25519]
 //
 // If removing the selected tokens empties the integration, the
 // integration is deleted too — a service entry with no credentials
 // is useless.
+// runIntegrationRenameToken renames a credential (a key of
+// Integration.Tokens) and rewrites every grant on that integration that
+// references it, in one save. A protected integration takes its owner
+// and the approval passphrase.
+func runIntegrationRenameToken(args []string) int {
+	fs := flag.NewFlagSet("integration rename-token", flag.ExitOnError)
+	name := fs.String("integration", "", "integration name (required)")
+	from := fs.String("from", "", "current credential name (required)")
+	to := fs.String("to", "", "new credential name (required)")
+	passphraseStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin (protected integrations; used by scripts and TUI)")
+	_ = fs.Parse(args)
+	*to = strings.TrimSpace(*to)
+	if *name == "" || *from == "" || *to == "" {
+		fmt.Fprintln(os.Stderr, "usage: dop integration rename-token --integration <name> --from <old> --to <new> [--passphrase-stdin]")
+		return 2
+	}
+	fail := func(err error) int {
+		fmt.Fprintf(os.Stderr, "dop integration rename-token: %v\n", err)
+		return 1
+	}
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		return fail(err)
+	}
+	v, vp, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		return fail(err)
+	}
+	key, ok := v.FindIntegrationKey(*name)
+	if !ok {
+		return fail(fmt.Errorf("no integration named %q", *name))
+	}
+	integ := v.Integrations[key]
+	if err := requireProtectionOwner(client, "integration "+key, integ.Protected, integ.Owner); err != nil {
+		return fail(err)
+	}
+	tok, ok := integ.Tokens[*from]
+	if !ok {
+		return fail(fmt.Errorf("integration %q has no credential %q", key, *from))
+	}
+	if _, exists := integ.Tokens[*to]; exists {
+		return fail(fmt.Errorf("integration %q already has a credential %q", key, *to))
+	}
+	if integ.Protected {
+		if err := promptProtectionPassphrase(paths, "approval passphrase (rename credential on "+key+"): ", *passphraseStdin); err != nil {
+			return fail(err)
+		}
+	}
+	delete(integ.Tokens, *from)
+	integ.Tokens[*to] = tok
+	v.Integrations[key] = integ
+	n := 0
+	for id, g := range v.Grants {
+		if g.Integration == key && g.Token == *from {
+			g.Token = *to
+			v.Grants[id] = g
+			n++
+		}
+	}
+	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
+		return fail(err)
+	}
+	audit.Append(paths, audit.Event{
+		Kind:    audit.EventTokenRename,
+		Subject: key,
+		Extra:   map[string]string{"from": *from, "to": *to, "grants": fmt.Sprint(n)},
+	})
+	fmt.Fprintf(os.Stderr, "dop integration rename-token: %s: %q → %q (updated %d grant reference(s))\n", key, *from, *to, n)
+	return 0
+}
+
 func runIntegrationRemoveToken(args []string) int {
 	fs := flag.NewFlagSet("integration remove-token", flag.ExitOnError)
 	name := fs.String("name", "", "integration name (required)")
@@ -973,7 +1048,7 @@ func parseTokenSpec(spec string) (name, value, scope string, err error) {
 
 func runGrant(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop grant <add|list|remove>")
+		fmt.Fprintln(os.Stderr, "usage: dop grant <add|list|show|rename|remove>")
 		return 2
 	}
 	switch args[0] {
@@ -985,6 +1060,8 @@ func runGrant(args []string) int {
 		return runGrantShow(args[1:])
 	case "remove":
 		return runGrantRemove(args[1:])
+	case "rename":
+		return runGrantRename(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop grant: unknown subcommand %q\n", args[0])
 		return 2
@@ -1175,6 +1252,76 @@ func containsFold(hay []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// runGrantRename moves a grant to a new id and rewrites the id in every
+// active capability that carries it, re-signing each record. Env never
+// contains grant ids (keys come from EffectivePrefix = integration +
+// credential), so the bundle env and EnvWrapped stay valid as they are:
+// no reseal, no generation bump, no stale bearers of any key type.
+func runGrantRename(args []string) int {
+	fs := flag.NewFlagSet("grant rename", flag.ExitOnError)
+	from := fs.String("from", "", "current grant id (required)")
+	to := fs.String("to", "", "new grant id (required)")
+	passphraseStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin (protected grants; used by scripts and TUI)")
+	_ = fs.Parse(args)
+	*to = strings.TrimSpace(*to)
+	if *from == "" || *to == "" {
+		fmt.Fprintln(os.Stderr, "usage: dop grant rename --from <id> --to <id> [--passphrase-stdin]")
+		return 2
+	}
+	fail := func(err error) int {
+		fmt.Fprintf(os.Stderr, "dop grant rename: %v\n", err)
+		return 1
+	}
+	paths, _ := config.Resolve()
+	client, err := requireAdminSession(paths)
+	if err != nil {
+		return fail(err)
+	}
+	v, vp, err := loadVaultViaDaemon(client, paths)
+	if err != nil {
+		return fail(err)
+	}
+	g, ok := v.Grants[*from]
+	if !ok {
+		return fail(fmt.Errorf("no grant named %q", *from))
+	}
+	if _, exists := v.Grants[*to]; exists {
+		return fail(fmt.Errorf("a grant named %q already exists", *to))
+	}
+	if err := requireProtectionOwner(client, "grant "+*from, g.Protected, g.Owner); err != nil {
+		return fail(err)
+	}
+	if g.Protected {
+		if err := promptProtectionPassphrase(paths, "approval passphrase (rename grant "+*from+"): ", *passphraseStdin); err != nil {
+			return fail(err)
+		}
+	}
+	delete(v.Grants, *from)
+	v.Grants[*to] = g
+	n := 0
+	for capID, c := range v.Capabilities {
+		if c.Status != capability.RecordStatusActive || !slices.Contains(c.Grants, *from) {
+			continue
+		}
+		c.Grants = slices.Clone(c.Grants)
+		c.Grants[slices.Index(c.Grants, *from)] = *to
+		if err := resignCapability(client, paths, v, capID, c); err != nil {
+			return fail(err)
+		}
+		n++
+	}
+	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
+		return fail(err)
+	}
+	audit.Append(paths, audit.Event{
+		Kind:    audit.EventGrantRename,
+		Subject: *to,
+		Extra:   map[string]string{"from": *from, "to": *to, "bearers": fmt.Sprint(n)},
+	})
+	fmt.Fprintf(os.Stderr, "dop grant rename: %q → %q (updated %d bearer(s))\n", *from, *to, n)
+	return 0
 }
 
 func runGrantRemove(args []string) int {
@@ -1490,4 +1637,3 @@ func bearerIntegrationSet(v *vault.Vault, bearerLookup string) map[string]bool {
 	}
 	return out
 }
-

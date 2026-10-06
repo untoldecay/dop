@@ -105,6 +105,7 @@ func runTeamCancelInvite(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop team cancel-invite: push: %v — run `dop push` manually\n", err)
 		return 1
 	}
+	audit.Append(paths, audit.Event{Kind: audit.EventInviteCancel, Extra: map[string]string{"invite_id": full}})
 	fmt.Fprintf(os.Stderr, "dop team cancel-invite: deleted invite %s\n", full[:8])
 	return 0
 }
@@ -215,7 +216,7 @@ func runTeamRemove(args []string) int {
 			if c.Status != capability.RecordStatusActive {
 				continue
 			}
-			c.Status = capability.RecordStatusRevoked
+			c.Status, c.RevokedAt = capability.RecordStatusRevoked, time.Now().UTC().Truncate(time.Second)
 			c.Generation = v.BumpGeneration(c.Subject)
 			v.Capabilities[capID] = c
 			// Delete on-disk artifacts.

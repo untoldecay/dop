@@ -1,4 +1,5 @@
-// Add-integration and add-grant TUI forms.
+// Add-integration and add-grant TUI flows: dense forms (detail_helpers
+// denseForm), a review, running and done screen.
 
 package tui
 
@@ -10,82 +11,844 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/cursor"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/vault"
 )
 
-// ---------- Add integration (v1.10.3 rewrite) ----------
+// ---------- grant form (Add integration step 3, Add grant) ----------
+
+// grantForm is the grant's dense form: id, integration, credential,
+// env prefix, projects, tags. The id and env prefix follow the
+// integration / credential until the operator edits them.
+type grantForm struct {
+	id, integ, cred, env, projects, tags *formField
+	sugID, sugEnv                        string // last suggestions, to tell an edit from a default
+	vlt                                  *vault.Vault
+}
+
+func newGrantForm(vlt *vault.Vault, fixedInteg bool) grantForm {
+	g := grantForm{vlt: vlt,
+		id: textRow("grant", "notion.read-only", true, false), env: textRow("env prefix", "", true, false),
+		projects: textRow("projects", "docs, wiki", false, false), tags: textRow("tags", "ro, ci", false, false)}
+	if fixedInteg {
+		g.integ, g.cred = fixedRow("integration", ""), fixedRow("credential", "")
+	} else {
+		var o [][2]string
+		for _, n := range sortedKeys(vlt.Integrations) {
+			o = append(o, [2]string{n, ""})
+		}
+		g.integ, g.cred = pickRow("integration", o), pickRow("credential", nil)
+		g.integ.req, g.cred.req = true, true
+	}
+	return g
+}
+
+func sortedKeys[T any](m map[string]T) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (g *grantForm) rows() []*formField {
+	return []*formField{g.id, g.integ, g.cred, g.env, g.projects, g.tags}
+}
+
+// sync refreshes the credential choices of a picked integration and the
+// suggested id / env prefix. scope is the credential's scope note.
+// The id is <integration>.<scope> for read-only / read-write / admin,
+// else <integration>, with -2, -3… when taken; the env prefix is what
+// `dop grant add` derives when none is given: <INTEGRATION>_<CREDENTIAL>,
+// sanitized (Grant.EffectivePrefix).
+func (g *grantForm) sync(scope string) {
+	integ := g.integ.val()
+	if g.cred.opts != nil || !g.cred.fixed {
+		var o [][2]string
+		if it, ok := g.vlt.Integrations[integ]; ok {
+			for _, t := range sortedKeys(it.Tokens) {
+				o = append(o, [2]string{t, it.Tokens[t].ScopeNote})
+			}
+		}
+		g.cred.opts, g.cred.pick = o, min(g.cred.pick, max(len(o)-1, 0))
+		if len(o) == 0 {
+			g.cred.opts = nil
+		}
+		if it, ok := g.vlt.Integrations[integ]; ok && g.cred.val() != "" {
+			scope = it.Tokens[g.cred.val()].ScopeNote
+		}
+	}
+	if integ == "" {
+		return
+	}
+	base := integ
+	switch scope {
+	case "read-only", "read-write", "admin":
+		base += "." + scope
+	}
+	id := base
+	for n := 2; g.vlt.Grants[id].Integration != ""; n++ {
+		id = fmt.Sprintf("%s-%d", base, n)
+	}
+	if v := g.id.val(); v == "" || v == g.sugID {
+		g.id.in.SetValue(id)
+	}
+	env := vault.SanitizeEnvKey(integ + "_" + g.cred.val())
+	if v := g.env.val(); v == "" || v == g.sugEnv {
+		g.env.in.SetValue(env)
+	}
+	g.sugID, g.sugEnv = id, env
+}
+
+// check is the grant's validation error, "" when it can be saved.
+func (g *grantForm) check(d *denseForm) string {
+	if e := d.missing(g.rows()); e != "" {
+		return e
+	}
+	if g.vlt.Grants[g.id.val()].Integration != "" {
+		d.cur = 0
+		return "Grant " + g.id.val() + " already exists"
+	}
+	return ""
+}
+
+func (g *grantForm) args() []string {
+	args := []string{"grant", "add", "--id", g.id.val(), "--integration", g.integ.val(), "--token", g.cred.val()}
+	// Leave env_prefix empty on the record when it is the default, the
+	// way `dop grant add` does.
+	if env := g.env.val(); env != vault.SanitizeEnvKey(g.integ.val()+"_"+g.cred.val()) {
+		args = append(args, "--env-prefix", env)
+	}
+	if p := g.projects.val(); p != "" {
+		args = append(args, "--projects", p)
+	}
+	if t := g.tags.val(); t != "" {
+		args = append(args, "--tags", t)
+	}
+	return args
+}
+
+func (g *grantForm) summary() [][2]string {
+	return [][2]string{{"grant", g.id.val()}, {"env prefix", g.env.val()},
+		{"projects", displayOr(g.projects.val(), "none")}, {"tags", displayOr(g.tags.val(), "none")}}
+}
+
+// runDop runs `dop args…` without a TUI, stdin as given; the error is
+// the trimmed stderr.
+func runDop(stdin string, args ...string) (string, string) {
+	self, _ := os.Executable()
+	cmd := exec.Command(self, args...)
+	cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin + "\n")
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stderr.String(), displayOr(strings.TrimSpace(stderr.String()), err.Error())
+	}
+	return stderr.String(), ""
+}
+
+// ---------- Add integration ----------
 //
-// Same look-and-feel as Issue Token: every row visible at once, the
-// active row highlighted with a cursor bar, values fill in as you
-// go. One credential per Add flow — additional credentials go through
-// the integration edit path (a future release will unify these).
-//
-// The steps map to on-screen rows:
-//   0 Service name         (e.g. notion, github, db-primary)
-//   1 What it's for        (optional description)
-//   2 Base URL             (optional; sets an env var like NOTION_BASE_URL)
-//   3 Credential name      (prefilled from service name; user can edit)
-//   4 Credential value     (masked as you type)
-//   5 What can it do       (optional scope note — e.g. "read-only")
-//   6 Save                 (enter to persist)
-//   7 Running
-//   100 Done
+// Three steps, Integration › Credential › Grant, after a first screen
+// that picks a new or an existing integration. An existing integration
+// (picked, or `a` on its Credentials tab) starts at the credential and
+// is never mutated: its integration-level fields are not asked.
 
 const (
-	integAddStepName = 0
-	// v1.13.0-rc13 — new Kind preset step. Everything after shifts by 1.
-	// The old "Base URL" row becomes a KIND-ADAPTIVE slot: label +
-	// placeholder change based on kind picked at step 1.
-	integAddStepKind     = 1
-	integAddStepDesc     = 2
-	integAddStepKindSlot = 3
-	// v1.13.0-rc15 — opt-in endpoints probe. Preset picker (yes/no);
-	// only rendered when kind=api AND KindSlot has a URL, OR kind=mcp
-	// AND KindSlot has an mcp URL. Skipped silently otherwise.
-	integAddStepProbe = 4
-	integAddStepCred  = 5
-	integAddStepValue = 6
-	integAddStepScope = 7
-	// v1.13.0-rc12 — new protection step mirrors the scope-note preset
-	// picker shape (two-item preset list, enter to pick, backspace to
-	// return). If "protected" is picked, we insert a passphrase step
-	// before Save; otherwise we jump straight to Save.
-	integAddStepProtect    = 8
-	integAddStepPassphrase = 9
-	// v1.13.0-rc17 — Advanced optional fields. The yes/no gate +
-	// a sub-form of six optional metadata keys (cli_auth_env,
-	// server_root, allowed, auth_style, cli_install, cli_help).
-	// Default is no so the common path stays short.
-	integAddStepAdvanced   = 10
-	integAddStepAdvFields  = 11
-	integAddStepSave       = 12
-	integAddStepRun        = 13
-	integAddStepDone       = 100
-	integAddFieldCount     = 13
+	integStagePick   = -1
+	integStageInteg  = 0
+	integStageCred   = 1
+	integStageGrant  = 2
+	integStageReview = 3
+	integStageRun    = 4
+	integStageDone   = 5
 )
 
-// advFieldSpec defines one row in the Advanced sub-form. hiddenFor
-// lists integration kinds for which the row is hidden entirely (so
-// e.g. cli_auth_env doesn't appear on an api integration).
+type addIntegrationView struct {
+	wiz
+	client *admin.Client
+	paths  *config.Paths
+	vlt    *vault.Vault
+
+	stage   int
+	pickCur int
+	form    [3]denseForm
+
+	name, kind, desc, url, scan *formField
+	cred, value, scope, protect *formField
+	pass                        *formField
+	adv                         []*formField // by advFieldSpecs index
+	advTab                      bool
+	grant                       grantForm
+
+	existingIntegration bool
+	fromTab             bool // opened on the Credentials tab: esc on the credential leaves
+	credPrefilled       bool
+	integSaved          bool   // the integration + credential call succeeded; a retry only adds the grant
+	probeSummary        string // scan outcome from the CLI stderr
+	saving              string // the running screen's line, per CLI call
+
+	err   string
+	flash string
+	done  bool
+}
+
+type integrationAddedMsg struct {
+	err          string
+	integSaved   bool   // the integration + credential were saved (the grant call failed)
+	probeSummary string // scan outcome, when asked for
+}
+
+func newAddIntegrationView(c *admin.Client, p *config.Paths) *addIntegrationView {
+	vlt, _, err := loadVaultForListing(c, p)
+	if err != nil || vlt == nil {
+		vlt = &vault.Vault{}
+	}
+	v := &addIntegrationView{client: c, paths: p, vlt: vlt, stage: integStagePick}
+	var scopes [][2]string
+	for _, s := range scopePresets {
+		scopes = append(scopes, [2]string{s.label, map[bool]string{true: "type your own"}[s.value == ""]})
+	}
+	v.name, v.desc, v.url, v.kind, v.scan, v.adv = integRows()
+	v.cred, v.value = textRow("credential", "notion", true, false), textRow("value", "the API key or password", true, true)
+	v.scope, v.protect = pickRow("scope note", scopes), pickRow("protection", protectOpts())
+	v.scope.other = true
+	v.scope.in.Placeholder = "read-only on /docs"
+	v.pass = textRow("approval passphrase", "", true, true)
+	v.grant = newGrantForm(vlt, true)
+	return v
+}
+
+// newAddCredentialView is the flow on an existing integration, from its
+// Credentials tab: it starts at the credential step.
+func newAddCredentialView(c *admin.Client, p *config.Paths, svc string) *addIntegrationView {
+	v := newAddIntegrationView(c, p)
+	v.useExisting(svc)
+	v.fromTab = true
+	return v
+}
+
+// useExisting points the flow at the existing integration svc.
+func (v *addIntegrationView) useExisting(svc string) {
+	v.existingIntegration = true
+	v.name.in.SetValue(svc)
+	it := v.vlt.Integrations[svc]
+	for i, k := range kindPresets {
+		if k.value == vault.IntegrationKindOf(it) {
+			v.kind.pick = i
+		}
+	}
+	v.stage = integStageCred
+	v.prefillCred()
+}
+
+func (v *addIntegrationView) Init() tea.Cmd { return nil }
+func (v *addIntegrationView) Done() bool    { return v.done }
+func (v *addIntegrationView) Flash() string { return v.flash }
+
+func (v *addIntegrationView) kindVal() string { return kindPresets[v.kind.pick].value }
+
+// integName is the integration key the CLI saves under.
+func (v *addIntegrationView) integName() string {
+	return vault.NormalizeIntegrationName(v.name.val())
+}
+
+// rows are the current step's form rows (they follow the answers).
+func (v *addIntegrationView) rows() []*formField {
+	switch v.stage {
+	case integStageInteg:
+		return append([]*formField{v.name, v.kind, v.desc}, slotRows(v.kindVal(), v.url, v.scan)...)
+	case integStageCred:
+		if v.advTab {
+			return advRows(v.adv, v.kindVal())
+		}
+		r := []*formField{v.cred, v.value, v.scope}
+		if !v.existingIntegration {
+			r = append(r, v.protect)
+			if v.protected() {
+				r = append(r, v.pass)
+			}
+		}
+		return r
+	case integStageGrant:
+		return v.grant.rows()
+	}
+	return nil
+}
+
+func (v *addIntegrationView) protected() bool {
+	return !v.existingIntegration && protectionPresets[v.protect.pick].value
+}
+
+// prefillCred seeds the credential name with the integration's once.
+func (v *addIntegrationView) prefillCred() {
+	if !v.credPrefilled && v.cred.val() == "" {
+		v.cred.in.SetValue(v.integName())
+	}
+	v.credPrefilled = true
+}
+
+// typing: an open text row holds text (? is a character there).
+func (v *addIntegrationView) typing() bool {
+	return v.stage >= 0 && v.stage < 3 && v.form[v.stage].typing()
+}
+
+func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.wizMsg(msg, v.typing()); ok {
+		return v, cmd
+	}
+	switch mm := msg.(type) {
+	case integrationAddedMsg:
+		v.integSaved = v.integSaved || mm.integSaved
+		if mm.probeSummary != "" {
+			v.probeSummary = mm.probeSummary
+		}
+		if mm.err != "" {
+			v.err, v.stage = "Save failed: "+cliErr(firstLine(mm.err)), integStageReview
+			if mm.integSaved {
+				v.err = "Integration and credential saved; grant failed: " + cliErr(firstLine(mm.err))
+			}
+			return v, nil
+		}
+		if mm.integSaved { // first call done: now the grant
+			v.saving = "Saving grant…"
+			return v, v.save()
+		}
+		v.stage = integStageDone
+	case tea.KeyMsg:
+		k := mm.String()
+		switch {
+		case v.stage == integStageRun:
+			return v, nil
+		case v.stage == integStageDone:
+			if k == "enter" {
+				v.done, v.flash = true, "integration saved · synced with team"
+			}
+			return v, nil
+		case k == "ctrl+c":
+			v.done = true
+			return v, nil
+		}
+		if k != "enter" {
+			v.err = ""
+		}
+		switch v.stage {
+		case integStagePick:
+			return v.updatePick(k)
+		case integStageReview:
+			switch k {
+			case "enter":
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
+				v.stage, v.err = integStageRun, ""
+				v.saving = map[bool]string{true: "Saving credential…", false: "Saving integration and credential…"}[v.existingIntegration]
+				if v.integSaved {
+					v.saving = "Saving grant…"
+				}
+				return v, tea.Batch(v.spinStart(), v.save())
+			case "esc", "shift+tab":
+				v.stage = integStageGrant
+			}
+			return v, nil
+		}
+		f := &v.form[v.stage]
+		if v.stage == integStageCred && !v.existingIntegration && f.open == 0 && (k == "tab" || k == "shift+tab") {
+			v.advTab, f.cur = !v.advTab, 0
+			return v, nil
+		}
+		kindWas := v.kind.pick
+		r := f.key(v.rows(), mm)
+		if v.kind.pick != kindWas {
+			v.url.in.SetValue("") // a base URL is never sent as --cmd
+		}
+		switch r {
+		case formBack:
+			v.back()
+		case formNext:
+			v.next()
+		}
+	}
+	return v, nil
+}
+
+// pickOpts is the first screen: New integration, then each existing one.
+func (v *addIntegrationView) pickOpts() [][2]string {
+	o := [][2]string{{"New integration", "an API, CLI, MCP server or other service"}}
+	for _, n := range sortedKeys(v.vlt.Integrations) {
+		o = append(o, [2]string{ansi.Truncate(n, nameColW, "…"), v.vlt.Integrations[n].Description})
+	}
+	return o
+}
+
+func (v *addIntegrationView) updatePick(k string) (tea.Model, tea.Cmd) {
+	o := v.pickOpts()
+	switch k {
+	case "up", "down":
+		stepCursor(&v.pickCur, len(o), map[string]int{"up": -1, "down": 1}[k])
+	case "esc":
+		v.done = true
+	case "enter":
+		if v.pickCur == 0 {
+			v.existingIntegration, v.stage = false, integStageInteg
+			v.name.in.SetValue("")
+			return v, nil
+		}
+		v.credPrefilled = false
+		v.cred.in.SetValue("")
+		v.useExisting(sortedKeys(v.vlt.Integrations)[v.pickCur-1])
+	}
+	return v, nil
+}
+
+// back is esc on a closed form: one step back, or out where the flow
+// was entered from.
+func (v *addIntegrationView) back() {
+	switch {
+	case v.stage == integStageGrant:
+		v.stage = integStageCred
+	case v.stage == integStageCred && v.existingIntegration && v.fromTab:
+		v.done = true
+	case v.stage == integStageCred && v.existingIntegration:
+		v.stage = integStagePick
+	case v.stage == integStageCred:
+		v.stage = integStageInteg
+	default:
+		v.stage = integStagePick
+	}
+}
+
+// next validates the current step and moves to the following one.
+func (v *addIntegrationView) next() {
+	f := &v.form[v.stage]
+	switch v.stage {
+	case integStageInteg:
+		if v.err = f.missing(v.rows()); v.err != "" {
+			return
+		}
+		if _, ok := v.vlt.FindIntegrationKey(v.integName()); ok {
+			f.cur, v.err = 0, v.integName()+" already exists: pick it on the first screen to add a credential"
+			return
+		}
+		v.prefillCred()
+		v.stage = integStageCred
+	case integStageCred:
+		v.advTab = false
+		if v.err = f.missing(v.rows()); v.err != "" {
+			return
+		}
+		if _, ok := v.vlt.Integrations[v.integName()].Tokens[v.cred.val()]; ok {
+			// integration add would overwrite it: a new credential needs a new name.
+			f.cur, v.err = 0, v.integName()+" already has a credential "+v.cred.val()
+			return
+		}
+		v.grant.integ.in.SetValue(v.integName())
+		v.grant.cred.in.SetValue(v.cred.val())
+		v.grant.sync(v.scope.val())
+		v.stage = integStageGrant
+	case integStageGrant:
+		if v.err = v.grant.check(f); v.err != "" {
+			return
+		}
+		v.stage = integStageReview
+	}
+}
+
+// integArgs is the `dop integration add` call: integration and
+// credential in one, the passphrase on stdin when protected.
+func (v *addIntegrationView) integArgs() []string {
+	args := []string{"integration", "add", "--name", v.integName()}
+	if !v.existingIntegration {
+		if d := v.desc.val(); d != "" {
+			args = append(args, "--description", d)
+		}
+		args = append(append(args, "--kind", v.kindVal()), slotArgs(v.kindVal(), v.url.val())...)
+		if (v.kindVal() == vault.IntegrationKindAPI || v.kindVal() == vault.IntegrationKindMCP) && v.scan.pick == 1 {
+			args = append(args, "--probe-endpoints")
+		}
+		for _, i := range advFieldsForKind(v.kindVal()) {
+			if val := v.adv[i].val(); val != "" {
+				args = append(args, advFieldSpecs[i].cliFlag, val)
+			}
+		}
+		if v.protected() {
+			args = append(args, "--protected", "--passphrase-stdin")
+		}
+	}
+	return append(args, "--token", fmt.Sprintf("%s=%s:%s", v.cred.val(), v.value.val(), displayOr(v.scope.val(), "-")))
+}
+
+// save is the next CLI call: integration add (integration and
+// credential), then grant add once that is saved.
+func (v *addIntegrationView) save() tea.Cmd {
+	integArgs, grantArgs := v.integArgs(), v.grant.args()
+	pass, scan := "", v.scan.pick == 1 && !v.existingIntegration
+	if v.protected() {
+		pass = v.pass.in.Value()
+	}
+	if v.integSaved {
+		return func() tea.Msg {
+			if _, err := runDop("", grantArgs...); err != "" {
+				return integrationAddedMsg{err: err, integSaved: true}
+			}
+			return integrationAddedMsg{}
+		}
+	}
+	return func() tea.Msg {
+		stderr, err := runDop(pass, integArgs...)
+		if err != "" {
+			return integrationAddedMsg{err: err}
+		}
+		// The scan outcome is on the CLI's stderr (runProbe).
+		summary := ""
+		for _, line := range strings.Split(stderr, "\n") {
+			if line = strings.TrimSpace(line); scan && (strings.Contains(line, "probe →") || strings.Contains(line, "probe-endpoints skipped")) {
+				summary = displayOr(summary, line)
+			}
+		}
+		return integrationAddedMsg{integSaved: true, probeSummary: summary}
+	}
+}
+
+// summaryRows are the review's answers: integration, credential, grant.
+func (v *addIntegrationView) summaryRows() [][2]string {
+	rows := [][2]string{{"integration", v.integName()}}
+	if !v.existingIntegration {
+		rows = append(rows, [2]string{"kind", v.kindVal()})
+		if d := v.desc.val(); d != "" {
+			rows = append(rows, [2]string{"description", d})
+		}
+		if u := v.url.val(); u != "" && v.kindVal() != vault.IntegrationKindOther {
+			rows = append(rows, [2]string{v.url.label, u})
+		}
+		if k := v.kindVal(); k == vault.IntegrationKindAPI || k == vault.IntegrationKindMCP {
+			rows = append(rows, [2]string{"scan for docs", v.scan.val()})
+		}
+		for _, i := range advFieldsForKind(v.kindVal()) {
+			if val := v.adv[i].val(); val != "" {
+				rows = append(rows, [2]string{advFieldSpecs[i].label, val})
+			}
+		}
+	}
+	rows = append(rows, [2]string{"credential", v.cred.val()}, [2]string{"value", maskLen(v.value.val())},
+		[2]string{"scope note", displayOr(v.scope.val(), "none")})
+	if !v.existingIntegration {
+		rows = append(rows, [2]string{"protection", protectWord(v.protected())})
+	}
+	return append(rows, v.grant.summary()...)
+}
+
+// stepper is the Integration › Credential › Grant line: done steps in
+// body, the current one in brand, upcoming muted.
+func stepper(cur int, names ...string) string {
+	var parts []string
+	for i, n := range names {
+		st := mutedSt
+		switch {
+		case i < cur:
+			st = bodySt
+		case i == cur:
+			st = focusSt
+		}
+		parts = append(parts, st.Render(n))
+	}
+	return strings.Join(parts, mutedSt.Render(" › "))
+}
+
+func (v *addIntegrationView) View() string {
+	const title = "Add integration"
+	switch v.stage {
+	case integStagePick:
+		// New integration, a blank line, then the existing ones.
+		rows, km := optRows(v.pickOpts(), v.pickCur), pickKeys("open")
+		if len(rows) > 1 {
+			rows = append(rows[:1], append([]string{""}, rows[1:]...)...)
+		}
+		body := km.overlay(rows, v.width, frameRows(v.height), v.help)
+		return frame(v.width, v.height, title, nil, "", body, status{err: v.err}.String(), km.footerLine(v.width, v.help))
+	case integStageRun:
+		return v.running(title, v.saving)
+	case integStageDone:
+		rows := [][2]string{{"integration", v.integName()}, {"credential", v.cred.val()}, {"grant", v.grant.id.val()}}
+		if v.probeSummary != "" {
+			rows = append(rows, [2]string{"scan", strings.TrimPrefix(firstLine(v.probeSummary), "probe → ")})
+		}
+		return v.doneScreen(map[bool]string{true: "Credential added", false: "Integration added"}[v.existingIntegration],
+			rows, "Next: issue a bearer with this grant.", "")
+	case integStageReview:
+		q := "Save " + v.integName() + "?"
+		if v.existingIntegration {
+			q = "Add this credential to " + v.integName() + "?"
+		}
+		return v.review(title, q, v.summaryRows(), "save", false, v.err)
+	}
+	rows := v.rows()
+	f := &v.form[v.stage]
+	action := map[bool]string{true: "Review", false: "Next"}[v.stage == integStageGrant]
+	var extra []key.Binding
+	var tabs []tab
+	hintTxt := ""
+	if v.stage == integStageCred && !v.existingIntegration {
+		tabs = []tab{{"Normal", -1, !v.advTab}, {"Advanced", -1, v.advTab}}
+		extra = []key.Binding{hint("tab", map[bool]string{true: "normal", false: "advanced"}[v.advTab])}
+		if v.advTab {
+			hintTxt = "Optional, stored on the integration."
+		}
+	}
+	if v.stage == integStageInteg && f.cur == 0 {
+		if n := v.name.val(); n != "" && v.integName() != n {
+			hintTxt = "Saved as " + v.integName() + "."
+		}
+	}
+	km := f.formKeys(rows, action, extra...)
+	body := append([]string{stepper(v.stage, "Integration", "Credential", "Grant"), ""}, f.view(rows, v.width, action)...)
+	body = km.overlay(body, v.width, frameRows(v.height), v.help)
+	return frame(v.width, v.height, title, tabs, counter(v.stage, 3), body, status{err: v.err, hint: hintTxt}.String(), km.footerLine(v.width, v.help))
+}
+
+// ---- integration rows shared by Add integration and the integration edit form ----
+
+// integRows builds the integration-level rows: name, description, the
+// kind slot, kind and scan pickers, one Advanced row per advFieldSpecs.
+func integRows() (name, desc, url, kind, scan *formField, adv []*formField) {
+	var kinds, probe [][2]string
+	for _, k := range kindPresets {
+		kinds = append(kinds, [2]string{k.label, k.hint})
+	}
+	for _, s := range probePresets {
+		probe = append(probe, [2]string{s.label, s.hint})
+	}
+	for _, a := range advFieldSpecs {
+		adv = append(adv, textRow(a.label, a.placeholder, false, false))
+	}
+	return textRow("name", "notion, github, db-primary", true, false), textRow("description", "Team wiki and docs", false, false),
+		textRow("base URL", "", false, false), pickRow("kind", kinds), pickRow("scan for docs", probe), adv
+}
+
+// slotRows are the kind's own rows: base URL + scan (api), command
+// (cli), URL or launcher + scan (mcp), none (other).
+func slotRows(kind string, url, scan *formField) []*formField {
+	switch kind {
+	case vault.IntegrationKindAPI:
+		url.label, url.in.Placeholder = "base URL", "https://api.example.com/v1"
+		return []*formField{url, scan}
+	case vault.IntegrationKindCLI:
+		url.label, url.in.Placeholder = "command", "gh"
+		return []*formField{url}
+	case vault.IntegrationKindMCP:
+		url.label, url.in.Placeholder = "URL or launcher", "https://mcp.example.com/sse or npx my-mcp"
+		return []*formField{url, scan}
+	}
+	return nil
+}
+
+// slotValue is the kind slot's stored value (the metadata slotArgs writes).
+func slotValue(kind string, m map[string]string) string {
+	switch kind {
+	case vault.IntegrationKindCLI:
+		return m["cli_cmd"]
+	case vault.IntegrationKindMCP:
+		return displayOr(m["mcp_url"], m["mcp_cmd"])
+	}
+	return m["base_url"]
+}
+
+// slotArgs is the kind slot as `dop integration add` flags.
+func slotArgs(kind, u string) []string {
+	if u == "" {
+		return nil
+	}
+	switch kind {
+	case vault.IntegrationKindCLI:
+		return []string{"--cmd", u}
+	case vault.IntegrationKindMCP:
+		// An http(s) URL is the MCP URL; anything else a stdio launcher.
+		if strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+			return []string{"--mcp-url", u}
+		}
+		return []string{"--mcp-cmd", u}
+	case vault.IntegrationKindAPI:
+		return []string{"--base-url", u}
+	}
+	return nil
+}
+
+// advRows are the Advanced rows that apply to kind.
+func advRows(adv []*formField, kind string) []*formField {
+	var r []*formField
+	for _, i := range advFieldsForKind(kind) {
+		r = append(r, adv[i])
+	}
+	return r
+}
+
+// ---------- Add grant ----------
+
+const (
+	grantStageForm = iota
+	grantStageReview
+	grantStageRun
+	grantStageDone
+)
+
+// addGrantView is the grant form on its own: Add › Grant, or a on an
+// integration's Grants tab (integration pre-filled).
+type addGrantView struct {
+	wiz
+	stage int
+	form  denseForm
+	grant grantForm
+
+	err   string
+	flash string
+	done  bool
+}
+
+func newAddGrantView(c *admin.Client, p *config.Paths) *addGrantView {
+	vlt, _, err := loadVaultForListing(c, p)
+	if err != nil || vlt == nil {
+		vlt = &vault.Vault{}
+	}
+	v := &addGrantView{grant: newGrantForm(vlt, false)}
+	v.grant.sync("")
+	return v
+}
+
+// newAddGrantFor is the grant form with integ picked.
+func newAddGrantFor(c *admin.Client, p *config.Paths, integ string) *addGrantView {
+	v := newAddGrantView(c, p)
+	for i, o := range v.grant.integ.opts {
+		if o[0] == integ {
+			v.grant.integ.pick = i
+		}
+	}
+	v.grant.sync("")
+	return v
+}
+
+func (v *addGrantView) Init() tea.Cmd { return nil }
+func (v *addGrantView) Done() bool    { return v.done }
+func (v *addGrantView) Flash() string { return v.flash }
+
+type grantAddedMsg struct{ err string }
+
+func (v *addGrantView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.wizMsg(msg, v.form.typing()); ok {
+		return v, cmd
+	}
+	switch mm := msg.(type) {
+	case grantAddedMsg:
+		if mm.err != "" {
+			v.err, v.stage = firstLine(mm.err), grantStageReview
+			return v, nil
+		}
+		v.stage = grantStageDone
+	case tea.KeyMsg:
+		k := mm.String()
+		switch {
+		case v.stage == grantStageRun:
+			return v, nil
+		case v.stage == grantStageDone:
+			if k == "enter" {
+				v.done, v.flash = true, "grant saved · synced with team"
+			}
+			return v, nil
+		case k == "ctrl+c":
+			v.done = true
+			return v, nil
+		}
+		if k != "enter" {
+			v.err = ""
+		}
+		if v.stage == grantStageReview {
+			switch k {
+			case "enter":
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
+				args := v.grant.args()
+				v.stage, v.err = grantStageRun, ""
+				return v, tea.Batch(v.spinStart(), func() tea.Msg {
+					_, err := runDop("", args...)
+					return grantAddedMsg{err: err}
+				})
+			case "esc", "shift+tab":
+				v.stage = grantStageForm
+			}
+			return v, nil
+		}
+		if len(v.grant.integ.opts) == 0 {
+			if k == "esc" {
+				v.done = true
+			}
+			return v, nil
+		}
+		switch v.form.key(v.grant.rows(), mm) {
+		case formBack:
+			v.done = true
+		case formNext:
+			if v.err = v.grant.check(&v.form); v.err == "" {
+				v.stage = grantStageReview
+			}
+		}
+		v.grant.sync("")
+	}
+	return v, nil
+}
+
+func (v *addGrantView) View() string {
+	const title = "Add grant"
+	g := &v.grant
+	switch v.stage {
+	case grantStageRun:
+		return v.running(title, "Saving grant…")
+	case grantStageDone:
+		return v.doneScreen("Grant added", [][2]string{{"grant", g.id.val()}, {"integration", g.integ.val()},
+			{"credential", g.cred.val()}}, "Next: issue a bearer with this grant.", "")
+	case grantStageReview:
+		rows := append([][2]string{{"integration", g.integ.val()}, {"credential", g.cred.val()}}, g.summary()...)
+		return v.review(title, "Save "+g.id.val()+"?", rows, "save", false, v.err)
+	}
+	if len(g.integ.opts) == 0 {
+		return v.notice(title, bodySt.Render("  No integrations yet. Add one first: Add › Integration."))
+	}
+	rows := g.rows()
+	km := v.form.formKeys(rows, "Review")
+	body := km.overlay(v.form.view(rows, v.width, "Review"), v.width, frameRows(v.height), v.help)
+	return frame(v.width, v.height, title, nil, "", body, status{err: v.err}.String(), km.footerLine(v.width, v.help))
+}
+
+// advFieldSpec is one row of the credential step's Advanced tab. Every
+// one is integration metadata (`dop integration add` stores each flag
+// under its metadata key); hiddenFor lists the kinds it does not apply to.
 type advFieldSpec struct {
-	label     string
-	hint      string
-	bufIdx    int    // index into addIntegrationView.advBufs
-	cliFlag   string // flag passed to `dop integration add`
-	hiddenFor []string
+	label, placeholder string
+	cliFlag            string // flag passed to `dop integration add`
+	metaKey            string // where the CLI stores it in Integration.Metadata
+	hiddenFor          []string
 }
 
 var advFieldSpecs = []advFieldSpec{
-	{"CLI auth env template", "KEY1=$TOKEN;KEY2=$SERVER_ROOT · expanded + exported directly", 0, "--cli-auth-env", []string{"api", "mcp", "other"}},
-	{"Server root (CLI/API)", "distinct from base URL when they differ · e.g. https://host (no path)", 1, "--server-root", []string{}},
-	{"Allowed scope hint", "free text · e.g. Agent_Collab,Skills_Registry · agent reads to avoid 403-probing", 2, "--allowed", []string{}},
-	{"Auth style (API)", "e.g. bearer-header · basic · query-param", 3, "--auth-style", []string{"cli", "mcp", "other"}},
-	{"CLI install hint", "e.g. go install github.com/you/mycli/cmd/mycli@latest", 4, "--cli-install", []string{"api", "mcp", "other"}},
-	{"CLI help entry", "e.g. mycli --help", 5, "--cli-help", []string{"api", "mcp", "other"}},
+	{"auth env template", "KEY=$TOKEN;KEY2=$SERVER_ROOT", "--cli-auth-env", "cli_auth_env", []string{"api", "mcp", "other"}},
+	{"server root", "https://host, when it differs from the URL", "--server-root", "server_root", nil},
+	{"allowed scope hint", "Agent_Collab,Skills_Registry", "--allowed", "allowed", nil},
+	{"auth style", "bearer-header, basic, query-param", "--auth-style", "auth_style", []string{"cli", "mcp", "other"}},
+	{"install hint", "go install example.com/mycli@latest", "--cli-install", "cli_install", []string{"api", "mcp", "other"}},
+	{"help entry", "mycli --help", "--cli-help", "cli_help", []string{"api", "mcp", "other"}},
+	{"endpoints URL", "https://api.example.com/openapi.json", "--endpoints-url", "endpoints_url", []string{"cli", "mcp", "other"}},
+	{"auth header", "Bearer", "--auth-header", "auth_header", []string{"cli", "mcp", "other"}},
+	{"args hint", "exec --inherit-env", "--args-hint", "cli_args_hint", []string{"api", "mcp", "other"}},
 }
 
 // advFieldsForKind returns the subset of advFieldSpecs applicable to
@@ -107,88 +870,6 @@ func advFieldsForKind(kind string) []int {
 	return out
 }
 
-type addIntegrationView struct {
-	client *admin.Client
-	paths  *config.Paths
-
-	step       int
-	nameBuf    textField
-	descBuf    textField
-	urlBuf     textField
-	credBuf    textField
-	valueBuf   textField
-	scopeBuf   textField
-	credEdited bool // true once the operator changed the prefill
-
-	// v1.13.0-rc6 — service picker at step 0. existingServices lists
-	// vault integrations in sorted order so operators adding a second
-	// credential to an existing service don't accidentally re-type
-	// the name (which would create a near-duplicate even with rc4's
-	// case-insensitive merge). servicePickCursor: 0 = "+ Create new…",
-	// 1..N = existing services. serviceMode true = picker; false =
-	// text input (switched on when "+ Create new…" is picked).
-	existingServices  []string
-	servicePickCursor int
-	serviceMode       bool // true until operator switches to text input
-
-	// v1.13.0-rc7 — scope-note preset picker on step 5. Mirrors the
-	// expiry preset picker in issueView: a short menu of common
-	// values (read-only, read-write, admin) plus "other…" that drops
-	// into the free-text input. scopeMode true = picker; false =
-	// text input.
-	scopePickCursor int
-	scopeMode       bool // true until operator picks "other…"
-
-	// v1.13.0-rc12 — Protection preset picker (step 7 post-rc13).
-	// Same shape as scopePresets. protectedChoice is set from the
-	// picker; passphraseBuf is the masked text input used when
-	// protectedChoice is true.
-	protectPickCursor int
-	protectedChoice   bool
-	passphraseBuf     textField
-
-	// v1.13.0-rc13 — Kind preset picker (step 1). The kind drives the
-	// label + behavior of the KindSlot step (step 3). urlBuf is reused
-	// across all kinds — its SEMANTIC meaning changes:
-	//   api  → _BASE_URL
-	//   cli  → _CMD (binary name)
-	//   mcp  → _MCP_URL or _MCP_CMD
-	//   other → ignored (step is skipped)
-	kindPickCursor int
-	kindChoice     string // IntegrationKind* value picked by the user
-
-	// v1.13.0-rc15 — Probe preset picker (step 4). Only visited when
-	// kind=api AND the KindSlot (base URL) is non-empty, OR kind=mcp
-	// AND the KindSlot is a URL. probeChoice becomes --probe-endpoints
-	// at save time.
-	probePickCursor int
-	probeChoice     bool
-	// v1.13.0-rc17 — probe summary extracted from the CLI stderr when
-	// the operator opted into probing. Rendered on the Done screen so
-	// the "did DOP find something?" question is answered loudly.
-	probeSummary string
-
-	// v1.13.0-rc17 — Advanced optional fields.
-	advancedPickCursor int
-	advancedChoice     bool  // false = skip, true = open the sub-form
-	advFieldIdx        int   // which applicable sub-field is active
-	advBufs            [6]textField
-
-	// rc7n — true when the operator picked an existing service in the
-	// step-0 picker (vs "+ Create new…"). The integration-level fields
-	// (kind, description, kindSlot, probe, advanced) are locked for
-	// view-only in this case; shift+tab can't navigate back into them.
-	// Prevents silent mutation of an existing integration's params
-	// during the "add a new credential to it" flow.
-	existingIntegration bool
-
-	err   string
-	flash string
-	done  bool
-}
-
-// scopePresets is the common-case menu offered on the scope-note
-// step of addIntegrationView. The last entry drops the operator
 // into the free-text input via scopeMode.
 var scopePresets = []struct {
 	label string
@@ -220,10 +901,10 @@ var kindPresets = []struct {
 	value string // vault.IntegrationKind* constant
 	hint  string
 }{
-	{"api", vault.IntegrationKindAPI, "HTTP service — token sent to a base URL (default)"},
-	{"cli", vault.IntegrationKindCLI, "command-line tool — token exported to a binary's env"},
-	{"mcp", vault.IntegrationKindMCP, "Model Context Protocol server — URL or stdio launcher"},
-	{"other", vault.IntegrationKindOther, "unspecified — only the token is exported"},
+	{"api", vault.IntegrationKindAPI, "HTTP service, credential sent to a base URL (default)"},
+	{"cli", vault.IntegrationKindCLI, "command-line tool, credential exported to its env"},
+	{"mcp", vault.IntegrationKindMCP, "Model Context Protocol server, URL or stdio launcher"},
+	{"other", vault.IntegrationKindOther, "unspecified, only the credential is exported"},
 }
 
 // v1.13.0-rc15 — probePresets drives the opt-in endpoints discovery
@@ -233,1309 +914,48 @@ var probePresets = []struct {
 	value bool
 	hint  string
 }{
-	{"no", false, "default — only the URL you entered gets stored"},
-	{"yes", true, "scan common OpenAPI paths (or MCP tools/list) and stamp the result"},
+	{"no", false, "store only the URL you entered (default)"},
+	{"yes", true, "scan common OpenAPI paths or MCP tools/list"},
 }
 
-// advancedRowValue formats the inline-row text for the Advanced step
-// (shown in the always-visible row list).
-func advancedRowValue(yes bool) string {
-	if yes {
-		return "yes"
+// pos is the current step's index in fl; the review step is len(fl).
+func stepPos(fl []int, step int) int {
+	for i, s := range fl {
+		if s == step {
+			return i
+		}
 	}
-	return "no"
+	return len(fl)
 }
 
-// probeApplicable reports whether the probe step should be VISIBLE
-// for the current kind. v1.13.0-rc16 — widened: always true for
-// api/mcp regardless of URL contents. The silent "URL has no scheme"
-// skip from rc15 was confusing — operators who typed
-// `boiler-alpha.decaylab.com` without https:// never saw the step
-// and couldn't tell whether the probe would have run.
-//
-// Now the step is always offered for api/mcp; if the operator picks
-// "yes" but the URL is missing or has no scheme, the CLI prints a
-// clear "probe-endpoints skipped (no --base-url set)" and the save
-// still succeeds. Loud > silent.
-func probeApplicable(kind, urlBuf string) bool {
-	switch kind {
-	case vault.IntegrationKindAPI, vault.IntegrationKindMCP:
-		return true
-	}
-	return false
+// firstLine is the first line of a subprocess error.
+func firstLine(s string) string {
+	s, _, _ = strings.Cut(strings.TrimSpace(s), "\n")
+	return s
 }
 
-// kindSlotLabel returns the row label + hint for the kind-adaptive
-// step 3 based on which kind the operator picked at step 1.
-func kindSlotLabel(kind string) (label, hint string) {
-	switch kind {
-	case vault.IntegrationKindCLI:
-		return "Command (binary name)", "e.g. dop, boiler — must be on the agent's PATH"
-	case vault.IntegrationKindMCP:
-		return "MCP URL (or stdio cmd)", "either an HTTP URL or a launcher cmd like `npx my-mcp`"
-	case vault.IntegrationKindOther:
-		return "(no extra config)", "other kind — this row is skipped"
-	default: // api, empty
-		return "Base URL", "optional — sets an env var like NOTION_BASE_URL"
+// newFormInput — prompt-less textinput with a static (non-blinking)
+// cursor and the muted italic placeholder; mask echoes • for secrets.
+// ponytail: static cursor so no blink Cmd/msg needs routing.
+func newFormInput(mask bool) textinput.Model {
+	t := textinput.New()
+	t.Prompt = ""
+	t.Cursor.SetMode(cursor.CursorStatic)
+	t.Cursor.Style = cursorSt
+	t.TextStyle, t.PlaceholderStyle = bodySt, placeholderSt
+	t.Width = 72 // ponytail: fixed; longer values scroll inside the field
+	if mask {
+		t.EchoMode = textinput.EchoPassword
+		t.EchoCharacter = '•'
 	}
+	return t
 }
 
-func newAddIntegrationView(c *admin.Client, p *config.Paths) *addIntegrationView {
-	v := &addIntegrationView{
-		client:      c,
-		paths:       p,
-		serviceMode: true,
-		scopeMode:   true,
-		// v1.13.0-rc13 — default kind is api (matches 99% of existing use
-		// and keeps the "just enter through the form" flow unchanged).
-		kindChoice: vault.IntegrationKindAPI,
-	}
-	v.loadExistingServices()
-	return v
-}
-
-// loadExistingServices populates existingServices from the vault so
-// the step-0 picker can offer "pick a service you already have"
-// alongside the "+ Create new…" entry.
-func (v *addIntegrationView) loadExistingServices() {
-	if v.client == nil {
-		return
-	}
-	vlt, _, err := loadVaultForListing(v.client, v.paths)
-	if err != nil || vlt == nil {
-		return
-	}
-	for name := range vlt.Integrations {
-		v.existingServices = append(v.existingServices, name)
-	}
-	sort.Strings(v.existingServices)
-}
-func (v *addIntegrationView) Init() tea.Cmd { return nil }
-func (v *addIntegrationView) Done() bool    { return v.done }
-func (v *addIntegrationView) Flash() string { return v.flash }
-
-type integrationAddedMsg struct {
-	err string
-	// v1.13.0-rc17 — probe outcome summary extracted from the
-	// subprocess stderr when the operator opted into probing. Shown
-	// on the Done screen so the operator sees what happened. Empty
-	// when probe was not requested.
-	probeSummary string
-}
-
-func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch mm := msg.(type) {
-	case integrationAddedMsg:
-		if mm.err != "" {
-			v.err = mm.err
-			v.step = integAddStepSave
-			return v, nil
-		}
-		v.probeSummary = mm.probeSummary
-		v.step = integAddStepDone
-	case tea.KeyMsg:
-		switch mm.String() {
-		case "esc", "ctrl+c":
-			v.done = true
-			return v, nil
-		}
-		if v.step == integAddStepDone {
-			v.done = true
-			v.flash = "integration saved · synced with team"
-			return v, nil
-		}
-		// v1.13.0-rc13 — step 1 (Kind) is a preset picker. Enter commits
-		// the choice and advances to Description. Up/down moves within
-		// the preset list.
-		if v.step == integAddStepKind {
-			switch mm.String() {
-			case "up", "k":
-				if v.kindPickCursor > 0 {
-					v.kindPickCursor--
-				}
-			case "down", "j":
-				if v.kindPickCursor < len(kindPresets)-1 {
-					v.kindPickCursor++
-				}
-			case "enter":
-				v.kindChoice = kindPresets[v.kindPickCursor].value
-				v.err = ""
-				v.step = integAddStepDesc
-				return v, nil
-			}
-			return v, nil
-		}
-		// v1.13.0-rc7 — step 5 (scope note) is a preset picker unless
-		// the operator picked "other…". Mirrors rc5's expiry picker.
-		if v.step == integAddStepScope && v.scopeMode {
-			switch mm.String() {
-			case "up", "k":
-				if v.scopePickCursor > 0 {
-					v.scopePickCursor--
-				}
-			case "down", "j":
-				if v.scopePickCursor < len(scopePresets)-1 {
-					v.scopePickCursor++
-				}
-			case "enter":
-				sel := scopePresets[v.scopePickCursor]
-				if sel.value == "" {
-					// "other…" — drop into free-text input.
-					v.scopeMode = false
-					v.scopeBuf.Reset()
-					return v, nil
-				}
-				v.scopeBuf.SetString(sel.value)
-				v.step = integAddStepProtect
-				return v, nil
-			}
-			return v, nil
-		}
-		// v1.13.0-rc12 — step 6 (Protection) is a two-item preset picker.
-		if v.step == integAddStepProtect {
-			switch mm.String() {
-			case "up", "k":
-				if v.protectPickCursor > 0 {
-					v.protectPickCursor--
-				}
-			case "down", "j":
-				if v.protectPickCursor < len(protectionPresets)-1 {
-					v.protectPickCursor++
-				}
-			case "enter":
-				sel := protectionPresets[v.protectPickCursor]
-				v.protectedChoice = sel.value
-				if sel.value {
-					v.step = integAddStepPassphrase
-					v.passphraseBuf.Reset()
-				} else {
-					// v1.13.0-rc17 fix: route through Advanced step
-					// (was skipping straight to Save, missed by the
-					// rc17 step-renumber because this picker handler
-					// has its own enter path separate from advance()).
-					v.step = integAddStepAdvanced
-				}
-				return v, nil
-			}
-			return v, nil
-		}
-		// v1.13.0-rc15 — step 4 (Probe) is a two-item preset picker.
-		// Only visited when probeApplicable(kind, urlBuf). On enter,
-		// commits the choice and advances to Credential name.
-		if v.step == integAddStepProbe {
-			switch mm.String() {
-			case "up", "k":
-				if v.probePickCursor > 0 {
-					v.probePickCursor--
-				}
-			case "down", "j":
-				if v.probePickCursor < len(probePresets)-1 {
-					v.probePickCursor++
-				}
-			case "enter":
-				v.probeChoice = probePresets[v.probePickCursor].value
-				v.err = ""
-				v.step = integAddStepCred
-				v.prefillIfNeeded()
-				return v, nil
-			}
-			return v, nil
-		}
-		// v1.13.0-rc17 — step 10 (Advanced? yes/no) is a two-item picker.
-		if v.step == integAddStepAdvanced {
-			switch mm.String() {
-			case "up", "k":
-				if v.advancedPickCursor > 0 {
-					v.advancedPickCursor--
-				} else {
-					// v1.13.0-rc20 fix: at top of picker, up/k returns
-					// to the previous step (Passphrase if protected, else
-					// Protection). Previously only shift+tab worked —
-					// Cam reported the arrow key felt broken.
-					if v.protectedChoice {
-						v.step = integAddStepPassphrase
-					} else {
-						v.step = integAddStepProtect
-					}
-					return v, nil
-				}
-			case "down", "j":
-				if v.advancedPickCursor < 1 {
-					v.advancedPickCursor++
-				}
-			case "enter":
-				v.advancedChoice = v.advancedPickCursor == 1
-				v.err = ""
-				if v.advancedChoice {
-					v.advFieldIdx = 0
-					v.step = integAddStepAdvFields
-				} else {
-					v.step = integAddStepSave
-				}
-				return v, nil
-			case "shift+tab":
-				// v1.13.0-rc17 fix: step-back escape so operators can
-				// return to Passphrase/Protection without esc-cancelling
-				// the whole form.
-				if v.protectedChoice {
-					v.step = integAddStepPassphrase
-				} else {
-					v.step = integAddStepProtect
-				}
-				return v, nil
-			case "tab":
-				// Forward: commit current cursor as the choice and advance.
-				v.advancedChoice = v.advancedPickCursor == 1
-				if v.advancedChoice {
-					v.advFieldIdx = 0
-					v.step = integAddStepAdvFields
-				} else {
-					v.step = integAddStepSave
-				}
-				return v, nil
-			}
-			return v, nil
-		}
-		// v1.13.0-rc17 — step 11 (Advanced sub-form) walks the
-		// kind-applicable fields; tab/shift+tab move between them,
-		// enter on the last field advances to Save, esc returns to
-		// the Advanced yes/no gate.
-		if v.step == integAddStepAdvFields {
-			fields := advFieldsForKind(v.kindChoice)
-			if len(fields) == 0 {
-				v.step = integAddStepSave
-				return v, nil
-			}
-			if v.advFieldIdx >= len(fields) {
-				v.advFieldIdx = len(fields) - 1
-			}
-			bufIdx := advFieldSpecs[fields[v.advFieldIdx]].bufIdx
-			buf := &v.advBufs[bufIdx]
-			key := mm.String()
-			// rc6f — caret/edit keys consumed by the field first.
-			switch key {
-			case "left", "right", "home", "end", "ctrl+a", "ctrl+e", "delete", "ctrl+d", "backspace":
-				buf.handleKey(key, mm.Runes)
-				return v, nil
-			}
-			switch key {
-			case "esc":
-				v.step = integAddStepAdvanced
-				return v, nil
-			case "tab", "down":
-				if v.advFieldIdx < len(fields)-1 {
-					v.advFieldIdx++
-				}
-			case "shift+tab", "up":
-				if v.advFieldIdx > 0 {
-					v.advFieldIdx--
-				} else {
-					// v1.13.0-rc17 fix: at the top of the sub-form,
-					// shift+tab/up escapes back to the Advanced yes/no
-					// gate so operators can navigate freely.
-					v.step = integAddStepAdvanced
-				}
-			case "enter":
-				if v.advFieldIdx < len(fields)-1 {
-					v.advFieldIdx++
-				} else {
-					v.step = integAddStepSave
-				}
-			default:
-				if len(mm.Runes) > 0 {
-					buf.InsertRunes(mm.Runes)
-				}
-			}
-			// v1.13.0-rc17 fix: any content in a sub-form field flips
-			// advancedChoice to true so the Advanced row display + Save
-			// path reflect reality (previously stayed "no" if the user
-			// arrived here via up-arrow from Save without ever picking
-			// yes at the gate).
-			for i := range v.advBufs {
-				if v.advBufs[i].Len() > 0 {
-					v.advancedChoice = true
-					break
-				}
-			}
-			return v, nil
-		}
-		// v1.13.0-rc12 — step 7 (passphrase) is a masked text input,
-		// only visited when protection = protected. Enter advances to
-		// Save; empty passphrase is refused.
-		if v.step == integAddStepPassphrase {
-			key := mm.String()
-			switch key {
-			case "left", "right", "home", "end", "ctrl+a", "ctrl+e", "delete", "ctrl+d":
-				v.passphraseBuf.handleKey(key, mm.Runes)
-				return v, nil
-			case "enter":
-				if v.passphraseBuf.Len() == 0 {
-					v.err = "passphrase required for protected integrations"
-					return v, nil
-				}
-				v.err = ""
-				// v1.13.0-rc17 fix: route through Advanced step.
-				v.step = integAddStepAdvanced
-				return v, nil
-			case "backspace":
-				if v.passphraseBuf.Len() > 0 {
-					v.passphraseBuf.Backspace()
-				} else {
-					// Empty + backspace → return to protection picker.
-					v.step = integAddStepProtect
-				}
-				return v, nil
-			default:
-				if len(mm.Runes) > 0 {
-					v.passphraseBuf.InsertRunes(mm.Runes)
-				}
-			}
-			return v, nil
-		}
-		// v1.13.0-rc6 — step 0 is a service picker (unless the user
-		// opted into text-input via "+ Create new…").
-		if v.step == integAddStepName && v.serviceMode {
-			total := len(v.existingServices) + 1 // +1 for "+ Create new…"
-			switch mm.String() {
-			case "up", "k":
-				if v.servicePickCursor > 0 {
-					v.servicePickCursor--
-				}
-			case "down", "j":
-				if v.servicePickCursor < total-1 {
-					v.servicePickCursor++
-				}
-			case "enter":
-				if v.servicePickCursor == 0 {
-					// "+ Create new…" — drop into text input.
-					v.serviceMode = false
-					v.nameBuf.Reset()
-					return v, nil
-				}
-				// Pick an existing service — advance to credential name.
-				// v1.13.0-rc13 — inherit the existing integration's kind
-				// so the Kind step isn't re-prompted when just adding a
-				// new credential to a service we already know about.
-				svc := v.existingServices[v.servicePickCursor-1]
-				v.nameBuf.SetString(svc)
-				// rc7n — lock integration-level fields so shift+tab can't
-				// navigate back into them (otherwise edits would silently
-				// mutate the existing integration). Also pre-fill the
-				// kind + the kind-slot + description from the existing
-				// integration so the display rows aren't blank.
-				v.existingIntegration = true
-				if vlt, _, err := loadVaultForListing(v.client, v.paths); err == nil && vlt != nil {
-					if integ, ok := vlt.Integrations[svc]; ok {
-						v.kindChoice = vault.IntegrationKindOf(integ)
-						v.descBuf.SetString(integ.Description)
-						// Pick the right metadata key per kind to seed urlBuf.
-						switch v.kindChoice {
-						case vault.IntegrationKindCLI:
-							v.urlBuf.SetString(integ.Metadata["cli_cmd"])
-						case vault.IntegrationKindMCP:
-							if integ.Metadata["mcp_url"] != "" {
-								v.urlBuf.SetString(integ.Metadata["mcp_url"])
-							} else {
-								v.urlBuf.SetString(integ.Metadata["mcp_cmd"])
-							}
-						default:
-							v.urlBuf.SetString(integ.Metadata["base_url"])
-						}
-					}
-				}
-				v.step = integAddStepCred
-				v.prefillIfNeeded()
-				return v, nil
-			}
-			return v, nil
-		}
-		key := mm.String()
-		// rc6f — in-field caret keys get consumed by the active text field
-		// before step navigation. Only applies to the free-text steps
-		// (Name/Desc/KindSlot/Cred/Value/Scope).
-		if v.step >= integAddStepName && v.step <= integAddStepScope {
-			switch key {
-			case "left", "right", "home", "end", "ctrl+a", "ctrl+e", "delete", "ctrl+d":
-				v.curBuf().handleKey(key, mm.Runes)
-				return v, nil
-			}
-		}
-		switch key {
-		case "enter":
-			return v.advance()
-		case "tab", "down":
-			if v.step < integAddStepSave {
-				v.step++
-				v.prefillIfNeeded()
-			}
-		case "shift+tab", "up":
-			// rc7n — when operator picked an existing integration, the
-			// integration-level steps (Name/Kind/Desc/KindSlot/Probe)
-			// are display-only. shift+tab stops at integAddStepCred so
-			// those fields can't be edited into mutating the existing
-			// integration.
-			if v.existingIntegration && v.step <= integAddStepCred {
-				return v, nil
-			}
-			if v.step > integAddStepName {
-				v.step--
-			}
-		case "backspace":
-			buf := v.curBuf()
-			if buf.Len() > 0 {
-				buf.Backspace()
-			} else if v.step == integAddStepName && !v.serviceMode {
-				// Empty name + backspace returns to the service picker.
-				v.serviceMode = true
-			} else if v.step == integAddStepScope && !v.scopeMode {
-				// v1.13.0-rc7 — empty scope + backspace returns to picker.
-				v.scopeMode = true
-			}
-			if v.step == integAddStepCred {
-				v.credEdited = true
-			}
-		default:
-			if len(mm.Runes) > 0 && v.step >= integAddStepName && v.step <= integAddStepScope {
-				v.curBuf().InsertRunes(mm.Runes)
-				if v.step == integAddStepCred {
-					v.credEdited = true
-				}
-			}
-		}
-	}
-	return v, nil
-}
-
-func (v *addIntegrationView) curBuf() *textField {
-	switch v.step {
-	case integAddStepName:
-		return &v.nameBuf
-	case integAddStepDesc:
-		return &v.descBuf
-	case integAddStepKindSlot:
-		return &v.urlBuf
-	case integAddStepCred:
-		return &v.credBuf
-	case integAddStepValue:
-		return &v.valueBuf
-	case integAddStepScope:
-		return &v.scopeBuf
-	}
-	var scratch textField
-	return &scratch
-}
-
-// prefillIfNeeded seeds the credential-name buffer with the service
-// name the first time we arrive at that step. The operator can still
-// edit it — but the default is what most single-credential services
-// need, and it makes the redundancy ("why two names?") obvious.
-func (v *addIntegrationView) prefillIfNeeded() {
-	if v.step == integAddStepCred && v.credBuf.Len() == 0 && !v.credEdited {
-		v.credBuf.SetString(strings.TrimSpace(v.nameBuf.String()))
-	}
-}
-
-func (v *addIntegrationView) advance() (tea.Model, tea.Cmd) {
-	switch v.step {
-	case integAddStepName:
-		if strings.TrimSpace(v.nameBuf.String()) == "" {
-			v.err = "service name is required"
-			return v, nil
-		}
-		v.err = ""
-		v.step = integAddStepKind
-	case integAddStepKind:
-		// Enter outside the picker loop (e.g. after a tab-forward)
-		// commits whatever the cursor is on. The picker loop handles the
-		// normal case.
-		if v.kindChoice == "" {
-			v.kindChoice = kindPresets[v.kindPickCursor].value
-		}
-		v.err = ""
-		v.step = integAddStepDesc
-	case integAddStepDesc:
-		v.err = ""
-		// v1.13.0-rc13 — "other" kind has no kind-specific slot;
-		// skip straight to the credential name.
-		if v.kindChoice == vault.IntegrationKindOther {
-			v.step = integAddStepCred
-			v.prefillIfNeeded()
-		} else {
-			v.step = integAddStepKindSlot
-		}
-	case integAddStepKindSlot:
-		v.err = ""
-		// v1.13.0-rc15 — route to Probe step only when applicable.
-		// Otherwise skip straight to Cred, preserving the pre-rc15 flow.
-		if probeApplicable(v.kindChoice, v.urlBuf.String()) {
-			v.step = integAddStepProbe
-		} else {
-			v.step = integAddStepCred
-			v.prefillIfNeeded()
-		}
-	case integAddStepProbe:
-		v.err = ""
-		v.step = integAddStepCred
-		v.prefillIfNeeded()
-	case integAddStepCred:
-		if strings.TrimSpace(v.credBuf.String()) == "" {
-			v.err = "credential name is required"
-			return v, nil
-		}
-		v.err = ""
-		v.step = integAddStepValue
-	case integAddStepValue:
-		if strings.TrimSpace(v.valueBuf.String()) == "" {
-			v.err = "credential value is required"
-			return v, nil
-		}
-		v.err = ""
-		v.step = integAddStepScope
-	case integAddStepScope:
-		v.err = ""
-		v.step = integAddStepProtect
-	case integAddStepProtect:
-		// Non-picker path (tab/enter in text mode) — fall through to Save
-		// using whatever was last picked (defaults to default/unrestricted).
-		v.err = ""
-		if v.protectedChoice {
-			v.step = integAddStepPassphrase
-		} else {
-			v.step = integAddStepAdvanced
-		}
-	case integAddStepPassphrase:
-		if v.passphraseBuf.Len() == 0 {
-			v.err = "passphrase required for protected integrations"
-			return v, nil
-		}
-		v.err = ""
-		v.step = integAddStepAdvanced
-	case integAddStepAdvanced:
-		// Non-picker path (tab/enter from the help legend) — commit
-		// whatever the cursor sits on. The picker loop handles the normal
-		// enter-select case.
-		v.advancedChoice = v.advancedPickCursor == 1
-		if v.advancedChoice {
-			v.step = integAddStepAdvFields
-		} else {
-			v.step = integAddStepSave
-		}
-	case integAddStepAdvFields:
-		v.step = integAddStepSave
-	case integAddStepSave:
-		v.step = integAddStepRun
-		return v, v.save()
-	}
-	return v, nil
-}
-
-func (v *addIntegrationView) save() tea.Cmd {
-	name := strings.TrimSpace(v.nameBuf.String())
-	desc := strings.TrimSpace(v.descBuf.String())
-	url := strings.TrimSpace(v.urlBuf.String())
-	cred := strings.TrimSpace(v.credBuf.String())
-	value := strings.TrimSpace(v.valueBuf.String())
-	scope := strings.TrimSpace(v.scopeBuf.String())
-	if scope == "" {
-		scope = "-"
-	}
-	// v1.13.0-rc12 — capture protected state + passphrase for the
-	// subprocess invocation. Passphrase travels via stdin (never on
-	// the command line) and only when protection is actually on.
-	protected := v.protectedChoice
-	passphrase := v.passphraseBuf.String()
-	// v1.13.0-rc13 — capture kind + route the KindSlot buffer (urlBuf)
-	// into the right CLI flag per kind.
-	kind := v.kindChoice
-	// v1.13.0-rc15 — snapshot the probe choice. Append --probe-endpoints
-	// to the subprocess call when the operator said yes.
-	wantProbe := v.probeChoice
-	return func() tea.Msg {
-		self, _ := os.Executable()
-		args := []string{"integration", "add", "--name", name}
-		if desc != "" {
-			args = append(args, "--description", desc)
-		}
-		if kind != "" {
-			args = append(args, "--kind", kind)
-		}
-		// Kind-specific slot — urlBuf semantics depend on kind.
-		if url != "" {
-			switch kind {
-			case vault.IntegrationKindCLI:
-				args = append(args, "--cmd", url)
-			case vault.IntegrationKindMCP:
-				// If it starts with http it's a URL; otherwise treat as
-				// stdio launcher command. Simple heuristic; operator can
-				// override via `integration add` on the CLI.
-				if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
-					args = append(args, "--mcp-url", url)
-				} else {
-					args = append(args, "--mcp-cmd", url)
-				}
-			default: // api, other
-				args = append(args, "--base-url", url)
-			}
-		}
-		args = append(args, "--token", fmt.Sprintf("%s=%s:%s", cred, value, scope))
-		if wantProbe {
-			args = append(args, "--probe-endpoints")
-		}
-		// v1.13.0-rc17 — advanced fields. Each non-empty buffer maps
-		// to its CLI flag; empty buffers are silently skipped.
-		for _, s := range advFieldSpecs {
-			if val := strings.TrimSpace(v.advBufs[s.bufIdx].String()); val != "" {
-				args = append(args, s.cliFlag, val)
-			}
-		}
-		if protected {
-			args = append(args, "--protected", "--passphrase-stdin")
-		}
-		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
-		if protected {
-			cmd.Stdin = strings.NewReader(passphrase + "\n")
-		}
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return integrationAddedMsg{err: strings.TrimSpace(stderr.String())}
-		}
-		// v1.13.0-rc17 — extract probe summary from stderr so the Done
-		// screen can surface "probe → <url>" / "probe → no match" /
-		// "probe-endpoints skipped (…)" instead of leaving the operator
-		// to wonder whether the probe ran. Grep for the stderr lines the
-		// CLI emits in runProbe.
-		summary := ""
-		if wantProbe {
-			for _, line := range strings.Split(stderr.String(), "\n") {
-				line = strings.TrimSpace(line)
-				if strings.Contains(line, "probe →") || strings.Contains(line, "probe-endpoints skipped") {
-					if summary != "" {
-						summary += "\n"
-					}
-					summary += line
-				}
-			}
-			if summary == "" {
-				summary = "(no probe output — flag may be unsupported in this dop version)"
-			}
-		}
-		return integrationAddedMsg{probeSummary: summary}
-	}
-}
-
-func (v *addIntegrationView) View() string {
-	var b strings.Builder
-	// rc7n — title + subtitle flip when operator picked an existing
-	// integration from the step-0 picker: the flow becomes "add
-	// credential to <service>" and the integration-level rows are
-	// locked for display only.
-	if v.existingIntegration {
-		b.WriteString(titleSt.Render("Add credential to "+v.nameBuf.String()) + "\n")
-		b.WriteString(mutedSt.Render("Integration-level fields (kind, description, URL) are locked for view.") + "\n")
-		b.WriteString(mutedSt.Render("To change those, use List → Integrations → "+v.nameBuf.String()+" → Edit.") + "\n\n")
-	} else {
-		b.WriteString(titleSt.Render("Add integration") + "\n")
-		b.WriteString(mutedSt.Render("Register a service and one credential for it. You can add more credentials later from the integration list.") + "\n\n")
-	}
-
-	if v.step == integAddStepDone {
-		b.WriteString(okSt.Render("✓ integration saved") + "\n\n")
-		// v1.13.0-rc17 — surface probe outcome when the operator asked
-		// for one. Operator can see immediately whether the probe found
-		// an endpoints doc or skipped for lack of base URL.
-		if v.probeSummary != "" {
-			b.WriteString(mutedSt.Render("Probe result:") + "\n")
-			for _, line := range strings.Split(v.probeSummary, "\n") {
-				b.WriteString("  " + mutedSt.Render(line) + "\n")
-			}
-			b.WriteString("\n")
-		}
-		b.WriteString(mutedSt.Render("Next: create a grant that binds a name (like `notion.read`) to this credential,") + "\n")
-		b.WriteString(mutedSt.Render("then `Issue token` to hand a bearer to your agent.") + "\n\n")
-		b.WriteString(helpSt.Render("any key to return"))
-		return b.String()
-	}
-
-	// v1.13.0-rc6 — step 0 is a service picker when serviceMode is on.
-	// Picks either "+ Create new…" (drops into text input) or an
-	// existing service (skips to credential name).
-	if v.step == integAddStepName && v.serviceMode {
-		b.WriteString(cursorSt.Render("Service") + "\n\n")
-		entries := append([]string{"+ Create new service…"}, v.existingServices...)
-		for i, label := range entries {
-			prefix := "    "
-			styled := label
-			if i == v.servicePickCursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				styled = cursorSt.Render(label)
-			}
-			if i == 0 {
-				b.WriteString(prefix + styled + "\n")
-				if len(v.existingServices) > 0 {
-					b.WriteString("    " + mutedSt.Render("— or pick an existing service below to add another credential —") + "\n\n")
-				} else {
-					b.WriteString("\n")
-				}
-				continue
-			}
-			b.WriteString(prefix + styled + "\n")
-		}
-		b.WriteString("\n" + helpSt.Render("↑↓ move | enter select | esc cancel"))
-		if v.err != "" {
-			b.WriteString("\n" + failSt.Render(v.err))
-		}
-		return b.String()
-	}
-
-	// Rows mirror the Issue Token style — all visible at once, active
-	// row highlighted, past rows shown as filled-in.
-	// v1.13.0-rc6 — the service-name hint also previews the normalized
-	// key that will actually be stored (auto-normalize is silent per
-	// the design spec; preview surfaces WHAT will be saved before you
-	// save it).
-	nameHint := "e.g. notion, github, db-primary"
-	if trimmed := strings.TrimSpace(v.nameBuf.String()); trimmed != "" {
-		norm := vault.NormalizeIntegrationName(trimmed)
-		if norm != trimmed {
-			nameHint = fmt.Sprintf("will be saved as %q (auto-normalized)", norm)
-		}
-	}
-	// v1.13.0-rc12 — Protection row value: show the picked label.
-	protectionLabel := "default"
-	if v.protectedChoice {
-		protectionLabel = "protected (owner-locked)"
-	}
-	// v1.13.0-rc13 — kind-adaptive KindSlot row label/hint.
-	kindSlotLbl, kindSlotHint := kindSlotLabel(v.kindChoice)
-	// v1.13.0-rc15 — Probe row value.
-	probeLabel := "no"
-	if v.probeChoice {
-		probeLabel = "yes"
-	}
-	rows := []struct {
-		label string
-		value string
-		hint  string
-		mask  bool
-	}{
-		{"Service name", v.nameBuf.String(), nameHint, false},
-		{"Kind", v.kindChoice, "api · cli · mcp · other — shapes what the agent sees", false},
-		{"What it's for", v.descBuf.String(), "optional — a one-line description", false},
-		{kindSlotLbl, v.urlBuf.String(), kindSlotHint, false},
-		{"Scan endpoints doc", probeLabel, "only applies when kind=api or kind=mcp with a URL set", false},
-		{"Credential name", v.credBuf.String(), "prefilled from the service name — edit if you'll have multiple credentials", false},
-		{"Credential value", v.valueBuf.String(), "the actual API key / token / password", true},
-		{"What it can do", v.scopeBuf.String(), "optional — e.g. read-only on /docs", false},
-		{"Protection", protectionLabel, "default = any admin can modify; protected = only you (requires passphrase)", false},
-		{"Passphrase", strings.Repeat("•", v.passphraseBuf.Len()), "your admin approval passphrase", true},
-		{"Advanced", advancedRowValue(v.advancedChoice), "optional extra fields (CLI auth env, server root, allowed scope, etc.) · default no", false},
-	}
-	for i, r := range rows {
-		// v1.13.0-rc7 — hide the scope row inline when the preset
-		// picker will render below (otherwise the operator sees both
-		// an empty "What it can do:" row AND the picker, which is
-		// confusing).
-		if i == integAddStepScope && v.step == integAddStepScope && v.scopeMode {
-			continue
-		}
-		// v1.13.0-rc12 — hide the Protection row inline when the
-		// preset picker renders below. Also hide the Passphrase row
-		// entirely until protection = protected (otherwise it clutters
-		// the common path).
-		if i == integAddStepProtect && v.step == integAddStepProtect {
-			continue
-		}
-		if i == integAddStepPassphrase && !v.protectedChoice {
-			continue
-		}
-		// v1.13.0-rc13 — hide the Kind row inline when the Kind
-		// preset picker renders below. Hide the KindSlot row when
-		// kind=other (no kind-specific field for that kind).
-		if i == integAddStepKind && v.step == integAddStepKind {
-			continue
-		}
-		if i == integAddStepKindSlot && v.kindChoice == vault.IntegrationKindOther {
-			continue
-		}
-		// v1.13.0-rc15 — hide the Probe row inline when its picker
-		// renders below, and skip it entirely when the probe isn't
-		// applicable to this kind+URL combination.
-		if i == integAddStepProbe && v.step == integAddStepProbe {
-			continue
-		}
-		if i == integAddStepProbe && !probeApplicable(v.kindChoice, v.urlBuf.String()) {
-			continue
-		}
-		// v1.13.0-rc17 — hide the Advanced row inline when the yes/no
-		// picker or the sub-form is rendering below.
-		if i == integAddStepAdvanced && (v.step == integAddStepAdvanced || v.step == integAddStepAdvFields) {
-			continue
-		}
-		style := mutedSt
-		if i == v.step {
-			style = cursorSt
-		}
-		// rc7n — prefix integration-level rows with 🔒 when the operator
-		// picked an existing integration. Visual signal that the field
-		// is view-only; nav-blocked in the shift+tab handler.
-		rowPrefix := ""
-		if v.existingIntegration && i >= integAddStepName && i < integAddStepCred {
-			rowPrefix = mutedSt.Render("🔒 ")
-		}
-		b.WriteString(rowPrefix + style.Render(r.label) + ": ")
-		// rc6f — on the active text-field row, split the buffer at the
-		// cursor so the caret glyph renders in place. Non-text rows
-		// (pickers, status) still use the pre-rendered r.value.
-		if i == v.step {
-			if buf := v.curBuf(); buf != nil && i >= integAddStepName && i <= integAddStepScope {
-				before, after := buf.Split()
-				if r.mask {
-					before, after = buf.SplitMasked("•")
-				}
-				b.WriteString(before + cursorSt.Render("▎") + after)
-			} else if i == integAddStepPassphrase {
-				before, after := v.passphraseBuf.SplitMasked("•")
-				b.WriteString(before + cursorSt.Render("▎") + after)
-			} else {
-				b.WriteString(r.value + cursorSt.Render("▎"))
-			}
-		} else {
-			if r.mask {
-				b.WriteString(strings.Repeat("•", len(r.value)))
-			} else {
-				b.WriteString(r.value)
-			}
-		}
-		b.WriteString("\n")
-		if i == v.step && r.hint != "" {
-			b.WriteString("    " + mutedSt.Render(r.hint) + "\n")
-		}
-	}
-
-	// v1.13.0-rc12 — Protection preset picker on step 7.
-	if v.step == integAddStepProtect {
-		b.WriteString("\n" + cursorSt.Render("Protection") + "\n")
-		for i, p := range protectionPresets {
-			prefix := "    "
-			label := p.label
-			if i == v.protectPickCursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				label = cursorSt.Render(p.label)
-			}
-			b.WriteString(prefix + label + "    " + mutedSt.Render(p.hint) + "\n")
-		}
-	}
-
-	// v1.13.0-rc13 — Kind preset picker on step 1.
-	if v.step == integAddStepKind {
-		b.WriteString("\n" + cursorSt.Render("Kind") + "\n")
-		for i, p := range kindPresets {
-			prefix := "    "
-			label := p.label
-			if i == v.kindPickCursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				label = cursorSt.Render(p.label)
-			}
-			b.WriteString(prefix + label + "    " + mutedSt.Render(p.hint) + "\n")
-		}
-	}
-
-	// v1.13.0-rc17 — Advanced yes/no picker on step 10.
-	if v.step == integAddStepAdvanced {
-		b.WriteString("\n" + cursorSt.Render("Advanced optional fields?") + "\n")
-		opts := []struct {
-			label string
-			hint  string
-		}{
-			{"no", "default — skip to Save"},
-			{"yes", "open a sub-form of CLI auth env, server root, allowed scope, auth style, etc."},
-		}
-		for i, o := range opts {
-			prefix := "    "
-			label := o.label
-			if i == v.advancedPickCursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				label = cursorSt.Render(o.label)
-			}
-			b.WriteString(prefix + label + "    " + mutedSt.Render(o.hint) + "\n")
-		}
-	}
-
-	// v1.13.0-rc17 — Advanced sub-form on step 11.
-	if v.step == integAddStepAdvFields {
-		b.WriteString("\n" + cursorSt.Render("Advanced fields") + mutedSt.Render("  (tab/↑↓ move · enter next/save · esc back · any blank = skip)") + "\n")
-		fields := advFieldsForKind(v.kindChoice)
-		for i, idx := range fields {
-			spec := advFieldSpecs[idx]
-			buf := &v.advBufs[spec.bufIdx]
-			style := mutedSt
-			if i == v.advFieldIdx {
-				style = cursorSt
-			}
-			if i == v.advFieldIdx {
-				before, after := buf.Split()
-				b.WriteString(style.Render(spec.label) + ": " + before + cursorSt.Render("▎") + after)
-			} else {
-				b.WriteString(style.Render(spec.label) + ": " + buf.String())
-			}
-			b.WriteString("\n")
-			if i == v.advFieldIdx {
-				b.WriteString("    " + mutedSt.Render(spec.hint) + "\n")
-			}
-		}
-	}
-
-	// v1.13.0-rc15 — Probe preset picker on step 4.
-	if v.step == integAddStepProbe {
-		b.WriteString("\n" + cursorSt.Render("Scan endpoints doc") + "\n")
-		for i, p := range probePresets {
-			prefix := "    "
-			label := p.label
-			if i == v.probePickCursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				label = cursorSt.Render(p.label)
-			}
-			b.WriteString(prefix + label + "    " + mutedSt.Render(p.hint) + "\n")
-		}
-	}
-
-	// v1.13.0-rc7 — scope-note preset picker on step 5.
-	if v.step == integAddStepScope && v.scopeMode {
-		b.WriteString("\n" + cursorSt.Render("What it can do") + "\n")
-		for i, p := range scopePresets {
-			prefix := "    "
-			label := p.label
-			if i == v.scopePickCursor {
-				prefix = "  " + cursorSt.Render("➤ ")
-				label = cursorSt.Render(p.label)
-			}
-			b.WriteString(prefix + label + "\n")
-		}
-	}
-
-	// Save row.
-	b.WriteString("\n")
-	saveStyle := mutedSt
-	if v.step == integAddStepSave {
-		saveStyle = cursorSt
-	}
-	b.WriteString("    " + saveStyle.Render("[ Save ]"))
-	if v.step == integAddStepSave {
-		b.WriteString("   " + mutedSt.Render("← press enter to save"))
-	}
-	b.WriteString("\n")
-
-	if v.step == integAddStepRun {
-		b.WriteString("\n" + mutedSt.Render("saving…") + "\n")
-	}
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err) + "\n")
-	}
-
-	b.WriteString("\n" + helpSt.Render("enter next | tab/↑↓ jump between rows | esc cancel"))
-	return b.String()
-}
-
-// ---------- Add grant ----------
-
-type addGrantView struct {
-	client *admin.Client
-	paths  *config.Paths
-
-	step        int
-	idBuf       strings.Builder
-	integration string
-	token       string
-	envBuf      strings.Builder
-	// v1.13.0-rc5 — parity with `dop grant add` (and with grant edit
-	// in the TUI): new fields for projects + tags, CSV in the TUI
-	// (comma-separated), split by splitCSV at save time.
-	projectsBuf strings.Builder
-	tagsBuf     strings.Builder
-
-	integrations []string           // list of integration names
-	tokensByInt  map[string][]string // upstream tokens per integration
-	cursor       int
-
-	err   string
-	flash string
-	done  bool
-}
-
-func newAddGrantView(c *admin.Client, p *config.Paths) *addGrantView {
-	v := &addGrantView{client: c, paths: p, tokensByInt: map[string][]string{}}
-	v.loadIntegrations()
-	return v
-}
-func (v *addGrantView) Init() tea.Cmd { return nil }
-func (v *addGrantView) Done() bool    { return v.done }
-func (v *addGrantView) Flash() string { return v.flash }
-
-func (v *addGrantView) loadIntegrations() {
-	// Read the vault to surface integrations + upstream tokens.
-	if v.client == nil {
-		return
-	}
-	vlt, _, err := loadVaultForListing(v.client, v.paths)
-	if err != nil {
-		return
-	}
-	for name, integ := range vlt.Integrations {
-		v.integrations = append(v.integrations, name)
-		for tn := range integ.Tokens {
-			v.tokensByInt[name] = append(v.tokensByInt[name], tn)
-		}
-		sort.Strings(v.tokensByInt[name])
-	}
-	sort.Strings(v.integrations)
-}
-
-type grantAddedMsg struct{ err string }
-
-func (v *addGrantView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch mm := msg.(type) {
-	case grantAddedMsg:
-		if mm.err != "" {
-			v.err = mm.err
-			// Back to tags step so operator can review before retry.
-			v.step = 5
-			return v, nil
-		}
-		v.flash = "grant saved · synced with team"
-		v.done = true
-		return v, nil
-	case tea.KeyMsg:
-		switch mm.String() {
-		case "esc", "ctrl+c":
-			v.done = true
-			return v, nil
-		}
-		switch v.step {
-		case 0:
-			// grant id
-			switch mm.String() {
-			case "enter":
-				if strings.TrimSpace(v.idBuf.String()) == "" {
-					v.err = "grant id required"
-					return v, nil
-				}
-				v.err = ""
-				v.step = 1
-				v.cursor = 0
-			case "backspace":
-				s := v.idBuf.String()
-				if len(s) > 0 {
-					v.idBuf.Reset()
-					v.idBuf.WriteString(s[:len(s)-1])
-				}
-			default:
-				if len(mm.Runes) > 0 {
-					v.idBuf.WriteString(string(mm.Runes))
-				}
-			}
-		case 1:
-			// pick integration
-			switch mm.String() {
-			case "up", "k":
-				if v.cursor > 0 {
-					v.cursor--
-				}
-			case "down", "j":
-				if v.cursor < len(v.integrations)-1 {
-					v.cursor++
-				}
-			case "enter":
-				if len(v.integrations) == 0 {
-					v.err = "no integrations exist yet — add one first"
-					return v, nil
-				}
-				v.integration = v.integrations[v.cursor]
-				v.cursor = 0
-				v.step = 2
-			}
-		case 2:
-			// pick token within integration
-			toks := v.tokensByInt[v.integration]
-			switch mm.String() {
-			case "up", "k":
-				if v.cursor > 0 {
-					v.cursor--
-				}
-			case "down", "j":
-				if v.cursor < len(toks)-1 {
-					v.cursor++
-				}
-			case "enter":
-				if len(toks) == 0 {
-					v.err = "integration has no tokens"
-					return v, nil
-				}
-				v.token = toks[v.cursor]
-				v.envBuf.Reset()
-				v.envBuf.WriteString(strings.ToUpper(v.integration))
-				v.step = 3
-			}
-		case 3:
-			// env prefix (optional — empty = auto-derive + sanitize)
-			switch mm.String() {
-			case "enter":
-				v.step = 4
-			case "backspace":
-				s := v.envBuf.String()
-				if len(s) > 0 {
-					v.envBuf.Reset()
-					v.envBuf.WriteString(s[:len(s)-1])
-				}
-			default:
-				if len(mm.Runes) > 0 {
-					v.envBuf.WriteString(string(mm.Runes))
-				}
-			}
-		case 4:
-			// v1.13.0-rc5 — projects (CSV, optional)
-			switch mm.String() {
-			case "enter":
-				v.step = 5
-			case "backspace":
-				s := v.projectsBuf.String()
-				if len(s) > 0 {
-					v.projectsBuf.Reset()
-					v.projectsBuf.WriteString(s[:len(s)-1])
-				}
-			default:
-				if len(mm.Runes) > 0 {
-					v.projectsBuf.WriteString(string(mm.Runes))
-				}
-			}
-		case 5:
-			// v1.13.0-rc5 — tags (CSV, optional) + submit
-			switch mm.String() {
-			case "enter":
-				v.step = 6
-				return v, v.save()
-			case "backspace":
-				s := v.tagsBuf.String()
-				if len(s) > 0 {
-					v.tagsBuf.Reset()
-					v.tagsBuf.WriteString(s[:len(s)-1])
-				}
-			default:
-				if len(mm.Runes) > 0 {
-					v.tagsBuf.WriteString(string(mm.Runes))
-				}
-			}
-		}
-	}
-	return v, nil
-}
-
-func (v *addGrantView) save() tea.Cmd {
-	id := strings.TrimSpace(v.idBuf.String())
-	env := strings.TrimSpace(v.envBuf.String())
-	projects := strings.TrimSpace(v.projectsBuf.String())
-	tags := strings.TrimSpace(v.tagsBuf.String())
-	integ := v.integration
-	tok := v.token
-	return func() tea.Msg {
-		self, _ := os.Executable()
-		args := []string{"grant", "add",
-			"--id", id,
-			"--integration", integ,
-			"--token", tok}
-		// v1.13.0-rc4 — only pass --env-prefix when the user supplied
-		// one explicitly. Pre-rc4 the TUI auto-filled with
-		// strings.ToUpper(integration) which left spaces intact
-		// ("Boiler Pensieve" → "BOILER PENSIEVE" → literal space in
-		// the resulting env var name — invalid shell identifier).
-		// With empty env_prefix the grant falls through to
-		// EffectivePrefix() which runs SanitizeEnvKey on the
-		// auto-derived <INTEGRATION>_<TOKEN>.
-		if env != "" {
-			args = append(args, "--env-prefix", env)
-		}
-		// v1.13.0-rc5 — parity with CLI/edit: projects + tags as CSV.
-		if projects != "" {
-			args = append(args, "--projects", projects)
-		}
-		if tags != "" {
-			args = append(args, "--tags", tags)
-		}
-		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return grantAddedMsg{err: strings.TrimSpace(stderr.String())}
-		}
-		return grantAddedMsg{}
-	}
-}
-
-func (v *addGrantView) View() string {
-	var b strings.Builder
-	b.WriteString(titleSt.Render("Add grant") + "\n\n")
-	switch v.step {
-	case 0:
-		b.WriteString(cursorSt.Render("Grant id (e.g. notion.read)") + ":\n")
-		b.WriteString("  " + v.idBuf.String() + cursorSt.Render("▎") + "\n")
-	case 1:
-		b.WriteString(cursorSt.Render("Pick integration") + ":\n\n")
-		if len(v.integrations) == 0 {
-			b.WriteString(mutedSt.Render("  (no integrations — add one first)") + "\n")
-		}
-		for i, name := range v.integrations {
-			prefix := "  "
-			if i == v.cursor {
-				prefix = cursorSt.Render("➤ ")
-			}
-			b.WriteString(prefix + name + "\n")
-		}
-	case 2:
-		b.WriteString(cursorSt.Render("Pick token from "+v.integration) + ":\n\n")
-		toks := v.tokensByInt[v.integration]
-		if len(toks) == 0 {
-			b.WriteString(mutedSt.Render("  (this integration has no upstream tokens)") + "\n")
-		}
-		for i, tn := range toks {
-			prefix := "  "
-			if i == v.cursor {
-				prefix = cursorSt.Render("➤ ")
-			}
-			b.WriteString(prefix + tn + "\n")
-		}
-	case 3:
-		b.WriteString(mutedSt.Render("Grant id:      "+v.idBuf.String()) + "\n")
-		b.WriteString(mutedSt.Render("Integration:   "+v.integration) + "\n")
-		b.WriteString(mutedSt.Render("Token:         "+v.token) + "\n\n")
-		b.WriteString(cursorSt.Render("Env prefix (optional — leave empty for auto)") + ":\n")
-		b.WriteString("  " + v.envBuf.String() + cursorSt.Render("▎") + "\n")
-	case 4:
-		// v1.13.0-rc5 — projects (CSV, optional)
-		b.WriteString(mutedSt.Render("Grant id:      "+v.idBuf.String()) + "\n")
-		b.WriteString(mutedSt.Render("Integration:   "+v.integration) + "\n")
-		b.WriteString(mutedSt.Render("Token:         "+v.token) + "\n")
-		b.WriteString(mutedSt.Render("Env prefix:    "+displayOr(v.envBuf.String(), "(auto)")) + "\n\n")
-		b.WriteString(cursorSt.Render("Projects (comma-separated, optional)") + ":\n")
-		b.WriteString("  " + v.projectsBuf.String() + cursorSt.Render("▎") + "\n")
-	case 5:
-		// v1.13.0-rc5 — tags (CSV, optional) + confirm
-		b.WriteString(mutedSt.Render("Grant id:      "+v.idBuf.String()) + "\n")
-		b.WriteString(mutedSt.Render("Integration:   "+v.integration) + "\n")
-		b.WriteString(mutedSt.Render("Token:         "+v.token) + "\n")
-		b.WriteString(mutedSt.Render("Env prefix:    "+displayOr(v.envBuf.String(), "(auto)")) + "\n")
-		b.WriteString(mutedSt.Render("Projects:      "+displayOr(v.projectsBuf.String(), "(none)")) + "\n\n")
-		b.WriteString(cursorSt.Render("Tags (comma-separated, optional) · enter saves") + ":\n")
-		b.WriteString("  " + v.tagsBuf.String() + cursorSt.Render("▎") + "\n")
-	case 6:
-		b.WriteString("saving…\n")
-	}
-	b.WriteString("\n" + helpSt.Render("↑↓ move | enter next | esc cancel"))
-	if v.err != "" {
-		b.WriteString("\n" + failSt.Render(v.err))
-	}
-	return b.String()
+// edit hands one key to a form input. Focus first: textinput ignores
+// keys while blurred. ponytail: returned Cmd dropped (only paste/blink).
+func edit(t *textinput.Model, mm tea.KeyMsg) {
+	t.Focus()
+	*t, _ = t.Update(mm)
 }
 
 // displayOr returns s unless it's empty, in which case fallback is used

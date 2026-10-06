@@ -267,7 +267,7 @@ func runAgentMigrate(args []string) int {
 		// retry will find it via agentkey.Open and re-sign.
 		return 1
 	}
-	v.Capabilities[capIDHex] = capability2VaultCapability(rec)
+	putCapability(v, capIDHex, rec)
 
 	if err := writeRecordSidecar(paths, rec); err != nil {
 		fmt.Fprintf(os.Stderr, "dop agent migrate: write sidecar: %v\n", err)

@@ -26,14 +26,15 @@ func NewClient(sockPath string) *Client {
 	return &Client{sockPath: sockPath}
 }
 
-// SessionActive returns true if the socket exists AND a status RPC
-// succeeds. False for "no session" or "dead socket".
+// SessionActive returns true if the socket exists AND the daemon
+// reports an unlocked session. False for "no session", "dead socket"
+// or a daemon that answers but is locked.
 func (c *Client) SessionActive() bool {
 	if _, err := os.Stat(c.sockPath); err != nil {
 		return false
 	}
-	_, err := c.Status()
-	return err == nil
+	st, err := c.Status()
+	return err == nil && st.Unlocked
 }
 
 func (c *Client) call(req Request) (Response, error) {
@@ -71,6 +72,13 @@ func (c *Client) Status() (*StatusResp, error) {
 // KeepAlive bumps the idle timer.
 func (c *Client) KeepAlive() error {
 	_, err := c.call(Request{Op: OpKeepAlive})
+	return err
+}
+
+// SetTTL changes the running session's idle and absolute TTLs.
+func (c *Client) SetTTL(idle, abs time.Duration) error {
+	req, _ := json.Marshal(SetTTLReq{IdleTTLSeconds: int64(idle / time.Second), AbsTTLSeconds: int64(abs / time.Second)})
+	_, err := c.call(Request{Op: OpSetTTL, Data: req})
 	return err
 }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -297,6 +298,35 @@ func TestSessionActive_Missing(t *testing.T) {
 	}
 }
 
+func TestSessionActive_Locked(t *testing.T) {
+	sock := shortSock(t)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			var req Request
+			_ = ReadMessage(c, &req)
+			data, _ := json.Marshal(StatusResp{Unlocked: false})
+			_ = WriteMessage(c, Response{OK: true, Data: data})
+			c.Close()
+		}
+	}()
+	c := NewClient(sock)
+	if _, err := c.Status(); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if c.SessionActive() {
+		t.Fatal("daemon answers but is locked: expected inactive")
+	}
+}
+
 // shortSock produces a unix socket path guaranteed to fit within
 // macOS's SUN_PATH_MAX (~104 bytes). t.TempDir() paths use the verbose
 // test name and blow past the limit for longer test names.
@@ -310,3 +340,28 @@ func shortSock(t *testing.T) string {
 	return filepath.Join(d, "s")
 }
 
+
+func TestSession_SetTTL(t *testing.T) {
+	sock := shortSock(t)
+	k, _ := Generate()
+	s, err := StartSession(SessionOpts{Keys: k, SockPath: sock, IdleTTL: 30 * time.Second, AbsTTL: 60 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Shutdown)
+	c := NewClient(sock)
+	century := 100 * 365 * 24 * time.Hour
+	if err := c.SetTTL(century, century); err != nil {
+		t.Fatal(err)
+	}
+	st, err := c.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.IdleTTLSeconds != int64(century.Seconds()) || st.AbsTTLSeconds != int64(century.Seconds()) {
+		t.Fatalf("ttl not applied: %+v", st)
+	}
+	if err := c.SetTTL(0, time.Hour); err == nil {
+		t.Fatal("zero idle accepted")
+	}
+}
