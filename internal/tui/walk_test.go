@@ -1,0 +1,1562 @@
+// Screen-walk harness: drives the root model in-process with real
+// tea.KeyMsg values and dumps every reachable screen as raw ANSI so an
+// external tool can rasterize a gallery. Opt-in:
+//
+//	DOP_TUI_WALK=<outdir> go test ./internal/tui -run TestWalkScreens -v
+//
+// Output: <outdir>/<NNN>-<slug>-<cols>x<rows>.ans (exactly View()) plus
+// <outdir>/index.txt (filename<TAB>title<TAB>key path<TAB>tags). Tags:
+// `key` (best example of a pattern), `flow:<name>`, `edge`.
+//
+// Key paths are the contract for the HTML lab, which replays them: list
+// and menu rows are reached with down×k + enter (digits only where the
+// menu is numbered), and every flow starts from launch.
+//
+// Nothing here runs a subprocess: every tea.Cmd returned by Update is
+// dropped, PATH points at a stub dir (so View()-time pbcopy calls fail
+// lookup), and async results are injected as the views' own message
+// types — marked `direct:` in the key-path column.
+
+package tui
+
+import (
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
+
+	"github.com/fray/dop/internal/admin"
+	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/pendingclaim"
+)
+
+const walkPubkey = "9f2c4e6a8b0d1f3e5a7c9e1b3d5f7a9c2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a1b"
+
+// walkVault — plaintext fixture (no `sops:` key), so the views'
+// loaders read it straight off disk without the daemon.
+var walkVault = `schema_version: "1"
+admins:
+  cam:
+    age_recipient: age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3290gq
+    ed25519_pubkey: ` + walkPubkey + `
+    added_at: 2026-01-12T09:30:00Z
+    note: MacBook Pro (primary)
+  alex:
+    age_recipient: age1zvkyg2lqzraa2lnjvqej32nkuu0ues2s82hzrye869xeexvn73equnujwj
+    ed25519_pubkey: 1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809
+    added_at: 2026-03-02T14:00:00Z
+integrations:
+  notion:
+    kind: api
+    description: Team wiki + docs space
+    metadata:
+      base_url: https://api.notion.com/v1
+    projects: [docs]
+    tokens:
+      notion:
+        value: secret_ntn_4f8a
+        scope_note: read-only
+      notion-write:
+        value: secret_ntn_9c2d
+        scope_note: read-write
+  github:
+    kind: cli
+    description: GitHub CLI for PRs and issues
+    metadata:
+      cli_cmd: gh
+    tokens:
+      github:
+        value: ghp_walkfixture
+        scope_note: repo
+  linear:
+    kind: mcp
+    metadata:
+      mcp_url: https://mcp.linear.app/sse
+    tokens:
+      linear:
+        value: lin_api_walk
+  acme-internal-billing-reconciliation-service-production-eu-west-1:
+    kind: api
+    description: Billing reconciliation (protected, long name to expose truncation)
+    protected: true
+    owner: ` + walkPubkey + `
+    metadata:
+      base_url: https://billing-reconciliation.internal.acme-corp.example.com/api/v2
+    tokens:
+      service-account-readonly-reporting-credential:
+        value: acme_live_walk
+        scope_note: read-only
+grants:
+  notion-read:
+    integration: notion
+    token: notion
+    projects: [docs]
+    tags: [ro]
+  notion-write:
+    integration: notion
+    token: notion-write
+    env_prefix: NOTION_NOTION # collides with notion-read's default prefix
+    projects: [docs]
+  github:
+    integration: github
+    token: github
+    tags: [ci]
+  linear:
+    integration: linear
+    token: linear
+  acme-billing-reconciliation-readonly-reporting-grant-for-finance-agents:
+    integration: acme-internal-billing-reconciliation-service-production-eu-west-1
+    token: service-account-readonly-reporting-credential
+    protected: true
+    owner: ` + walkPubkey + `
+capabilities:
+  c0a1b2c3d4e5f6a7b8c9d0e1:
+    subject: claude-code-laptop
+    grants: [notion-read, github]
+    created_at: 2026-10-01T10:00:00Z
+    expires_at: 2026-10-08T10:00:00Z
+    generation: 3
+    lookup_id: a1b2c3d4e5f60718293a4b5c
+    issued_by: ` + walkPubkey + `
+    status: active
+    portable_wrapped: YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB3YWxr
+    binding:
+      kind: pin
+      pin_expiry: 2026-10-05T12:00:00Z
+  c1b2c3d4e5f6a7b8c9d0e1f2:
+    subject: codex-ci-runner
+    grants: [github, linear]
+    created_at: 2026-09-20T08:00:00Z
+    expires_at: 9999-12-31T00:00:00Z
+    generation: 3
+    lookup_id: b2c3d4e5f60718293a4b5c6d
+    issued_by: 1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809
+    status: active
+    binding:
+      kind: pubkey
+      key_type: p256
+      pubkey: 04d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4
+      claimed_at: 2026-09-20T08:05:00Z
+  c2c3d4e5f6a7b8c9d0e1f2a3:
+    subject: old-notion-agent
+    grants: [notion-write]
+    created_at: 2026-06-01T08:00:00Z
+    expires_at: 2026-07-01T08:00:00Z
+    generation: 1
+    lookup_id: c3d4e5f60718293a4b5c6d7e
+    issued_by: ` + walkPubkey + `
+    status: revoked
+`
+
+const walkInvite = `{"invite_id":"3f9a0c1d2e4b5a69","name":"alex-laptop","created_at":"2026-10-04T09:00:00Z","expires_at":"2026-10-11T09:00:00Z","created_by_pub":"` + walkPubkey + `","kind":"team_member"}`
+
+// walkVaultMany — the main fixture plus 14 extra active bearers, so the
+// bearer list overflows a 24-row terminal.
+func walkVaultMany() string {
+	var b strings.Builder
+	b.WriteString(walkVault)
+	for i := 1; i <= 14; i++ {
+		fmt.Fprintf(&b, "  %02xd1e2f3a4b5c6d7e8f9a0b1:\n    subject: agent-%02d-nightly-build\n    grants: [github]\n"+
+			"    created_at: 2026-10-01T10:00:00Z\n    expires_at: 2026-10-08T10:00:00Z\n    generation: 1\n"+
+			"    lookup_id: %02xe2f3a4b5c6d7e8f9a0b1\n    issued_by: %s\n    status: active\n", i, i, i, walkPubkey)
+	}
+	return b.String()
+}
+
+const walkVaultEmpty = "schema_version: \"1\"\n"
+
+// walker drives one rootModel and records every dumped screen.
+type walker struct {
+	t     *testing.T
+	out   string
+	paths *config.Paths
+	bin   string
+	m     *rootModel
+	trail []string
+	n     int
+	keyN  int
+	flow  string // current flow: every dump gets a flow:<name> tag
+	seen  map[string]bool
+	index strings.Builder
+	shots []walkShot          // for the connectivity invariant
+	at    map[string]walkShot // user keys → screen recorded there
+}
+
+type walkShot struct{ slug, title, keys string }
+
+// userKeys drops what the lab auto-plays (quoted typed text, direct:*
+// messages) and keeps the keys a user presses.
+func userKeys(trail []string) string {
+	var ks []string
+	for _, k := range trail {
+		if strings.HasPrefix(k, "direct:") || (len(k) > 1 && k[0] == '"') {
+			continue
+		}
+		ks = append(ks, k)
+	}
+	return strings.Join(ks, "\x00")
+}
+
+// reset starts a fresh root model at launch (state comes from the fixture HOME).
+func (w *walker) reset() { w.m = newRootModel(); w.trail = nil }
+
+// keys sends key presses. Before each press, if the current state's
+// user-key path has no recorded screen yet, it is dumped first (named
+// after its predecessor + the key that reached it), so every screen is
+// one key away from another — the lab navigates by replaying paths.
+func (w *walker) keys(ks ...string) {
+	for _, k := range ks {
+		w.fill()
+		_, cmd := w.m.Update(walkKey(k)) // ponytail: Cmd dropped — never executed (except huh's, see pump)
+		w.pump(cmd)
+		if len(k) > 1 && !walkSpecial[k] {
+			k = strconv.Quote(k)
+		}
+		w.trail = append(w.trail, k)
+	}
+}
+
+// line walks a main line: presses keys and records the end state too.
+func (w *walker) line(ks ...string) { w.keys(ks...); w.fill() }
+
+// text types s (any length) as one paste; the lab auto-plays it.
+func (w *walker) text(s string) {
+	w.fill()
+	_, cmd := w.m.Update(walkKey(s))
+	w.pump(cmd)
+	w.trail = append(w.trail, strconv.Quote(s))
+}
+
+// pump delivers the Cmds the issue view's huh.Form navigates with
+// (field/group moves arrive as messages from Cmds).
+// ponytail: only huh's own messages are fed back; a Cmd slower than
+// 50ms (cursor blink ticks) is dropped, and nothing runs once the form
+// has left StateNormal — so the issue subprocess Cmd never executes.
+func (w *walker) pump(cmd tea.Cmd) {
+	iv, ok := w.m.child.(*issueView)
+	if cmd == nil || !ok || iv.form.State != huh.StateNormal {
+		return
+	}
+	ch := make(chan tea.Msg, 1)
+	go func() { ch <- cmd() }()
+	var msg tea.Msg
+	select {
+	case msg = <-ch:
+	case <-time.After(50 * time.Millisecond):
+		return
+	}
+	if v := reflect.ValueOf(msg); v.Kind() == reflect.Slice && v.Type().Elem() == reflect.TypeOf(tea.Cmd(nil)) {
+		for i := 0; i < v.Len(); i++ { // tea.Batch / tea.Sequence
+			w.pump(v.Index(i).Interface().(tea.Cmd))
+		}
+		return
+	}
+	if t := reflect.TypeOf(msg); t == nil || t.PkgPath() != "github.com/charmbracelet/huh" {
+		return
+	}
+	_, next := w.m.Update(msg)
+	w.pump(next)
+}
+
+// fill dumps the current state when no screen sits at its user-key path.
+func (w *walker) fill() {
+	uk := userKeys(w.trail)
+	if uk == "" || w.at[uk].slug != "" {
+		return
+	}
+	i := strings.LastIndex(uk, "\x00")
+	pred, key := "", uk
+	if i >= 0 {
+		pred, key = uk[:i], uk[i+1:]
+	}
+	prev := w.at[pred]
+	if prev.slug == "" {
+		w.t.Fatalf("fill: no screen at predecessor %q", pred)
+	}
+	name := map[string]string{" ": "space", "A": "all"}[key]
+	if name == "" {
+		name = strings.ToLower(key)
+	}
+	slug, n := prev.slug+"-"+name, 1
+	// down down down → base-down, base-down2, base-down3
+	if j := strings.LastIndex(prev.slug, "-"+name); j >= 0 {
+		if c, err := strconv.Atoi(prev.slug[j+len(name)+1:]); err == nil || j+len(name)+1 == len(prev.slug) {
+			if err != nil {
+				c = 1
+			}
+			slug, n = prev.slug[:j]+"-"+name+strconv.Itoa(c+1), c+1
+		}
+	}
+	for w.seen[slug] {
+		n++
+		slug = fmt.Sprintf("%s-%s%d", prev.slug, name, n)
+	}
+	title := prev.title + " · " + name
+	if j := strings.LastIndex(prev.title, " · "+name); j >= 0 && n > 1 && strings.HasPrefix(slug, prev.slug[:strings.LastIndex(prev.slug, "-"+name)]) {
+		title = fmt.Sprintf("%s · %s×%d", prev.title[:j], name, n)
+	}
+	w.dump(slug, title)
+}
+
+// send injects a view's own result message (what the dropped Cmd would return).
+func (w *walker) send(label string, msg tea.Msg) {
+	w.m.Update(msg)
+	w.trail = append(w.trail, "direct:"+label)
+}
+
+// load runs a list view's Init loader inline: fixture vault.yaml + one
+// status RPC to the fake daemon.
+func (w *walker) load() {
+	l, ok := w.m.child.(interface{ load() tea.Msg })
+	if !ok {
+		w.t.Fatalf("child %T has no load()", w.m.child)
+	}
+	w.send("load", l.load())
+}
+
+func (w *walker) dump(slug, title string, tags ...string) {
+	if w.seen[slug] {
+		w.t.Fatalf("duplicate slug %q", slug)
+	}
+	w.seen[slug] = true
+	w.n++
+	if w.flow != "" {
+		tags = append(tags, "flow:"+w.flow)
+	}
+	for _, tg := range tags {
+		if tg == "key" {
+			w.keyN++
+		}
+	}
+	sh := walkShot{slug, title, userKeys(w.trail)}
+	w.shots = append(w.shots, sh)
+	if w.at[sh.keys].slug == "" {
+		w.at[sh.keys] = sh
+	}
+	path := strings.Join(w.trail, " ")
+	if path == "" {
+		path = "(launch)"
+	}
+	for _, sz := range [][2]int{{80, 24}, {120, 40}} {
+		w.m.Update(tea.WindowSizeMsg{Width: sz[0], Height: sz[1]})
+		name := fmt.Sprintf("%03d-%s-%dx%d.ans", w.n, slug, sz[0], sz[1])
+		must(w.t, os.WriteFile(filepath.Join(w.out, name), []byte(w.m.View()), 0o644))
+		fmt.Fprintf(&w.index, "%s\t%s\t%s\t%s\n", name, title, path, strings.Join(tags, " "))
+	}
+}
+
+func (w *walker) writeVault(body string) {
+	must(w.t, os.WriteFile(filepath.Join(w.paths.Vault, "vault.yaml"), []byte(body), 0o600))
+}
+
+func (w *walker) inviteFile() string {
+	return filepath.Join(w.paths.Vault, "pending-admin-invites", "3f9a0c1d2e4b5a69.invite.json")
+}
+
+func TestWalkScreens(t *testing.T) {
+	out := os.Getenv("DOP_TUI_WALK")
+	if out == "" {
+		t.Skip("set DOP_TUI_WALK=<outdir> to dump every TUI screen")
+	}
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	must(t, os.MkdirAll(out, 0o755))
+
+	// ponytail: fixture HOME lives in /tmp, not under outdir — the unix
+	// socket path ($HOME/Library/Application Support/dop/admin.sock) blows
+	// past the 104-byte sun_path limit under long outdirs. Removed on exit.
+	home, err := os.MkdirTemp("/tmp", "dopwalk")
+	must(t, err)
+	t.Cleanup(func() { os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config")) // linux
+	// Stub PATH: doctor's LookPath finds sops/git, pbcopy/xclip are absent
+	// so copyToClipboard (called from View!) can't spawn anything.
+	bin := filepath.Join(home, "bin")
+	must(t, os.MkdirAll(bin, 0o755))
+	for _, b := range []string{"sops", "git"} {
+		must(t, os.WriteFile(filepath.Join(bin, b), nil, 0o755))
+	}
+	t.Setenv("PATH", bin)
+
+	paths, err := config.Resolve()
+	must(t, err)
+	must(t, os.MkdirAll(paths.KeysDir, 0o700))
+
+	w := &walker{t: t, out: out, paths: paths, bin: bin, seen: map[string]bool{}, at: map[string]walkShot{}}
+
+	// The walk reads like a script: each flow starts from launch (reset)
+	// and reaches its screens the way a user does.
+	walkSetup(w) // no admin key, no vault, no daemon
+	walkLogin(w) // key on disk → login → daemon up → attach vault
+	walkMenu(w)  // full admin: unlocked + vault
+	walkIntegrationAdd(w)
+	walkGrantAdd(w)
+	walkIssue(w)
+	walkInvites(w)
+	walkIntegrations(w)
+	walkGrants(w)
+	walkBearers(w)
+	walkTeam(w)
+	walkRemove(w)
+	walkVaultOps(w)
+	walkMore(w)
+	walkEdge(w)
+	walkPending(w) // last: the claim banner sticks to every later menu
+
+	must(t, os.WriteFile(filepath.Join(out, "index.txt"), []byte(w.index.String()), 0o644))
+
+	// Sanity: colour forced, enough screens.
+	b, err := os.ReadFile(filepath.Join(out, "001-menu-fresh-80x24.ans"))
+	must(t, err)
+	if !strings.Contains(string(b), "\x1b[") {
+		t.Errorf("dumps carry no ANSI escapes — colour profile not forced")
+	}
+	if w.n < 100 {
+		t.Errorf("%d screens dumped, want >= 100", w.n)
+	}
+	// Connectivity: the lab navigates by replaying key paths, so every
+	// screen must be another screen's user keys + exactly one key (or a
+	// launch screen with no user keys).
+	have := map[string]bool{}
+	for _, sh := range w.shots {
+		have[sh.keys] = true
+	}
+	for _, sh := range w.shots {
+		if sh.keys == "" {
+			continue
+		}
+		pred := ""
+		if i := strings.LastIndex(sh.keys, "\x00"); i >= 0 {
+			pred = sh.keys[:i]
+		}
+		if !have[pred] {
+			t.Errorf("unconnected %s: no screen at %q", sh.slug, strings.ReplaceAll(pred, "\x00", " "))
+		}
+	}
+	t.Logf("dumped %d screens × 2 sizes (%d key) to %s", w.n, w.keyN, out)
+}
+
+// ── setup: fresh install (no admin key, no vault, no daemon) ──
+func walkSetup(w *walker) {
+	w.flow = "setup"
+	w.reset()
+	w.dump("menu-fresh", "Menu · fresh install · cursor on Setup admin", "key")
+	for _, r := range []string{"Attach vault", "Join existing vault", "Doctor", "Uninstall", "Quit"} {
+		w.keys("down")
+		w.dump("menu-fresh-"+strings.ToLower(strings.Fields(r)[0]), "Menu · fresh install · cursor on "+r)
+	}
+
+	// Setup admin: 4 passphrase steps, review, running, harness
+	w.reset()
+	w.keys("enter")
+	w.dump("setup-admin-empty", "Setup admin · 1 of 4 · admin passphrase empty")
+	w.keys("?")
+	w.dump("setup-admin-help", "Setup admin · expanded help")
+	w.reset()
+	w.keys("enter", "enter")
+	w.dump("setup-admin-required", "Setup admin · empty passphrase refused", "edge")
+	w.keys("hunter2", "enter")
+	w.dump("setup-admin-too-short", "Setup admin · admin passphrase too short", "edge")
+	w.text("2")
+	w.dump("setup-admin-pass", "Setup admin · admin passphrase typed (masked)")
+	w.keys("enter")
+	w.dump("setup-admin-confirm", "Setup admin · 2 of 4 · confirm admin passphrase")
+	w.keys("hunter2x", "enter")
+	w.dump("setup-admin-mismatch", "Setup admin · confirmation mismatch", "key", "edge")
+	w.keys("hunter22", "enter")
+	w.dump("setup-admin-approval", "Setup admin · 3 of 4 · approval passphrase")
+	w.keys("battery", "enter")
+	w.dump("setup-admin-approval-short", "Setup admin · approval passphrase too short", "edge")
+	w.keys("-staple", "enter")
+	w.dump("setup-admin-approval-confirm", "Setup admin · 4 of 4 · confirm approval passphrase")
+	w.keys("battery-staple")
+	w.dump("setup-admin-filled", "Setup admin · last step filled")
+	w.keys("enter")
+	w.dump("setup-admin-review", "Setup admin · review", "key")
+	w.keys("enter")
+	w.dump("setup-admin-running", "Setup admin · generating keys")
+	w.send("setupInitDone", setupInitDone{pass: "hunter22"})
+	w.dump("setup-admin-login", "Setup admin · signing in")
+	w.send("setupLoginDone", setupLoginDone{})
+	w.dump("setup-admin-harness", "Setup admin · harness picker", "key")
+	w.keys("down")
+	w.dump("setup-admin-harness-codex", "Setup admin · harness picker · cursor on Codex")
+	w.keys("enter")
+	w.dump("setup-admin-done", "Setup admin · done → menu flash")
+
+	w.reset()
+	w.keys("enter", "hunter22", "enter", "hunter22", "enter", "battery-staple", "enter", "battery-staple", "enter", "enter")
+	w.send("setupInitDone", setupInitDone{err: "admin key already exists at ~/Library/Application Support/dop/keys/admin.age.enc"})
+	w.dump("setup-admin-init-failed", "Setup admin · init failed (review + error)", "edge")
+
+	// Attach vault (agent install): single step
+	w.reset()
+	w.keys("down", "enter")
+	w.dump("attach-agent-empty", "Attach vault · agent install · empty")
+	w.keys("enter")
+	w.dump("attach-agent-required", "Attach vault · URL required", "edge")
+	w.keys("git@github.com:acme/dop-vault.git")
+	w.dump("attach-agent-typed", "Attach vault · URL typed")
+	w.keys("enter")
+	w.dump("attach-agent-cloning", "Attach vault · cloning")
+	w.send("attachResultMsg", attachResultMsg{err: "git clone: repository 'acme/dop-vault' not found"})
+	w.dump("attach-agent-error", "Attach vault · clone failed", "edge")
+	w.reset()
+	w.keys("down", "enter", "git@github.com:acme/dop-vault.git", "enter")
+	w.send("attachResultMsg", attachResultMsg{})
+	w.dump("attach-agent-done", "Attach vault · done → menu flash")
+
+	// Join existing vault
+	w.reset()
+	w.keys("down", "down", "enter")
+	w.dump("join-url-empty", "Join vault · 1 of 5 · URL empty")
+	w.keys("enter")
+	w.dump("join-url-required", "Join vault · URL required", "edge")
+	w.keys("git@github.com:acme/dop-vault.git", "enter", "AB-CD-EF")
+	w.dump("join-pin", "Join vault · PIN typed")
+	w.keys("enter")
+	w.dump("join-identity-separate", "Join vault · identity · separate", "key")
+	w.keys("down")
+	w.dump("join-identity-shared", "Join vault · identity · same identity")
+	w.keys("enter", "hunter22")
+	w.dump("join-shared-pass", "Join vault · inviting machine's passphrase")
+	w.keys("enter")
+	w.dump("join-review", "Join vault · review")
+	w.keys("enter")
+	w.send("inviteLine", inviteLine{line: "… running: dop admin join"})
+	w.send("inviteLine", inviteLine{line: "fetching invite 3f9a0c1d…"})
+	w.dump("join-running", "Join vault · running")
+	w.send("inviteDone", inviteDone{rc: 0})
+	w.dump("join-harness", "Join vault · harness picker")
+	w.keys("enter")
+	w.dump("join-done", "Join vault · done → menu flash")
+
+	w.reset()
+	w.keys("down", "down", "enter", "git@github.com:acme/dop-vault.git", "enter", "AB-CD-EF", "enter", "enter")
+	w.dump("join-new-admin", "Join vault · separate identity · new admin passphrase")
+	w.keys("hunter2", "enter")
+	w.dump("join-new-admin-short", "Join vault · new admin passphrase too short", "edge")
+	w.text("2")
+	w.keys("enter", "battery-staple")
+	w.dump("join-new-approval", "Join vault · new approval passphrase typed")
+	w.keys("enter", "enter")
+	w.send("inviteLine", inviteLine{line: "error: invite 3f9a0c1d not found (expired or cancelled)"})
+	w.send("inviteDone", inviteDone{rc: 1, err: "exit status 1"})
+	w.dump("join-failed", "Join vault · failed (review + error)", "edge")
+	w.keys("?")
+	w.dump("join-failed-output", "Join vault · failed · last output behind ?", "edge")
+
+	// Doctor, Uninstall
+	w.reset()
+	w.keys("down", "down", "down", "enter")
+	w.dump("doctor-fresh", "Doctor · fresh install")
+	w.reset()
+	w.keys("down", "down", "down", "down", "enter")
+	w.dump("uninstall-confirm", "Uninstall · confirm (fresh install)", "key")
+	w.keys("uninstall", "enter")
+	w.dump("uninstall-wrong-word", "Uninstall · lowercase confirm rejected", "edge")
+	w.reset()
+	w.keys("down", "down", "down", "down", "enter", "UNINSTALL", "enter")
+	w.dump("uninstall-wiping", "Uninstall · wiping")
+	w.send("resetDone", resetDone{rc: 1, err: "rm: ~/Library/Application Support/dop: Operation not permitted"})
+	w.dump("uninstall-failed", "Uninstall · failed (confirm + error)", "edge")
+	w.reset()
+	w.keys("down", "down", "down", "down", "enter", "UNINSTALL", "enter")
+	w.send("resetDone", resetDone{rc: 0})
+	w.dump("uninstall-done", "Uninstall · done")
+}
+
+// ── login: admin key on disk, no session → unlock → attach vault ──
+func walkLogin(w *walker) {
+	w.flow = "login"
+	must(w.t, os.WriteFile(filepath.Join(w.paths.KeysDir, "admin.age.enc"), []byte("walk"), 0o600))
+	w.reset()
+	w.dump("menu-locked", "Menu · admin locked")
+	w.keys("enter", "s3cret!")
+	w.dump("login-typing", "Login · passphrase typed")
+	w.keys("enter")
+	w.dump("login-unlocking", "Login · unlocking")
+	w.send("loginResultMsg", loginResultMsg{err: "wrong passphrase (2 attempts left)"})
+	w.dump("login-error", "Login · wrong passphrase", "edge")
+	w.keys("correct horse", "enter")
+	walkDaemon(w.t, admin.SockPath(w.paths)) // the session daemon the login subprocess would start
+	w.send("loginResultMsg", loginResultMsg{})
+	w.dump("menu-novault", "Menu · unlocked, no vault (login flash)")
+
+	w.flow = "setup"
+	w.keys("enter")
+	w.dump("attach-admin-empty", "Attach vault · admin install · empty")
+	w.keys("git@github.com:acme/dop-vault.git", "enter")
+	// what `dop init --vault` leaves behind
+	must(w.t, os.MkdirAll(filepath.Join(w.paths.Vault, "pending-admin-invites"), 0o755))
+	w.writeVault(walkVault)
+	must(w.t, os.WriteFile(w.inviteFile(), []byte(walkInvite), 0o644))
+	w.send("attachResultMsg", attachResultMsg{})
+	w.dump("attach-admin-done", "Attach vault · done → admin menu flash")
+}
+
+// ── admin top level ──
+func walkMenu(w *walker) {
+	w.flow = ""
+	w.reset()
+	w.dump("menu-admin", "Menu · admin top level", "key")
+	w.keys("?")
+	w.dump("menu-admin-help", "Menu · admin top level · expanded help")
+	w.reset()
+	w.keys("down")
+	w.dump("menu-admin-cursor", "Menu · admin top level · cursor on Issue")
+}
+
+// ── integration-add ── (wizard: one question per screen, then review)
+func walkIntegrationAdd(w *walker) {
+	w.flow = "integration-add"
+	w.reset()
+	w.keys("1")
+	w.dump("menu-add", "Menu · Add group")
+	w.keys("1")
+	w.dump("integration-add-name-empty", "Add integration · 1 of 10 · name empty", "key")
+	w.keys("?")
+	w.dump("integration-add-help", "Add integration · expanded help")
+	w.reset()
+	w.keys("1", "1", "enter")
+	w.dump("integration-add-name-required", "Add integration · name required", "edge")
+	w.keys("Notion Mirror")
+	w.dump("integration-add-name", "Add integration · name typed (normalize hint)")
+	w.keys("enter")
+	w.dump("integration-add-kind", "Add integration · kind picker · api")
+	w.keys("esc")
+	w.dump("integration-add-kind-back", "Add integration · esc back to the name")
+	toKind := func() { w.reset(); w.keys("1", "1", "enter", "Notion Mirror", "enter") }
+	for i, kind := range []string{"cli", "mcp", "other"} {
+		toKind()
+		for j := 0; j <= i; j++ {
+			w.keys("down")
+		}
+		w.dump("integration-add-kind-"+kind, "Add integration · kind picker · "+kind)
+		w.keys("enter", "enter")
+		w.dump("integration-add-slot-"+kind, "Add integration · step after description, kind="+kind)
+	}
+	toKind()
+	w.keys("enter")
+	w.dump("integration-add-desc-empty", "Add integration · description (optional)")
+	w.keys("Read-only mirror of the docs space")
+	w.dump("integration-add-desc", "Add integration · description typed")
+	w.keys("enter")
+	w.dump("integration-add-base-url-empty", "Add integration · base URL empty")
+	w.keys("https://api.notion.com/v1")
+	w.dump("integration-add-base-url", "Add integration · base URL typed")
+	w.keys("enter")
+	w.dump("integration-add-scan", "Add integration · scan endpoints · no")
+	w.keys("down")
+	w.dump("integration-add-scan-yes", "Add integration · scan endpoints · yes")
+	w.keys("enter")
+	w.dump("integration-add-cred", "Add integration · credential name prefilled")
+	w.keys("enter")
+	w.dump("integration-add-value-empty", "Add integration · credential value empty")
+	w.keys("enter")
+	w.dump("integration-add-value-required", "Add integration · credential value required", "edge")
+	w.keys("sk_live_51HxWalkFixture")
+	w.dump("integration-add-value", "Add integration · credential value (masked)", "key")
+	w.keys("enter")
+	w.dump("integration-add-scope", "Add integration · scope picker")
+	w.keys("down", "down", "down")
+	w.dump("integration-add-scope-other", "Add integration · scope picker · other…")
+	w.keys("enter")
+	w.dump("integration-add-scope-custom-empty", "Add integration · custom scope empty")
+	w.keys("read-only on /docs")
+	w.dump("integration-add-scope-custom", "Add integration · custom scope typed")
+	w.keys("enter")
+	w.dump("integration-add-protect", "Add integration · protection · default")
+	w.keys("down")
+	w.dump("integration-add-protect-protected", "Add integration · protection · protected")
+	w.keys("enter")
+	w.dump("integration-add-pass-empty", "Add integration · approval passphrase")
+	w.keys("enter")
+	w.dump("integration-add-pass-required", "Add integration · passphrase required", "edge")
+	w.keys("approve-me-please")
+	w.dump("integration-add-pass", "Add integration · passphrase typed")
+	w.keys("enter")
+	w.dump("integration-add-advanced", "Add integration · advanced · no")
+	w.keys("down")
+	w.dump("integration-add-advanced-yes", "Add integration · advanced · yes")
+	w.keys("enter")
+	w.dump("integration-add-advfields", "Add integration · first advanced field (api)")
+	w.keys("https://api.notion.com", "enter", "docs,wiki", "enter", "bearer-header")
+	w.dump("integration-add-advfields-filled", "Add integration · last advanced field filled")
+	w.keys("enter")
+	w.dump("integration-add-save", "Add integration · review", "key")
+	w.keys("enter")
+	w.dump("integration-add-saving", "Add integration · saving")
+	w.send("integrationAddedMsg", integrationAddedMsg{err: "integration \"notion-mirror\" already exists"})
+	w.dump("integration-add-error", "Add integration · save failed (review + error)", "edge")
+	w.keys("enter")
+	w.send("integrationAddedMsg", integrationAddedMsg{probeSummary: "probe → https://api.notion.com/v1/openapi.json (200)"})
+	w.dump("integration-add-done", "Add integration · saved (scan result)")
+	w.keys("x")
+	w.dump("integration-add-menu-flash", "Menu · flash after integration save", "key")
+	// main line: every default (api, scan no, read-only, default protection, advanced no)
+	toKind()
+	w.keys("enter")
+	w.text("Team docs mirror")
+	w.keys("enter")
+	w.text("https://api.notion.com/v1")
+	w.keys("enter", "enter", "enter")
+	w.text("sk_live_51HxWalkFixture")
+	w.line("enter", "enter", "enter", "enter", "enter")
+}
+
+// ── grant-add ──
+func walkGrantAdd(w *walker) {
+	w.flow = "grant-add"
+	w.reset()
+	w.keys("1", "2")
+	w.dump("grant-add-id-empty", "Add grant · 1 of 6 · name empty")
+	w.keys("enter")
+	w.dump("grant-add-id-required", "Add grant · name required", "edge")
+	w.keys("notion-mirror-read")
+	w.dump("grant-add-id", "Add grant · name typed")
+	w.keys("enter")
+	w.dump("grant-add-integration", "Add grant · integration picker")
+	w.keys("down", "down", "down", "enter")
+	w.dump("grant-add-token", "Add grant · credential picker")
+	w.keys("enter")
+	w.dump("grant-add-env", "Add grant · env prefix prefilled")
+	w.keys("enter")
+	w.dump("grant-add-projects-empty", "Add grant · projects empty")
+	w.keys("docs,wiki")
+	w.dump("grant-add-projects", "Add grant · projects typed")
+	w.keys("enter", "ro")
+	w.dump("grant-add-tags", "Add grant · tags typed")
+	w.keys("enter")
+	w.dump("grant-add-review", "Add grant · review", "key")
+	w.keys("enter")
+	w.dump("grant-add-saving", "Add grant · saving")
+	w.send("grantAddedMsg", grantAddedMsg{err: "grant \"notion-mirror-read\" already exists"})
+	w.dump("grant-add-error", "Add grant · save failed (review + error)", "edge")
+	w.keys("enter")
+	w.send("grantAddedMsg", grantAddedMsg{})
+	w.dump("grant-add-done", "Add grant · saved")
+	w.keys("x")
+	w.dump("grant-add-menu-flash", "Menu · flash after grant save")
+
+	w.reset()
+	w.keys("1", "2", "acme-billing-ro", "enter", "enter", "enter")
+	w.dump("grant-add-env-long", "Add grant · env prefix prefilled from long name (dashes)", "edge")
+	// main line: first integration, first credential, defaults
+	w.reset()
+	w.keys("1", "2")
+	w.text("acme-billing-ro")
+	w.line("enter", "enter", "enter", "enter", "enter", "enter", "enter")
+}
+
+// ── issue ── (huh.Form: enter next, esc / shift+tab prev, space toggle, ctrl+a all/none; then review)
+func walkIssue(w *walker) {
+	w.flow = "issue"
+	w.reset()
+	w.keys("2")
+	w.dump("issue-subject-empty", "Issue · 1 of 4 · subject empty")
+	w.keys("claude-code-laptop")
+	w.dump("issue-subject", "Issue · subject typed")
+	w.keys("enter")
+	w.dump("issue-grants", "Issue · grant picker · none selected", "key")
+	w.keys("enter")
+	w.dump("issue-grants-required", "Issue · select at least one grant", "edge")
+	w.keys(" ")
+	w.dump("issue-grants-one", "Issue · one grant selected")
+	w.keys("ctrl+a")
+	w.dump("issue-grants-all", "Issue · ctrl+a selects all (env prefix collision)", "key", "edge")
+	w.keys("enter")
+	w.dump("issue-grants-collision", "Issue · collision blocks enter", "edge")
+	w.keys("ctrl+a")
+	w.dump("issue-grants-none", "Issue · ctrl+a again clears selection")
+	w.keys(" ", "down", "down", "down", " ")
+	w.dump("issue-grants-two", "Issue · two grants selected")
+	w.keys("enter")
+	w.dump("issue-expiry", "Issue · expiry presets", "key")
+	w.keys("down", "down", "down", "down", "down")
+	w.dump("issue-expiry-custom-cursor", "Issue · expiry · cursor on custom…")
+	w.keys("enter")
+	w.dump("issue-expiry-custom", "Issue · custom expiry input")
+	w.keys("10d")
+	w.dump("issue-expiry-custom-typed", "Issue · custom expiry typed")
+	w.keys("enter")
+	w.dump("issue-portable", "Issue · portable · no")
+	w.keys("down")
+	w.dump("issue-portable-yes", "Issue · portable · yes")
+
+	toPortable := func() {
+		w.reset()
+		w.keys("2", "claude-code-laptop", "enter", " ", "down", "down", "down", " ", "enter",
+			"down", "down", "down", "down", "down", "enter", "10d", "enter")
+	}
+	toPortable()
+	w.keys("enter")
+	w.dump("issue-confirm", "Issue · review", "key")
+	w.keys("esc")
+	w.dump("issue-review-back", "Issue · esc back from the review to portable")
+	toPortable()
+	w.keys("enter", "enter")
+	w.dump("issue-issuing", "Issue · issuing (spinner)")
+	w.send("issueResultMsg", issueResultMsg{bearer: "tok_7Hq2xWalkFixtureBearer0c1d2e3f", pin: "AB-CD-EF"})
+	w.dump("issue-done", "Issue · bearer + PIN handoff", "key")
+	w.keys("x")
+	w.dump("issue-menu-flash", "Menu · flash after issue")
+	toPortable()
+	w.keys("down", "enter", "enter")
+	w.send("issueResultMsg", issueResultMsg{bearer: "tok_9Kp4zWalkFixturePortable7a8b9c0d"})
+	w.dump("issue-done-portable", "Issue · done, portable (bearer only)")
+	toPortable()
+	w.keys("enter", "enter")
+	w.send("issueResultMsg", issueResultMsg{err: "vault push rejected (non-fast-forward)"})
+	w.dump("issue-error", "Issue · issue failed (review + error)", "edge")
+
+	w.reset()
+	w.keys("2", "billing-agent", "enter", "down", "down", " ", "enter", "enter", "enter")
+	w.dump("issue-protected-pass", "Issue · protected grant → approval passphrase")
+	w.reset()
+	w.keys("2", "enter")
+	w.dump("issue-subject-required", "Issue · subject required", "edge")
+	// main line: space on the first grant, then defaults (72h, not portable), review, issue
+	w.reset()
+	w.keys("2")
+	w.text("claude-code-laptop")
+	w.line("enter", " ", "enter", "enter", "enter", "enter")
+}
+
+// ── invite: device + team member ──
+func walkInvites(w *walker) {
+	w.flow = "invite"
+	w.reset()
+	w.keys("1", "3")
+	w.dump("invite-device-empty", "Invite device · 1 of 3 · label empty")
+	w.keys("enter")
+	w.dump("invite-device-name-required", "Invite device · label required", "edge")
+	w.keys("mac-mini")
+	w.dump("invite-device-label", "Invite device · label typed")
+	w.keys("enter")
+	w.dump("invite-device-identity", "Invite device · identity · separate")
+	w.keys("down")
+	w.dump("invite-device-identity-shared", "Invite device · identity · same (warning)")
+	w.keys("enter")
+	w.dump("invite-device-pass-empty", "Invite device · approval passphrase")
+	w.keys("enter")
+	w.dump("invite-device-pass-required", "Invite device · passphrase required", "edge")
+	w.keys("approve-me-please")
+	w.dump("invite-device-pass", "Invite device · passphrase typed")
+	w.keys("enter")
+	w.dump("invite-review", "Invite device · review", "key")
+	w.keys("enter")
+	w.dump("invite-running", "Invite · running")
+	w.send("inviteLine", inviteLine{line: "  PIN:        AB-CD-EF   (valid 7d)"})
+	w.send("inviteLine", inviteLine{line: "  invite_id:  3f9a0c1d2e4b5a69"})
+	w.send("inviteLine", inviteLine{line: "  vault URL:  git@github.com:acme/dop-vault.git"})
+	w.dump("invite-running-pin", "Invite · running, PIN captured", "key")
+	w.send("inviteDone", inviteDone{rc: 0})
+	w.dump("invite-waiting-shared", "Invite · staged, waiting (shared identity)")
+	w.keys("esc")
+	w.dump("invite-cancel-confirm", "Invite · cancel confirm")
+	w.keys("y")
+	w.dump("invite-cancelling", "Invite · cancelling")
+	w.send("teamCancelDoneMsg", teamCancelDoneMsg{id: "3f9a0c1d2e4b5a69", err: "vault push rejected (non-fast-forward)"})
+	w.dump("invite-cancel-failed", "Invite · cancel failed", "edge")
+	w.keys("enter")
+	w.dump("invite-done-flash", "Menu · invite left open (flash)")
+
+	w.reset()
+	w.keys("1", "3", "mac-mini", "enter", "enter", "approve-me-please", "enter", "enter")
+	w.send("inviteLine", inviteLine{line: "  PIN:        AB-CD-EF   (valid 7d)"})
+	w.send("inviteLine", inviteLine{line: "  invite_id:  3f9a0c1d2e4b5a69"})
+	w.send("inviteLine", inviteLine{line: "  vault URL:  git@github.com:acme/dop-vault.git"})
+	w.send("inviteDone", inviteDone{rc: 0})
+	w.dump("invite-waiting", "Invite · staged, waiting (approve later)", "key")
+	w.keys("esc", "y")
+	w.send("teamCancelDoneMsg", teamCancelDoneMsg{id: "3f9a0c1d2e4b5a69"})
+	w.dump("invite-cancelled-flash", "Menu · invite cancelled (flash)")
+
+	w.reset()
+	w.keys("1", "4")
+	w.dump("invite-member-empty", "Invite team member · 1 of 2 · label empty")
+	w.keys("alex", "enter")
+	w.dump("invite-member-pass", "Invite team member · passphrase (no identity step)")
+	w.keys("approve", "enter")
+	w.dump("invite-member-review", "Invite team member · review")
+	w.keys("enter")
+	w.send("inviteLine", inviteLine{line: "error: vault push rejected (non-fast-forward)"})
+	w.send("inviteDone", inviteDone{rc: 1, err: "exit status 1"})
+	w.dump("invite-member-failed", "Invite team member · failed (review + error)", "edge")
+	w.keys("?")
+	w.dump("invite-member-failed-output", "Invite team member · failed · last output behind ?", "edge")
+	// main line: separate identity → passphrase → review → running
+	w.reset()
+	w.keys("1", "3")
+	w.text("mac-mini")
+	w.keys("enter", "enter")
+	w.text("approve-me-please")
+	w.line("enter", "enter")
+}
+
+// ── integrations list ──
+func walkIntegrations(w *walker) {
+	w.flow = "integrations"
+	w.reset()
+	w.keys("3")
+	w.dump("menu-list", "Menu · List group")
+	w.keys("1")
+	w.dump("integration-list-loading", "Integrations · loading")
+	w.load()
+	w.dump("integration-list", "Integrations · list (long name first)", "key", "edge")
+	w.keys("?")
+	w.dump("integration-list-help", "Integrations · expanded help")
+	open := func() { w.reset(); w.keys("3", "1"); w.load() }
+	open()
+	w.keys("down", "down", "down", "enter")
+	w.dump("integration-detail", "Integrations · notion · Info tab", "key")
+	w.keys("tab")
+	w.dump("integration-tokens", "Integrations · notion · Credentials tab")
+	w.keys("tab")
+	w.dump("integration-grants", "Integrations · notion · Grants tab")
+	w.keys("enter")
+	w.dump("integration-grant-detail", "Integrations · grant detail from the Grants tab")
+	w.keys("esc")
+	w.dump("integration-grant-back", "Integrations · back on the Grants tab")
+	open()
+	w.keys("down", "down", "enter", "tab")
+	w.dump("integration-tokens-placeholder", "Integrations · linear · placeholder credential", "edge")
+	tok := func() { open(); w.keys("down", "down", "down", "enter", "tab", "enter") }
+	tok()
+	w.dump("integration-token-actions", "Integrations · credential actions")
+	w.keys("enter")
+	w.dump("integration-token-scope", "Integrations · scope note picker")
+	w.keys("down", "down", "down", "enter")
+	w.dump("integration-token-scope-custom", "Integrations · scope note custom (prefilled)")
+	w.keys(" on /docs")
+	w.dump("integration-token-scope-typed", "Integrations · scope note custom typed")
+	w.keys("enter")
+	w.dump("integration-working", "Integrations · working")
+	w.send("integActionMsg", integActionMsg{})
+	w.dump("integration-scope-done", "Integrations · scope note saved")
+	tok()
+	w.keys("down", "enter")
+	w.dump("integration-token-rotate", "Integrations · rotate value")
+	w.keys("enter")
+	w.dump("integration-token-rotate-required", "Integrations · new value required", "edge")
+	w.keys("sk_rotated_value_2026")
+	w.dump("integration-token-rotate-typed", "Integrations · new value (masked)")
+	w.keys("enter")
+	w.send("integActionMsg", integActionMsg{err: "integration set-token: vault push rejected (non-fast-forward)"})
+	w.dump("integration-action-error", "Integrations · rotate failed (error on the form)", "key", "edge")
+	tok()
+	w.keys("down", "down", "enter")
+	w.dump("integration-token-remove-confirm", "Integrations · remove credential confirm")
+	w.keys("y")
+	w.send("integActionMsg", integActionMsg{})
+	w.dump("integration-token-removed", "Integrations · credential removed")
+
+	// e — edit integration
+	open()
+	w.keys("down", "down", "down", "e")
+	w.dump("integration-edit", "Integrations · edit · name focused")
+	w.keys("enter")
+	w.dump("integration-edit-kind", "Integrations · edit · kind picker")
+	w.keys("enter")
+	w.dump("integration-edit-desc", "Integrations · edit · description")
+	w.keys("enter")
+	w.dump("integration-edit-url", "Integrations · edit · base URL")
+	w.keys("enter")
+	w.dump("integration-edit-projects", "Integrations · edit · projects")
+	w.keys("enter", "enter")
+	w.dump("integration-edit-protect", "Integrations · edit · protection picker")
+	w.keys("down", "enter")
+	w.dump("integration-edit-pass", "Integrations · edit · approval passphrase")
+	w.keys("enter")
+	w.dump("integration-edit-pass-required", "Integrations · edit · passphrase required", "edge")
+	w.keys("approve-me-please", "enter")
+	w.dump("integration-edit-working", "Integrations · edit · saving")
+	w.send("integActionMsg", integActionMsg{})
+	w.dump("integration-edit-done", "Integrations · integration saved")
+
+	// r — remove confirm with cascade; a failure stays on the list
+	open()
+	w.keys("down", "down", "down", "r")
+	w.dump("integration-remove-confirm", "Integrations · remove confirm (cascade grants)", "key")
+	w.keys("y")
+	w.dump("integration-remove-working", "Integrations · removing")
+	w.send("integActionMsg", integActionMsg{err: "integration remove: vault push rejected (non-fast-forward)"})
+	w.dump("integration-remove-error", "Integrations · remove failed (error on the list)", "edge")
+	w.keys("r", "y")
+	w.send("integActionMsg", integActionMsg{})
+	w.dump("integration-remove-done", "Integrations · integration removed")
+	open()
+	w.keys("enter")
+	w.dump("integration-detail-long", "Integrations · Info of protected long-name service", "edge")
+	w.keys("down", "enter")
+	w.dump("integration-detail-remove", "Integrations · remove confirm from the detail")
+	// default picker choices: scope note keeps its preset, edit saves unchanged
+	tok()
+	w.line("enter", "enter")
+	open()
+	w.line("down", "down", "down", "e", "enter", "enter", "enter", "enter", "enter", "enter", "enter")
+	// a on the Credentials tab: the add form on this integration
+	w.flow = "integration-add"
+	open()
+	w.keys("down", "down", "down", "enter", "tab", "a")
+	w.dump("integration-add-credential", "Add credential · notion · name prefilled", "key")
+	w.keys("enter", "secret_ntn_walk_7f3e", "enter", "enter", "enter")
+	w.dump("integration-add-credential-review", "Add credential · review")
+	w.flow = "integrations"
+}
+
+// ── grants list ──
+func walkGrants(w *walker) {
+	w.flow = "grants"
+	open := func() { w.reset(); w.keys("3", "2"); w.load() }
+	open()
+	w.dump("grant-list", "Grants · list (long id)", "edge")
+	w.keys("?")
+	w.dump("grant-list-help", "Grants · expanded help")
+	open()
+	w.keys("enter")
+	w.dump("grant-detail", "Grants · detail + actions (protected)", "key")
+	open()
+	w.keys("down", "enter", "enter")
+	w.dump("grant-edit", "Grants · edit · projects focused")
+	w.keys("enter", "enter", "enter")
+	w.dump("grant-edit-protect", "Grants · edit · protection picker")
+	w.keys("down", "enter")
+	w.dump("grant-edit-pass", "Grants · edit · approval passphrase")
+	w.keys("enter")
+	w.dump("grant-edit-pass-required", "Grants · edit · passphrase required", "edge")
+	w.keys("approve-me-please", "enter")
+	w.dump("grant-edit-saving", "Grants · edit · saving")
+	w.send("grantActionMsg", grantActionMsg{kind: "edit", err: "grant add: protected grant needs --passphrase-stdin"})
+	w.dump("grant-edit-error", "Grants · edit · save failed", "edge")
+	w.keys("enter")
+	w.send("grantActionMsg", grantActionMsg{kind: "edit"})
+	w.dump("grant-edit-done", "Grants · grant saved")
+	open()
+	w.keys("down", "down", "down", "down", "enter", "down", "enter")
+	w.dump("grant-remove-confirm", "Grants · remove confirm")
+	w.keys("y")
+	w.dump("grant-remove-saving", "Grants · removing")
+	w.send("grantActionMsg", grantActionMsg{kind: "remove", err: "grant remove: vault push rejected"})
+	w.dump("grant-remove-error", "Grants · remove failed (error on the detail)", "edge")
+	w.keys("enter", "y")
+	w.send("grantActionMsg", grantActionMsg{kind: "remove"})
+	w.dump("grant-remove-done", "Grants · grant removed")
+	// default line through the edit form: enter on every field saves
+	open()
+	w.line("enter", "enter", "enter", "enter", "enter", "enter")
+}
+
+// ── bearers list ──
+func walkBearers(w *walker) {
+	w.flow = "bearers"
+	open := func() { w.reset(); w.keys("3", "3"); w.load() }
+	open()
+	w.dump("bearer-list", "Bearers · active", "key")
+	w.keys("?")
+	w.dump("bearer-list-help", "Bearers · expanded help")
+	open()
+	w.keys("enter")
+	w.dump("bearer-detail", "Bearers · detail + actions (PIN-bound, unclaimed)", "key")
+	act := func() { open(); w.keys("enter") }
+	act()
+	w.keys("enter")
+	w.dump("bearer-reseal-running", "Bearers · reseal running", "edge")
+	w.send("listActionMsg", listActionMsg{err: "token reseal: bearer is PIN-bound and unclaimed — nothing to reseal"})
+	w.dump("bearer-reseal-error", "Bearers · reseal failed", "edge")
+	act()
+	w.keys("enter")
+	w.send("listActionMsg", listActionMsg{flash: "resealed claude-code-laptop · env updated (gen 4)"})
+	w.dump("bearer-reseal-done", "Bearers · env resealed")
+	act()
+	w.keys("down", "enter")
+	w.dump("bearer-add-grant", "Bearers · add-grant picker", "key")
+	w.keys(" ")
+	w.dump("bearer-add-grant-picked", "Bearers · protected grant picked")
+	w.keys("enter", "approve-me-please")
+	w.dump("bearer-add-grant-pass", "Bearers · approval passphrase for protected grant")
+	w.keys("enter")
+	w.dump("bearer-add-grant-running", "Bearers · add-grant running")
+	w.send("listActionMsg", listActionMsg{flash: "acme-billing-reconciliation-readonly-reporting-grant-for-finance-agents"})
+	w.dump("bearer-add-grant-done", "Bearers · grant added", "edge")
+	act()
+	w.keys("down", "down", "enter")
+	w.dump("bearer-remove-grant", "Bearers · remove-grant picker")
+	w.keys("enter")
+	w.dump("bearer-remove-grant-required", "Bearers · select at least one grant", "edge")
+	w.keys(" ", "enter")
+	w.dump("bearer-remove-grant-running", "Bearers · remove-grant running")
+	w.send("listActionMsg", listActionMsg{err: "token remove-grant: bearer is not P-256 bound — revoke + reissue instead"})
+	w.dump("bearer-remove-grant-error", "Bearers · remove-grant failed", "edge")
+	act()
+	w.keys("down", "down", "down", "enter")
+	w.dump("bearer-repin", "Bearers · repin form")
+	w.keys("enter")
+	w.dump("bearer-repin-required", "Bearers · bearer required", "edge")
+	w.keys("tok_7Hq2xWalkFixtureBearer0c1d2e3f", "enter")
+	w.dump("bearer-repin-ttl", "Bearers · repin TTL picker")
+	w.keys("down", "enter")
+	w.dump("bearer-repin-running", "Bearers · repin running")
+	w.send("repinSuccessMsg", repinSuccessMsg{pin: "KM-PX-RT", expires: "5m0s"})
+	w.dump("bearer-repin-done", "Bearers · new PIN")
+	act()
+	w.keys("down", "down", "down", "down", "enter")
+	w.dump("bearer-revoke-confirm", "Bearers · revoke confirm", "key")
+	w.keys("y")
+	w.dump("bearer-revoke-running", "Bearers · revoking")
+	w.send("listActionMsg", listActionMsg{})
+	w.dump("bearer-revoke-done", "Bearers · revoked")
+
+	open()
+	w.keys("down", "enter")
+	w.dump("bearer-detail-claimed", "Bearers · detail (claimed P-256, no repin)")
+	open()
+	w.keys("tab")
+	w.dump("bearer-list-all", "Bearers · Revoked tab")
+	w.keys("enter")
+	w.dump("bearer-detail-revoked", "Bearers · detail (revoked, no actions)")
+	// default picker choice: repin TTL 1h
+	act()
+	w.keys("down", "down", "down", "enter")
+	w.text("tok_7Hq2xWalkFixtureBearer0c1d2e3f")
+	w.line("enter", "enter")
+}
+
+// ── team ──
+func walkTeam(w *walker) {
+	w.flow = "team"
+	open := func() { w.reset(); w.keys("3", "4"); w.load() }
+	open()
+	w.dump("team-members", "Team · members tab")
+	w.keys("tab")
+	w.dump("team-pending", "Team · pending tab", "key")
+	w.keys("a")
+	w.dump("team-approve-empty", "Team · approve passphrase")
+	w.keys("enter")
+	w.dump("team-approve-required", "Team · passphrase required", "edge")
+	w.keys("approve-me-please")
+	w.dump("team-approve-typed", "Team · passphrase typed")
+	w.keys("enter")
+	w.dump("team-approve-running", "Team · approving")
+	w.send("teamApproveDoneMsg", teamApproveDoneMsg{id: "3f9a0c1d2e4b5a69", err: "no response from teammate yet: they have not run dop admin join"})
+	w.dump("team-approve-failed", "Team · approve failed (back on the passphrase)", "edge")
+	w.keys("enter")
+	w.send("teamApproveDoneMsg", teamApproveDoneMsg{id: "3f9a0c1d2e4b5a69"})
+	w.dump("team-approve-done", "Team · member approved")
+	w.keys("enter")
+	w.load()
+	w.dump("team-approve-flash", "Team · approved (flash)")
+	open()
+	w.keys("tab", "d")
+	w.dump("team-delete-confirm", "Team · delete pending invite confirm")
+	w.keys("y")
+	w.dump("team-delete-running", "Team · cancelling invite")
+	w.send("teamCancelDoneMsg", teamCancelDoneMsg{id: "3f9a0c1d2e4b5a69"})
+	w.load()
+	w.dump("team-delete-done", "Team · invite cancelled (flash)")
+
+	// Add → Team member by key
+	w.reset()
+	w.keys("1", "5")
+	w.dump("team-add-name", "Add team member · 1 of 4 · name")
+	w.keys("enter")
+	w.dump("team-add-name-required", "Add team member · name required", "edge")
+	w.keys("bob", "enter", "ssh-ed25519 AAAAC3Nza", "enter")
+	w.dump("team-add-bad-pubkey", "Add team member · not an age recipient", "edge")
+	w.reset()
+	w.keys("1", "5", "bob", "enter", "age1zvkyg2lqzraa2lnjvqej32nkuu0ues2s82hzrye869xeexvn73equnujwj", "enter", "enter", "Bob's MacBook")
+	w.dump("team-add-filled", "Add team member · last step filled")
+	w.keys("enter")
+	w.dump("team-add-review", "Add team member · review")
+	w.keys("enter")
+	w.dump("team-add-running", "Add team member · adding")
+	w.send("teamAddResultMsg", teamAddResultMsg{})
+	w.dump("team-add-done", "Add team member · added")
+	w.keys("x")
+	w.dump("team-add-flash", "Menu · team member added (flash)")
+}
+
+// ── remove group ──
+func walkRemove(w *walker) {
+	w.flow = "remove"
+	w.reset()
+	w.keys("4")
+	w.dump("menu-remove", "Menu · Remove group")
+	w.keys("1")
+	w.load()
+	w.dump("revoke-pick", "Revoke bearer · pick")
+	w.keys("enter")
+	w.dump("revoke-confirm", "Revoke bearer · confirm")
+	w.keys("y")
+	w.dump("revoke-running", "Revoke bearer · revoking")
+	w.send("revokeResultMsg", revokeResultMsg{err: "revoke: vault push rejected"})
+	w.dump("revoke-error", "Revoke bearer · failed", "edge")
+	w.keys("y")
+	w.send("revokeResultMsg", revokeResultMsg{})
+	w.dump("revoke-done", "Done · done screen")
+	w.keys("enter")
+	w.dump("revoke-flash", "Menu · revoked (flash)")
+
+	w.reset()
+	w.keys("4", "2")
+	w.load()
+	w.dump("grant-remove-pick", "Remove grant · pick")
+	w.keys("enter")
+	w.dump("grant-remove-pick-confirm", "Remove grant · confirm")
+	w.keys("y")
+	w.dump("grant-remove-pick-running", "Remove grant · removing")
+	w.send("grantRemoveResultMsg", grantRemoveResultMsg{err: "grant remove: grant is protected — owner passphrase required"})
+	w.dump("grant-remove-pick-error", "Remove grant · failed", "edge")
+	w.keys("y")
+	w.send("grantRemoveResultMsg", grantRemoveResultMsg{})
+	w.dump("grant-remove-pick-done", "Done · done screen")
+	w.keys("enter")
+	w.dump("grant-remove-pick-flash", "Menu · grant removed (flash)")
+
+	w.reset()
+	w.keys("4", "3")
+	w.load()
+	w.dump("integration-remove-pick", "Remove credentials · pick service")
+	w.keys("down", "enter")
+	w.dump("integration-remove-tokens", "Remove credentials · pick credentials")
+	w.keys("enter")
+	w.dump("integration-remove-required", "Remove credentials · select at least one", "edge")
+	w.keys(" ")
+	w.dump("integration-remove-selected", "Remove credentials · one selected")
+	w.keys("enter")
+	w.dump("integration-remove-preview", "Remove credentials · cascade preview", "key")
+	w.keys("y")
+	w.dump("integration-remove-pick-running", "Remove credentials · removing")
+	w.send("integrationRemoveResultMsg", integrationRemoveResultMsg{err: "integration remove: vault push rejected"})
+	w.dump("integration-remove-pick-error", "Remove credentials · failed", "edge")
+	w.keys("y")
+	w.send("integrationRemoveResultMsg", integrationRemoveResultMsg{})
+	w.dump("integration-remove-pick-done", "Done · done screen")
+	w.keys("enter")
+	w.dump("integration-remove-pick-flash", "Menu · credentials removed (flash)")
+
+	w.reset()
+	w.keys("4", "4")
+	w.load()
+	w.dump("team-remove-pick", "Remove team member · pick")
+	w.keys("down", "enter")
+	w.dump("team-remove-confirm", "Remove team member · rotation checklist")
+	w.keys("y")
+	w.dump("team-remove-running", "Remove team member · removing")
+	w.send("teamRemoveResultMsg", teamRemoveResultMsg{err: "team remove: cannot remove the last admin with a live session"})
+	w.dump("team-remove-error", "Remove team member · failed", "edge")
+	w.keys("y")
+	w.send("teamRemoveResultMsg", teamRemoveResultMsg{})
+	w.dump("team-remove-done", "Done · done screen")
+	w.keys("enter")
+	w.dump("team-remove-flash", "Menu · team member removed (flash)")
+}
+
+// ── vault group ──
+func walkVaultOps(w *walker) {
+	w.flow = "vault"
+	w.reset()
+	w.keys("5")
+	w.dump("menu-vault", "Menu · Vault group")
+	w.keys("1")
+	w.dump("vault-status", "Vault · session status")
+	for _, op := range []struct{ key, name string }{{"2", "pull"}, {"3", "push"}} {
+		w.reset()
+		w.keys("5", op.key)
+		w.dump("vault-"+op.name+"-running", "Vault · "+op.name+" running")
+		w.send("syncResultMsg", syncResultMsg{out: "Already up to date.\nvault: 5 integrations · 5 grants · 3 capabilities\n"})
+		w.dump("vault-"+op.name+"-done", "Vault · "+op.name+" done")
+		w.keys("x")
+		w.dump("vault-"+op.name+"-flash", "Menu · "+op.name+" succeeded (flash)")
+		w.reset()
+		w.keys("5", op.key)
+		w.send("syncResultMsg", syncResultMsg{err: "! [rejected] main -> main (fetch first)\nerror: failed to " + op.name + " some refs"})
+		w.dump("vault-"+op.name+"-error", "Vault · "+op.name+" failed", "edge")
+	}
+	w.reset()
+	w.keys("5", "4")
+	w.dump("vault-doctor", "Vault · doctor (healthy)")
+	sops := filepath.Join(w.bin, "sops")
+	must(w.t, os.Remove(sops))
+	w.reset()
+	w.keys("5", "4")
+	w.dump("vault-doctor-unhealthy", "Vault · doctor (sops missing)", "key", "edge")
+	must(w.t, os.WriteFile(sops, nil, 0o755))
+}
+
+// ── more: settings · update · logout · uninstall ──
+func walkMore(w *walker) {
+	w.flow = "more"
+	w.reset()
+	w.keys("M")
+	w.dump("menu-more", "Menu · More group")
+	w.keys("1")
+	w.dump("settings", "Settings · cursor on key backend", "key")
+	for _, r := range []string{"popup-timeout", "idle-timeout", "harness"} {
+		w.keys("down")
+		w.dump("settings-"+r, "Settings · cursor on "+r)
+	}
+	set := func(k int) {
+		w.reset()
+		w.keys("M", "1")
+		for i := 0; i < k; i++ {
+			w.keys("down")
+		}
+		w.keys("enter")
+	}
+	set(0)
+	w.dump("settings-backend-picker", "Settings · key backend picker")
+	w.keys("down", "enter")
+	w.dump("settings-backend-flash", "Settings · key backend changed (flash)")
+	set(1)
+	w.dump("settings-popup-picker", "Settings · popup timeout picker")
+	set(2)
+	w.dump("settings-idle-picker", "Settings · idle timeout presets")
+	w.keys("down", "down", "down", "down", "down", "down", "enter")
+	w.dump("settings-idle-custom", "Settings · custom idle timeout input")
+	w.keys("30s", "enter")
+	w.dump("settings-idle-custom-error", "Settings · custom idle timeout too short", "edge")
+	w.keys("backspace", "backspace", "backspace", "90m", "enter")
+	w.dump("settings-idle-flash", "Settings · idle timeout changed (flash)")
+	set(3)
+	w.dump("settings-harness-picker", "Settings · harness picker")
+	w.keys("down", "enter")
+	w.dump("settings-harness-flash", "Settings · harness changed (flash)")
+
+	w.reset()
+	w.keys("M", "2")
+	w.dump("update-checking", "Update · checking")
+	w.send("updateCheckMsg", updateCheckMsg{installed: "v1.14.1", latest: "v1.15.0"})
+	w.dump("update-confirm", "Update · confirm install", "key")
+	w.keys("y")
+	w.dump("update-installing", "Update · installing")
+	w.send("updateLineMsg", updateLineMsg{line: "… running: dop update --channel stable"})
+	w.send("updateLineMsg", updateLineMsg{line: "downloading dop_darwin_arm64.tar.gz (8.4 MB)"})
+	w.keys("?")
+	w.dump("update-installing-output", "Update · installing (live output)")
+	w.send("updateInstallDoneMsg", updateInstallDoneMsg{rc: 1, err: "checksum mismatch for dop_darwin_arm64.tar.gz"})
+	w.dump("update-failed", "Update · install failed", "edge")
+	w.reset()
+	w.keys("M", "2")
+	w.send("updateCheckMsg", updateCheckMsg{installed: "v1.14.1", latest: "v1.15.0"})
+	w.keys("y")
+	w.send("updateInstallDoneMsg", updateInstallDoneMsg{rc: 0})
+	w.dump("update-installed", "Update · installed (TUI will exit)")
+	w.reset()
+	w.keys("M", "2")
+	w.send("updateCheckMsg", updateCheckMsg{installed: "v1.14.1", latest: "v1.15.0"})
+	w.keys("c")
+	w.dump("update-checking-dev", "Update · re-check on dev channel")
+	w.reset()
+	w.keys("M", "2")
+	w.send("updateCheckMsg", updateCheckMsg{installed: "v1.14.1", latest: "v1.14.1"})
+	w.dump("update-current", "Update · already up to date")
+	w.keys("x")
+	w.dump("update-current-flash", "Menu · already up to date (flash)")
+	w.reset()
+	w.keys("M", "2")
+	w.send("updateCheckMsg", updateCheckMsg{err: "GET api.github.com/repos/untoldecay/dop/releases: dial tcp: no route to host"})
+	w.dump("update-check-failed", "Update · check failed", "edge")
+
+	w.reset()
+	w.keys("M", "3")
+	w.dump("menu-logout", "Menu · after logout (locked + flash)")
+	w.reset()
+	w.keys("M", "4")
+	w.dump("uninstall-admin", "Uninstall · confirm (admin install)")
+	// default picker choices: enter keeps the current value
+	for k := 0; k < 4; k++ {
+		set(k)
+		w.line("enter")
+	}
+	w.reset()
+	w.keys("M", "2")
+	w.send("updateCheckMsg", updateCheckMsg{installed: "v1.14.1", latest: "v1.15.0"})
+	w.line("enter")
+}
+
+// ── edge: empty vault, overflowing list ──
+func walkEdge(w *walker) {
+	w.flow = ""
+	w.writeVault(walkVaultEmpty)
+	must(w.t, os.Rename(w.inviteFile(), w.inviteFile()+".off"))
+	list := func(k, slug, title string, tags ...string) {
+		w.reset()
+		w.keys("3", k)
+		w.load()
+		w.dump(slug, title, append(tags, "edge")...)
+	}
+	list("1", "empty-integrations", "Integrations · empty vault", "key")
+	list("2", "empty-grants", "Grants · empty vault")
+	list("3", "empty-bearers", "Bearers · empty vault")
+	w.keys("tab")
+	w.dump("empty-bearers-all", "Bearers · empty vault, Revoked tab", "edge")
+	list("4", "empty-team", "Team · no admins")
+	w.keys("tab")
+	w.dump("empty-team-pending", "Team · no pending invites", "edge")
+	w.reset()
+	w.keys("2", "agent", "enter")
+	w.dump("empty-issue-grants", "Issue · no grants (free-text fallback)", "edge")
+	w.reset()
+	w.keys("1", "1")
+	w.dump("empty-integration-add", "Add integration · empty vault (name step)", "edge")
+	w.reset()
+	w.keys("1", "2")
+	w.text("x")
+	w.keys("enter")
+	w.dump("empty-grant-add-integration", "Add grant · no integrations", "edge")
+	w.keys("enter")
+	w.dump("empty-grant-add-error", "Add grant · no integrations error", "edge")
+	for _, r := range []struct{ k, slug, title string }{
+		{"1", "empty-revoke", "Revoke bearer · nothing active"},
+		{"2", "empty-grant-remove", "Remove grant · nothing to remove"},
+		{"3", "empty-integration-remove", "Remove credentials · nothing to remove"},
+		{"4", "empty-team-remove", "Remove team member · no admins"},
+	} {
+		w.reset()
+		w.keys("4", r.k)
+		w.load()
+		w.dump(r.slug, r.title, "edge")
+	}
+
+	w.writeVault(walkVaultMany())
+	list("3", "overflow-bearers", "Bearers · 16 active (overflows 24 rows)", "key")
+	for i := 0; i < 15; i++ {
+		w.keys("down")
+	}
+	w.dump("overflow-bearers-bottom", "Bearers · cursor on last row", "edge")
+	w.reset()
+	w.keys("4", "1")
+	w.load()
+	w.dump("overflow-revoke", "Revoke bearer · long pick list", "edge")
+
+	w.writeVault(walkVault)
+	must(w.t, os.Rename(w.inviteFile()+".off", w.inviteFile()))
+}
+
+// ── pending claim banner (last: it sticks to every later menu) ──
+func walkPending(w *walker) {
+	w.flow = "pending"
+	must(w.t, pendingclaim.Write(w.paths, pendingclaim.Record{
+		SAS: "472-913", LookupID: "a1b2c3d4e5f60718293a4b5c", CapabilityID: "c0a1b2c3d4e5f6a7b8c9d0e1",
+		Subject: "claude-code-laptop", Pubkey: "04d1e2f3a4b5c6d7e8f9a0b1",
+		StartedAt: time.Now(), ExpiresAt: time.Now().Add(pendingclaim.TTL), State: pendingclaim.StatePending,
+	}))
+	w.reset()
+	w.dump("pending-banner", "Menu · pending-claim banner", "key")
+	w.keys("a")
+	w.dump("pending-list", "Pending claims · list")
+	w.keys("enter")
+	w.dump("pending-pass-empty", "Pending claims · approval passphrase")
+	w.keys("approve")
+	w.dump("pending-pass", "Pending claims · passphrase typed")
+	// approve and reject run in a Cmd (dropped here): inject the result.
+	w.keys("enter")
+	w.dump("pending-approve-running", "Pending claims · approving")
+	w.send("pendingResultMsg", pendingResultMsg{})
+	w.dump("pending-approve-done", "Pending claims · approved")
+	w.reset()
+	w.keys("a", "r")
+	w.dump("pending-reject-confirm", "Pending claims · reject confirm")
+	w.keys("enter")
+	w.dump("pending-reject-running", "Pending claims · rejecting")
+	w.send("pendingResultMsg", pendingResultMsg{reject: true, err: "reject: claim already expired"})
+	w.dump("pending-reject-error", "Pending claims · reject failed", "edge")
+	w.keys("enter")
+	w.send("pendingResultMsg", pendingResultMsg{reject: true})
+	w.dump("pending-reject-done", "Pending claims · rejected")
+}
+
+var walkSpecial = map[string]bool{
+	"enter": true, "esc": true, "up": true, "down": true, "left": true,
+	"right": true, "tab": true, "shift+tab": true, "backspace": true,
+	"ctrl+a": true,
+}
+
+func walkKey(s string) tea.KeyMsg {
+	switch s {
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
+	case "esc":
+		return tea.KeyMsg{Type: tea.KeyEsc}
+	case "up":
+		return tea.KeyMsg{Type: tea.KeyUp}
+	case "down":
+		return tea.KeyMsg{Type: tea.KeyDown}
+	case "left":
+		return tea.KeyMsg{Type: tea.KeyLeft}
+	case "right":
+		return tea.KeyMsg{Type: tea.KeyRight}
+	case "tab":
+		return tea.KeyMsg{Type: tea.KeyTab}
+	case "shift+tab":
+		return tea.KeyMsg{Type: tea.KeyShiftTab}
+	case "backspace":
+		return tea.KeyMsg{Type: tea.KeyBackspace}
+	case " ":
+		return tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
+	case "ctrl+a":
+		return tea.KeyMsg{Type: tea.KeyCtrlA}
+	}
+	// ponytail: multi-char strings arrive as one paste-like KeyRunes msg;
+	// every text field here appends mm.Runes, so that's equivalent to typing.
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+}
+
+// walkDaemon answers the admin socket: status → unlocked session,
+// logout → ok, anything else → error (so no decrypt/sign path pretends
+// to succeed).
+func walkDaemon(t *testing.T, sock string) {
+	t.Helper()
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("fake daemon: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			var req admin.Request
+			resp := admin.Response{Error: "walk: fake daemon"}
+			if admin.ReadMessage(c, &req) == nil {
+				switch req.Op {
+				case admin.OpStatus:
+					now := time.Now().Unix()
+					data, _ := json.Marshal(admin.StatusResp{
+						Unlocked: true, AdminPubkey: walkPubkey,
+						AgeRecipient:   "age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3290gq",
+						IdleTTLSeconds: 1800, AbsTTLSeconds: 8 * 3600,
+						StartedAtUnix: now - 600, LastActivityUnix: now,
+					})
+					resp = admin.Response{OK: true, Data: data}
+				case admin.OpLogout:
+					resp = admin.Response{OK: true}
+				}
+			}
+			_ = admin.WriteMessage(c, resp)
+			c.Close()
+		}
+	}()
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
