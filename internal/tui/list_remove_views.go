@@ -177,7 +177,7 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m, cmd := v.sub.Update(msg)
 		if d, ok := m.(doner); ok && d.Done() {
 			if f, ok := m.(flasher); ok && f.Flash() != "" {
-				v.flash = "credential added · synced with team"
+				v.flash = f.Flash()
 			}
 			v.sub, v.keep = nil, v.selectedName()
 			return v, v.load
@@ -243,7 +243,9 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case integModeConfirm:
 			return v.updateConfirm(mm)
 		case integModeDone:
-			// Any key: back to a freshly loaded list / detail.
+			if mm.String() != "enter" {
+				return v, nil // done screens leave on enter only
+			}
 			v.mode = integModeDetail
 			if v.pending == "remove" {
 				v.mode = integModeList
@@ -353,9 +355,18 @@ func (v *integrationListView) updateDetail(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "e", "r":
 		return v.runInfoAction(k)
 	case "a":
-		// Add credential: the add-integration form, on this service.
-		a := newAddCredentialView(v.client, v.paths, v.selectedName())
-		a.Update(tea.WindowSizeMsg{Width: v.width, Height: v.height})
+		// Credentials tab: add a credential (and its grant) to this
+		// integration; Grants tab: add a grant on it.
+		var a tea.Model
+		switch v.tab {
+		case 1:
+			a = newAddCredentialView(v.client, v.paths, v.selectedName())
+		case 2:
+			a = newAddGrantFor(v.client, v.paths, v.selectedName())
+		default:
+			return v, nil
+		}
+		a, _ = a.Update(tea.WindowSizeMsg{Width: v.width, Height: v.height})
 		v.sub = a
 	}
 	return v, nil
@@ -526,7 +537,7 @@ var integListKeys = keyMap{
 var integDetailKeys = keyMap{
 	full: [][]key.Binding{
 		{keyMove, hint("enter", "run / open"), hint("tab", "next tab"), hint("shift+tab", "previous tab")},
-		{hint("e", "edit"), hint("r", "remove"), hint("a", "add credential"), keyBack, keyQuit},
+		{hint("e", "edit"), hint("r", "remove"), hint("a", "add credential / grant"), keyBack, keyQuit},
 	},
 	notes: []string{
 		"Projects and tags group integrations and grants; they are not permissions.",
@@ -598,7 +609,7 @@ func (v *integrationListView) viewDetail(width, height int) string {
 		body = append(append(v.infoBody(name, it, width), ""), actionRows(integInfoActions, v.actionCursor, &st)...)
 		km.short = []key.Binding{hint("enter", "run"), hint("tab", "credentials"), keyBack}
 	case 1:
-		km.short = []key.Binding{hint("enter", "open"), hint("tab", "grants"), keyBack}
+		km.short = []key.Binding{hint("enter", "open"), hint("a", "add"), hint("tab", "grants"), keyBack}
 		if len(v.tokenNames) == 0 {
 			body = []string{bodySt.Render("  No credentials yet. Press a to add one.")}
 			km.short = km.short[1:]
@@ -637,9 +648,9 @@ func (v *integrationListView) viewDetail(width, height int) string {
 			km.short = []key.Binding{hint("enter", "run"), keyBack}
 		}
 	default:
-		km.short = []key.Binding{hint("enter", "open"), hint("tab", "info"), keyBack}
+		km.short = []key.Binding{hint("enter", "open"), hint("a", "add"), hint("tab", "info"), keyBack}
 		if len(refs) == 0 {
-			body = []string{bodySt.Render("  No grant uses it yet. Add one from the menu: Add › Grant.")}
+			body = []string{bodySt.Render("  No grant uses it yet. Press a to add one.")}
 			km.short = km.short[1:]
 			break
 		}
@@ -1168,7 +1179,7 @@ func (v *integrationListView) updateTokenEditScope(mm tea.KeyMsg) (tea.Model, te
 	}
 	switch mm.String() {
 	case "esc":
-		v.mode = integModeTokenAction
+		v.tokenScopeMode = true // back to the preset picker
 	case "enter":
 		return v.startRun("scope", integModeTokenEditScope, v.doTokenSetScope())
 	case "backspace":
@@ -1737,7 +1748,9 @@ func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case grantModeEdit:
 			return v.updateEdit(mm)
 		case grantModeDone:
-			// Any key: back to a freshly loaded list (or to the integration).
+			if mm.String() != "enter" {
+				return v, nil // done screens leave on enter only
+			}
 			v.done = v.solo
 			v.mode, v.pending = grantModeList, ""
 			return v, v.load
