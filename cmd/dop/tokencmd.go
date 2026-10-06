@@ -214,6 +214,9 @@ func runTokenShow(args []string) int {
 	return 0
 }
 
+// defaultPinTTL — PIN validity for issue (and the portable re-issue).
+const defaultPinTTL = "1h"
+
 func runTokenIssue(args []string) int {
 	fs := flag.NewFlagSet("token issue", flag.ExitOnError)
 	grantsCSV := fs.String("grants", "", "comma-separated grant IDs (required unless --project)")
@@ -229,7 +232,7 @@ func runTokenIssue(args []string) int {
 	// times during one back-and-forth with the admin). 1h matches a
 	// typical chat session; `dop token repin` is the escape hatch when
 	// it still runs out.
-	pinTTL := fs.String("pin-ttl", "1h", "PIN validity window when --bind is default (shorter = tighter; use `dop token repin` if it expires)")
+	pinTTL := fs.String("pin-ttl", defaultPinTTL, "PIN validity window when --bind is default (shorter = tighter; use `dop token repin` if it expires)")
 	// v1.13.0-rc12 — issuing a bearer that contains protected grants
 	// requires the admin passphrase (same gate as creating one).
 	passphraseStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin instead of the tty (used when any of --grants is protected; TUI passes this)")
@@ -364,11 +367,23 @@ func runTokenIssue(args []string) int {
 		return 1
 	}
 
-	// v1.13.0-rc12 — if any grant in the bundle is protected, we must
-	// own ALL protected grants + prove possession of the approval
-	// passphrase before issuing. A bearer-level gate is enough — the
-	// payload is only decoded on resolve, and the audit event ties the
-	// subject to the protected grant set.
+	protectedGrants, err := gateProtectedGrants(client, paths, v, grants, *passphraseStdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+		return 1
+	}
+	if !neverExpires {
+		expiresAt = time.Now().Add(expDur).UTC().Truncate(time.Second)
+	}
+	return issueBearer("dop token issue", client, paths, v, vaultPath, strings.TrimSpace(*name), grants, expiresAt, *noBind, *bindPubkey, pinDur, *portable, protectedGrants)
+}
+
+// gateProtectedGrants — v1.13.0-rc12: if any grant in the bundle is
+// protected, the caller must own ALL protected grants and prove
+// possession of the approval passphrase. A bearer-level gate is enough:
+// the payload is only decoded on resolve, and the audit event ties the
+// subject to the protected grant set. Returns the protected grants.
+func gateProtectedGrants(client *admin.Client, paths *config.Paths, v *vault.Vault, grants []string, passStdin bool) ([]string, error) {
 	var protectedGrants []string
 	for _, gid := range grants {
 		g := v.Grants[gid]
@@ -376,18 +391,24 @@ func runTokenIssue(args []string) int {
 			continue
 		}
 		if err := requireProtectionOwner(client, "grant "+gid, g.Protected, g.Owner); err != nil {
-			fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
-			return 1
+			return nil, err
 		}
 		protectedGrants = append(protectedGrants, gid)
 	}
 	if len(protectedGrants) > 0 {
-		if err := promptProtectionPassphrase(paths, fmt.Sprintf("approval passphrase (issue bearer containing %d protected grant(s)): ", len(protectedGrants)), *passphraseStdin); err != nil {
-			fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
-			return 1
+		if err := promptProtectionPassphrase(paths, fmt.Sprintf("approval passphrase (issue bearer containing %d protected grant(s)): ", len(protectedGrants)), passStdin); err != nil {
+			return nil, err
 		}
 	}
+	return protectedGrants, nil
+}
 
+// issueBearer mints a fresh bearer + bundle for subject, saves the vault,
+// writes the sidecar and prints the bearer (+ PIN) once on stdout. name
+// prefixes every message. Shared by token issue and token portable --on
+// (unclaimed re-issue).
+func issueBearer(name string, client *admin.Client, paths *config.Paths, v *vault.Vault, vaultPath, subject string, grants []string,
+	expiresAt time.Time, noBind bool, bindPubkey string, pinDur time.Duration, portable bool, protectedGrants []string) int {
 	// Ensure vault_context exists (both in the vault AND as a sidecar
 	// so agent installs — which can't decrypt the vault — can compute
 	// lookup ids).
@@ -405,16 +426,15 @@ func runTokenIssue(args []string) int {
 	// Generate bearer + capability id.
 	bearer, err := capability.NewBearer()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+		fmt.Fprintf(os.Stderr, name+": %v\n", err)
 		return 1
 	}
 	capIDRaw, err := capability.NewCapabilityID()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+		fmt.Fprintf(os.Stderr, name+": %v\n", err)
 		return 1
 	}
 	capIDHex := hex.EncodeToString(capIDRaw[:])
-	subject := strings.TrimSpace(*name)
 	if subject == "" {
 		subject = "token-" + capIDHex[:8]
 	}
@@ -422,15 +442,12 @@ func runTokenIssue(args []string) int {
 	// Resolve grants → env bundle.
 	envBundle := resolveGrantsToEnv(v, grants)
 	if len(envBundle) == 0 {
-		fmt.Fprintln(os.Stderr, "dop token issue: resolved env bundle is empty (are the grants wired to integrations?)")
+		fmt.Fprintln(os.Stderr, name+": resolved env bundle is empty (are the grants wired to integrations?)")
 		return 1
 	}
 
 	// Bump the per-subject generation.
 	gen := v.BumpGeneration(subject)
-	if !neverExpires {
-		expiresAt = time.Now().Add(expDur).UTC().Truncate(time.Second)
-	}
 	lookupID := capability.LookupID(vaultCtx, bearer)
 
 	// Resolve binding mode. Default is PIN-claim: user copies bearer+PIN
@@ -439,23 +456,23 @@ func runTokenIssue(args []string) int {
 	var envBinding *capability.EnvelopeBinding
 	var recBinding *capability.RecordBinding
 	switch {
-	case *noBind:
+	case noBind:
 		envBinding = &capability.EnvelopeBinding{Kind: vault.BindingKindNone}
 		recBinding = &capability.RecordBinding{Kind: vault.BindingKindNone}
-	case *bindPubkey != "":
+	case bindPubkey != "":
 		envBinding = &capability.EnvelopeBinding{
 			Kind:   vault.BindingKindPubkey,
-			Pubkey: *bindPubkey,
+			Pubkey: bindPubkey,
 		}
 		recBinding = &capability.RecordBinding{
 			Kind:      vault.BindingKindPubkey,
-			Pubkey:    *bindPubkey,
+			Pubkey:    bindPubkey,
 			ClaimedAt: time.Now().UTC().Truncate(time.Second),
 		}
 	default:
 		p, err := capability.NewPIN()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+			fmt.Fprintf(os.Stderr, name+": %v\n", err)
 			return 1
 		}
 		pin = p
@@ -474,12 +491,12 @@ func runTokenIssue(args []string) int {
 	// Write bundle to disk.
 	bundlePath := filepath.Join(paths.Vault, "capabilities", lookupID+".bundle")
 	if err := os.MkdirAll(filepath.Dir(bundlePath), 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+		fmt.Fprintf(os.Stderr, name+": %v\n", err)
 		return 1
 	}
 	f, err := os.Create(bundlePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop token issue: %v\n", err)
+		fmt.Fprintf(os.Stderr, name+": %v\n", err)
 		return 1
 	}
 	bundleBytes, err := capability.Write(f, capability.WriteOpts{
@@ -493,7 +510,7 @@ func runTokenIssue(args []string) int {
 	})
 	f.Close()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop token issue: write bundle: %v\n", err)
+		fmt.Fprintf(os.Stderr, name+": write bundle: %v\n", err)
 		return 1
 	}
 	bundleHash := capability.HashBundle(bundleBytes)
@@ -512,7 +529,7 @@ func runTokenIssue(args []string) int {
 		Binding:      recBinding,
 	}
 	if err := signRecordViaDaemon(client, &rec); err != nil {
-		fmt.Fprintf(os.Stderr, "dop token issue: sign: %v\n", err)
+		fmt.Fprintf(os.Stderr, name+": sign: %v\n", err)
 		return 1
 	}
 	if v.Capabilities == nil {
@@ -524,19 +541,19 @@ func runTokenIssue(args []string) int {
 	// Status) and store the ciphertext on the capability so `dop use`
 	// can later retrieve it. Encryption uses only the recipient
 	// (public key); unwrapping requires the identity (daemon-held).
-	if *portable {
+	if portable {
 		st, err := client.Status()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "dop token issue: session status for --portable: %v\n", err)
+			fmt.Fprintf(os.Stderr, name+": session status for --portable: %v\n", err)
 			return 1
 		}
 		if st.AgeRecipient == "" {
-			fmt.Fprintln(os.Stderr, "dop token issue: --portable requires an active admin session with an age recipient")
+			fmt.Fprintln(os.Stderr, name+": --portable requires an active admin session with an age recipient")
 			return 1
 		}
 		wrapped, err := admin.WrapToRecipient([]byte(bearer), st.AgeRecipient)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "dop token issue: wrap bearer for admin use: %v\n", err)
+			fmt.Fprintf(os.Stderr, name+": wrap bearer for admin use: %v\n", err)
 			return 1
 		}
 		stored.PortableWrapped = wrapped
@@ -549,14 +566,14 @@ func runTokenIssue(args []string) int {
 		// issue for the same subject would bump the generation from
 		// the stale vault count and collide with this bundle's gen.
 		_ = os.Remove(bundlePath)
-		fmt.Fprintf(os.Stderr, "dop token issue: %v (rolled back bundle)\n", err)
+		fmt.Fprintf(os.Stderr, name+": %v (rolled back bundle)\n", err)
 		return 1
 	}
 	if err := writeRecordSidecar(paths, rec); err != nil {
 		// Vault has the record but sidecar failed. Roll bundle back
 		// too — without the sidecar, exec would reject anyway.
 		_ = os.Remove(bundlePath)
-		fmt.Fprintf(os.Stderr, "dop token issue: write record: %v (rolled back bundle; vault out of sync — run `dop token revoke %s`)\n", err, subject)
+		fmt.Fprintf(os.Stderr, name+": write record: %v (rolled back bundle; vault out of sync — run `dop token revoke %s`)\n", err, subject)
 		return 1
 	}
 
@@ -575,7 +592,7 @@ func runTokenIssue(args []string) int {
 	if len(protectedGrants) > 0 {
 		logProtectedTokenIssue(paths, subject, protectedGrants)
 	}
-	fmt.Fprintf(os.Stderr, "dop token issue: issued %s (grants: %v, expires: %s)\n", subject, grants, tokenExpiryDisplay(expiresAt))
+	fmt.Fprintf(os.Stderr, name+": issued %s (grants: %v, expires: %s)\n", subject, grants, tokenExpiryDisplay(expiresAt))
 	// rc5 Option A: approval runs for every print surface. The capability
 	// is already written to the vault; if approval is denied the mutation
 	// stays intact — only the stdout print is suppressed.
@@ -692,38 +709,12 @@ func runTokenRevoke(args []string) int {
 		return 1
 	}
 	matched := candidates[0]
-	c := v.Capabilities[matched]
-	c.Status = capability.RecordStatusRevoked
-	// Bump generation on revoke so any cached bundle is superseded.
-	c.Generation = v.BumpGeneration(c.Subject)
-
-	// Re-sign the record with the new status.
-	rec := vaultCapability2Record(c, matched)
-	if err := signRecordViaDaemon(client, &rec); err != nil {
+	c, err := markRevoked(client, v, matched)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop token revoke: %v\n", err)
 		return 1
 	}
-	putCapability(v, matched, rec)
-
-	// Delete the bundle + record files.
-	bundlePath := filepath.Join(paths.Vault, "capabilities", c.LookupID+".bundle")
-	if err := os.Remove(bundlePath); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "dop token revoke: warning: %v\n", err)
-	}
-	recordPath := filepath.Join(paths.Vault, "capabilities", c.LookupID+".record")
-	if err := os.Remove(recordPath); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "dop token revoke: warning: %v\n", err)
-	}
-	// v1.13 — also remove the local agent key file(s) for this
-	// bearer. Only runs on the machine where the agent claimed; a
-	// remote admin running revoke never sees these files, so it's a
-	// no-op there. Covers both ed25519 and p256 file-backed keys.
-	for _, suffix := range []string{".key", ".p256"} {
-		p := filepath.Join(paths.Root, "agent-keys", c.LookupID+suffix)
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "dop token revoke: warning: local agent key %s: %v\n", p, err)
-		}
-	}
+	removeBearerFiles(paths, c.LookupID, "dop token revoke")
 
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
 		fmt.Fprintf(os.Stderr, "dop token revoke: %v\n", err)
@@ -738,12 +729,43 @@ func runTokenRevoke(args []string) int {
 	return 0
 }
 
+// markRevoked sets capID's status to revoked, bumps the generation (so
+// any cached bundle is superseded) and re-signs the record in v.
+func markRevoked(client *admin.Client, v *vault.Vault, capID string) (vault.Capability, error) {
+	c := v.Capabilities[capID]
+	c.Status = capability.RecordStatusRevoked
+	c.Generation = v.BumpGeneration(c.Subject)
+	rec := vaultCapability2Record(c, capID)
+	if err := signRecordViaDaemon(client, &rec); err != nil {
+		return c, err
+	}
+	putCapability(v, capID, rec)
+	return v.Capabilities[capID], nil
+}
+
+// removeBearerFiles deletes a retired bearer's bundle and record files,
+// plus the local agent key file(s). v1.13 — the key files only exist on
+// the machine where the agent claimed; a remote admin never sees them,
+// so it's a no-op there. Covers both ed25519 and p256 file-backed keys.
+func removeBearerFiles(paths *config.Paths, lookupID, name string) {
+	for _, p := range []string{
+		filepath.Join(paths.Vault, "capabilities", lookupID+".bundle"),
+		filepath.Join(paths.Vault, "capabilities", lookupID+".record"),
+		filepath.Join(paths.Root, "agent-keys", lookupID+".key"),
+		filepath.Join(paths.Root, "agent-keys", lookupID+".p256"),
+	} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "%s: warning: %v\n", name, err)
+		}
+	}
+}
+
 func runTokenRepin(args []string) int {
 	fs := flag.NewFlagSet("token repin", flag.ExitOnError)
 	subject := fs.String("subject", "", "subject whose PIN should be reissued (required)")
 	tokenFile := fs.String("token-file", "", "read the current bearer from file")
 	// v1.13.0-rc11 — matches the issue-time default (1h for chat UX).
-	pinTTL := fs.String("pin-ttl", "1h", "PIN validity window")
+	pinTTL := fs.String("pin-ttl", defaultPinTTL, "PIN validity window")
 	_ = fs.Parse(args)
 
 	if strings.TrimSpace(*subject) == "" {
@@ -902,42 +924,26 @@ func runTokenRepin(args []string) int {
 	return 0
 }
 
-// runTokenPortable stores (--on) or removes (--off) the portable stash on
-// an existing bearer. --on verifies the current bearer the way repin does
-// and wraps it the way issue --portable does. Both directions sit behind
-// the approval passphrase so a scripted shell cannot flip it silently.
+// runTokenPortable makes a bearer portable (--on) or removes its portable
+// stash (--off). --on cannot wrap the bearer it already has (DOP never
+// keeps it), so it re-issues: a claimed bearer is rotated the way token
+// rotate does (the agent picks the new one up on its next exec), an
+// unclaimed one is re-issued with a new PIN and the old one revoked. Either
+// way the fresh bearer is stashed wrapped to the admin's age recipient.
 func runTokenPortable(args []string) int {
 	fs := flag.NewFlagSet("token portable", flag.ExitOnError)
 	subject := fs.String("subject", "", "subject of the bearer (required)")
-	on := fs.Bool("on", false, "store a portable copy (needs the current bearer)")
+	on := fs.Bool("on", false, "re-issue the bearer as portable (claimed: rotated in place; unclaimed: new bearer + PIN, old revoked)")
 	off := fs.Bool("off", false, "remove the portable copy")
-	tokenFile := fs.String("token-file", "", "read the current bearer from file")
-	tokenStdin := fs.Bool("token-stdin", false, "read the current bearer from the first line of stdin")
-	passStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin (after the bearer line)")
+	passStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin")
 	_ = fs.Parse(args)
 	fail := func(f string, a ...any) int {
 		fmt.Fprintf(os.Stderr, "dop token portable: "+f+"\n", a...)
 		return 1
 	}
 	if strings.TrimSpace(*subject) == "" || *on == *off {
-		fmt.Fprintln(os.Stderr, "usage: dop token portable --subject <subject> (--on | --off) [--token-file <path> | --token-stdin] [--passphrase-stdin]")
+		fmt.Fprintln(os.Stderr, "usage: dop token portable --subject <subject> (--on | --off) [--passphrase-stdin]")
 		return 2
-	}
-	var bearer string
-	if *on {
-		var err error
-		if *tokenStdin {
-			bearer, err = readPassphrase("", true) // byte-wise line read; leaves the passphrase line on stdin
-			bearer = strings.TrimSpace(bearer)
-		} else {
-			bearer, err = readBearer(*tokenFile)
-		}
-		if err == nil && bearer == "" {
-			err = errors.New("no bearer")
-		}
-		if err != nil {
-			return fail("%v — supply via --token-stdin, --token-file or $DOP_TOKEN", err)
-		}
 	}
 
 	paths, _ := config.Resolve()
@@ -949,45 +955,80 @@ func runTokenPortable(args []string) int {
 	if err != nil {
 		return fail("%v", err)
 	}
-	var vaultCtx []byte
-	recipient := ""
-	if *on {
-		if vaultCtx, err = os.ReadFile(filepath.Join(paths.Vault, "vault-context.bin")); err != nil {
-			return fail("no vault_context: %v", err)
-		}
-		st, err := client.Status()
-		if err != nil {
-			return fail("session status: %v", err)
-		}
-		if st.AgeRecipient == "" {
-			return fail("needs an active admin session with an age recipient")
-		}
-		recipient = st.AgeRecipient
-	}
-	lookupID, err := setPortable(v, *subject, bearer, vaultCtx, recipient)
+	id, err := activeBySubject(v, *subject)
 	if err != nil {
 		return fail("%v", err)
 	}
-	if err := promptProtectionPassphrase(paths, fmt.Sprintf("approval passphrase (portable copy for %s): ", *subject), *passStdin); err != nil {
+	old := v.Capabilities[id]
+	if *off {
+		if err := promptProtectionPassphrase(paths, fmt.Sprintf("approval passphrase (portable copy for %s): ", *subject), *passStdin); err != nil {
+			return fail("%v", err)
+		}
+		old.PortableWrapped = ""
+		// ponytail: the stash sits outside the signed record, so no re-sign.
+		v.Capabilities[id] = old
+		if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
+			return fail("save vault: %v", err)
+		}
+		audit.Append(paths, audit.Event{Kind: audit.EventPortable, Subject: *subject, LookupID: old.LookupID,
+			Extra: map[string]string{"portable": "off"}})
+		fmt.Printf("portable copy removed for %s\n", *subject)
+		return 0
+	}
+
+	if !old.ExpiresAt.IsZero() && time.Now().After(old.ExpiresAt) {
+		return fail("bearer %q expired %s — issue a new one instead", *subject, old.ExpiresAt.Format(time.RFC3339))
+	}
+	protectedGrants, err := gateProtectedGrants(client, paths, v, old.Grants, *passStdin)
+	if err != nil {
 		return fail("%v", err)
 	}
-	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
-		return fail("save vault: %v", err)
+	st, err := client.Status()
+	if err != nil {
+		return fail("session status: %v", err)
 	}
-	state, msg := "off", "portable copy removed for %s\n"
-	if *on {
-		state, msg = "on", "portable copy stored for %s\n"
+	if st.AgeRecipient == "" {
+		return fail("needs an active admin session with an age recipient")
 	}
-	audit.Append(paths, audit.Event{Kind: audit.EventPortable, Subject: *subject, LookupID: lookupID,
-		Extra: map[string]string{"portable": state}})
-	fmt.Printf(msg, *subject)
+	portableEvent := func(lookupID string) {
+		audit.Append(paths, audit.Event{Kind: audit.EventPortable, Subject: *subject, LookupID: lookupID,
+			Extra: map[string]string{"portable": "on", "replaces": old.LookupID}})
+	}
+
+	if old.Binding != nil && old.Binding.Pubkey != "" {
+		newLookupID, newGen, err := rotateBearer(client, paths, v, vaultPath, id, st.AgeRecipient)
+		if err != nil {
+			return fail("%v", err)
+		}
+		portableEvent(newLookupID)
+		fmt.Fprintf(os.Stderr, "dop token portable: rotated %s to gen %d; the agent picks up the new bearer on its next run\n", *subject, newGen)
+		fmt.Printf("portable copy stored for %s\n", *subject)
+		return 0
+	}
+
+	// Unclaimed (PIN) or unbound: re-issue with the same grants, expiry
+	// and binding policy, and retire the old record in the same save.
+	pinDur, _ := time.ParseDuration(defaultPinTTL)
+	noBind := old.Binding == nil || old.Binding.Kind == vault.BindingKindNone
+	if _, err := markRevoked(client, v, id); err != nil {
+		return fail("%v", err)
+	}
+	if rc := issueBearer("dop token portable", client, paths, v, vaultPath, *subject, old.Grants, old.ExpiresAt,
+		noBind, "", pinDur, true, protectedGrants); rc != 0 {
+		return rc
+	}
+	removeBearerFiles(paths, old.LookupID, "dop token portable")
+	audit.Append(paths, audit.Event{Kind: audit.EventRevoke, Subject: *subject, LookupID: old.LookupID})
+	for _, c := range v.Capabilities {
+		if c.Subject == *subject && c.Status == capability.RecordStatusActive {
+			portableEvent(c.LookupID)
+		}
+	}
 	return 0
 }
 
-// setPortable finds subject's single active record and clears its stash,
-// or (bearer != "") checks the bearer against the record's lookup id and
-// stores it wrapped to recipient. Returns the record's lookup id.
-func setPortable(v *vault.Vault, subject, bearer string, vaultCtx []byte, recipient string) (string, error) {
+// activeBySubject returns the id of subject's single active record.
+func activeBySubject(v *vault.Vault, subject string) (string, error) {
 	id, inactive := "", ""
 	for cid, c := range v.Capabilities {
 		switch {
@@ -1006,21 +1047,7 @@ func setPortable(v *vault.Vault, subject, bearer string, vaultCtx []byte, recipi
 		}
 		return "", fmt.Errorf("no active bearer with subject %q", subject)
 	}
-	c := v.Capabilities[id]
-	c.PortableWrapped = ""
-	if bearer != "" {
-		if capability.LookupID(vaultCtx, bearer) != c.LookupID {
-			return "", errors.New("bearer does not match this subject")
-		}
-		wrapped, err := admin.WrapToRecipient([]byte(bearer), recipient)
-		if err != nil {
-			return "", fmt.Errorf("wrap bearer for admin use: %w", err)
-		}
-		c.PortableWrapped = wrapped
-	}
-	// ponytail: the stash sits outside the signed record, so no re-sign.
-	v.Capabilities[id] = c
-	return c.LookupID, nil
+	return id, nil
 }
 
 // --- daemon-mediated helpers ---
@@ -2402,42 +2429,64 @@ func runTokenRotate(args []string) int {
 		return 1
 	}
 	old := v.Capabilities[oldCapID]
-
-	if old.Binding == nil || old.Binding.Pubkey == "" {
-		fmt.Fprintln(os.Stderr, "dop token rotate: bearer is not yet claimed — rotate only makes sense post-claim")
+	newLookupID, newGen, err := rotateBearer(client, paths, v, vaultPath, oldCapID, "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop token rotate: %v\n", err)
 		return 1
+	}
+	fmt.Fprintf(os.Stderr,
+		"dop token rotate: rotated %s\n"+
+			"  old lookup: %s (status=rotated; BearerWrapped attached)\n"+
+			"  new lookup: %s (status=active; gen %d)\n"+
+			"  → agent's next `dop exec` decrypts BearerWrapped, migrates SE key, switches\n",
+		old.Subject, old.LookupID[:12], newLookupID[:12], newGen)
+	return 0
+}
+
+// rotateBearer mints a new bearer for the claimed record oldCapID, seals
+// it to the bound P-256 pubkey on the old record (status rotated, so the
+// agent's next exec switches over), saves the vault and writes both
+// sidecars. portableTo != "" also stashes the new bearer, wrapped to that
+// age recipient, on the new record. Shared by token rotate and token
+// portable --on.
+func rotateBearer(client *admin.Client, paths *config.Paths, v *vault.Vault, vaultPath, oldCapID, portableTo string) (string, uint64, error) {
+	old := v.Capabilities[oldCapID]
+	if old.Binding == nil || old.Binding.Pubkey == "" {
+		return "", 0, errors.New("bearer is not yet claimed — rotate only makes sense post-claim")
 	}
 	kt := old.Binding.KeyType
 	if kt == "" {
 		kt = vault.KeyTypeEd25519
 	}
 	if kt != vault.KeyTypeP256 {
-		fmt.Fprintf(os.Stderr,
-			"dop token rotate: bearer bound to %s — rotation requires P-256 (needs ECDH to wrap the new bearer).\n"+
+		return "", 0, fmt.Errorf(
+			"bearer bound to %s — rotation requires P-256 (needs ECDH to wrap the new bearer).\n"+
 				"  Options:\n"+
 				"    1) run `dop agent migrate %s` on the agent (upgrades to P-256)\n"+
-				"    2) revoke + issue a new bearer manually (loses transparent rotation)\n",
+				"    2) revoke + issue a new bearer manually (loses transparent rotation)",
 			kt, old.LookupID)
-		return 1
 	}
 
 	agentPub, err := hex.DecodeString(old.Binding.Pubkey)
 	if err != nil || len(agentPub) != 65 || agentPub[0] != 0x04 {
-		fmt.Fprintf(os.Stderr, "dop token rotate: bad binding pubkey (want 65B X9.62): %v\n", err)
-		return 1
+		return "", 0, fmt.Errorf("bad binding pubkey (want 65B X9.62): %v", err)
 	}
 
 	// Generate the new bearer and derive its lookup id.
 	newBearer, err := capability.NewBearer()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop token rotate: new bearer: %v\n", err)
-		return 1
+		return "", 0, fmt.Errorf("new bearer: %w", err)
 	}
 	vaultCtx, _ := hex.DecodeString(v.VaultContext)
 	newLookupID := capability.LookupID(vaultCtx, newBearer)
 	if newLookupID == old.LookupID {
-		fmt.Fprintln(os.Stderr, "dop token rotate: new lookup id collided with old (128-bit unlucky) — retry")
-		return 1
+		return "", 0, errors.New("new lookup id collided with old (128-bit unlucky) — retry")
+	}
+	stash := ""
+	if portableTo != "" {
+		if stash, err = admin.WrapToRecipient([]byte(newBearer), portableTo); err != nil {
+			return "", 0, fmt.Errorf("wrap bearer for admin use: %w", err)
+		}
 	}
 
 	// Fresh generation for the new record.
@@ -2451,19 +2500,16 @@ func runTokenRotate(args []string) int {
 	envBundle := resolveGrantsToEnv(v, old.Grants)
 	newCapIDRaw, err := capability.NewCapabilityID()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop token rotate: new capID: %v\n", err)
-		return 1
+		return "", 0, fmt.Errorf("new capID: %w", err)
 	}
 	newCapIDHex := hex.EncodeToString(newCapIDRaw[:])
 	newBundlePath := filepath.Join(paths.Vault, "capabilities", newLookupID+".bundle")
 	if err := os.MkdirAll(filepath.Dir(newBundlePath), 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "dop token rotate: mkdir: %v\n", err)
-		return 1
+		return "", 0, fmt.Errorf("mkdir: %w", err)
 	}
 	f, err := os.Create(newBundlePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop token rotate: create bundle: %v\n", err)
-		return 1
+		return "", 0, fmt.Errorf("create bundle: %w", err)
 	}
 	newBundleBytes, err := capability.Write(f, capability.WriteOpts{
 		CapabilityID: newCapIDRaw,
@@ -2480,10 +2526,14 @@ func runTokenRotate(args []string) int {
 	})
 	f.Close()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop token rotate: write bundle: %v\n", err)
-		return 1
+		return "", 0, fmt.Errorf("write bundle: %w", err)
 	}
 	newBundleHash := capability.HashBundle(newBundleBytes)
+	// From here on a failure leaves an orphan bundle: remove it.
+	fail := func(format string, err error) (string, uint64, error) {
+		_ = os.Remove(newBundlePath)
+		return "", 0, fmt.Errorf(format, err)
+	}
 
 	// Build the new record (already-bound, no PIN — inherits pubkey).
 	newRec := capability.Record{
@@ -2506,15 +2556,11 @@ func runTokenRotate(args []string) int {
 	// Fresh EnvWrapped for the new record.
 	wrapped, err := sealEnvWrapped(v, &newRec)
 	if err != nil {
-		_ = os.Remove(newBundlePath)
-		fmt.Fprintf(os.Stderr, "dop token rotate: seal new record env: %v\n", err)
-		return 1
+		return fail("seal new record env: %w", err)
 	}
 	newRec.EnvWrapped = wrapped
 	if err := signRecordViaDaemon(client, &newRec); err != nil {
-		_ = os.Remove(newBundlePath)
-		fmt.Fprintf(os.Stderr, "dop token rotate: sign new record: %v\n", err)
-		return 1
+		return fail("sign new record: %w", err)
 	}
 
 	// Wrap the new bearer + new lookup id for the agent.
@@ -2523,18 +2569,14 @@ func runTokenRotate(args []string) int {
 		LookupID string `json:"lookup_id"`
 	}{Bearer: newBearer, LookupID: newLookupID})
 	if err != nil {
-		_ = os.Remove(newBundlePath)
-		fmt.Fprintf(os.Stderr, "dop token rotate: marshal payload: %v\n", err)
-		return 1
+		return fail("marshal payload: %w", err)
 	}
 	// AAD binds the wrapped payload to the OLD record's identity
 	// (lookup + new_generation). Prevents splicing across rotations.
 	aad := []byte(fmt.Sprintf("dop-bearerwrap-v1|old_lookup=%s|new_gen=%d", old.LookupID, newGen))
 	sealed, err := envseal.Seal(agentPub, payload, aad)
 	if err != nil {
-		_ = os.Remove(newBundlePath)
-		fmt.Fprintf(os.Stderr, "dop token rotate: seal bearer payload: %v\n", err)
-		return 1
+		return fail("seal bearer payload: %w", err)
 	}
 	m := sealed.ToHex()
 
@@ -2553,9 +2595,7 @@ func runTokenRotate(args []string) int {
 		NewGeneration: newGen,
 	}
 	if err := signRecordViaDaemon(client, &oldRec); err != nil {
-		_ = os.Remove(newBundlePath)
-		fmt.Fprintf(os.Stderr, "dop token rotate: sign old record: %v\n", err)
-		return 1
+		return fail("sign old record: %w", err)
 	}
 
 	// Both records back into vault.Capabilities.
@@ -2564,29 +2604,23 @@ func runTokenRotate(args []string) int {
 	}
 	putCapability(v, oldCapID, oldRec)
 	putCapability(v, newCapIDHex, newRec)
+	if stash != "" {
+		c := v.Capabilities[newCapIDHex]
+		c.PortableWrapped = stash
+		v.Capabilities[newCapIDHex] = c
+	}
 
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
-		_ = os.Remove(newBundlePath)
-		fmt.Fprintf(os.Stderr, "dop token rotate: save vault: %v (rolled back new bundle)\n", err)
-		return 1
+		return fail("save vault: %w (rolled back new bundle)", err)
 	}
 	// Sidecar writes — old changes shape, new is fresh.
 	if err := writeRecordSidecar(paths, oldRec); err != nil {
-		fmt.Fprintf(os.Stderr, "dop token rotate: write old sidecar: %v\n", err)
-		return 1
+		return "", 0, fmt.Errorf("write old sidecar: %w", err)
 	}
 	if err := writeRecordSidecar(paths, newRec); err != nil {
-		fmt.Fprintf(os.Stderr, "dop token rotate: write new sidecar: %v\n", err)
-		return 1
+		return "", 0, fmt.Errorf("write new sidecar: %w", err)
 	}
-
-	fmt.Fprintf(os.Stderr,
-		"dop token rotate: rotated %s\n"+
-			"  old lookup: %s (status=rotated; BearerWrapped attached)\n"+
-			"  new lookup: %s (status=active; gen %d)\n"+
-			"  → agent's next `dop exec` decrypts BearerWrapped, migrates SE key, switches\n",
-		old.Subject, old.LookupID[:12], newLookupID[:12], newGen)
-	return 0
+	return newLookupID, newGen, nil
 }
 
 // splitFlagsAndPositionals separates a raw argv slice so that flags can

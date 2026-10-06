@@ -443,10 +443,18 @@ Refuses to repin an already-claimed capability (revoke + reissue to rebind).
 
 ### `dop token portable`
 
-Store or remove the portable copy (bearer wrapped to your admin age key) that `dop use` reads. `--on` needs the current bearer and checks it against the record; both directions ask the approval passphrase.
+Make a bearer portable (`--on`) or remove its portable copy (`--off`), the copy wrapped to your admin age key that `dop use` reads.
+
+DOP never keeps a bearer it has handed out, so `--on` re-issues it with the same subject, grants, expiry and binding, and stores the portable copy from the fresh value:
+
+- **Claimed** (bound pubkey): rotated exactly like `dop token rotate`. The old record becomes `rotated` with the new bearer sealed to the agent's key; the agent switches on its next `dop exec`, nothing to hand over.
+- **Unclaimed** (PIN, or unbound): a new bearer is issued (with a new PIN, valid `1h`) and the old one is revoked. The new bearer and PIN print once, same format as `dop token issue`.
+- **Revoked or expired**: refused.
+
+`--on` asks the approval passphrase only when the bearer holds a protected grant; `--off` always asks it.
 
 ```
-dop token portable --subject <S> (--on | --off) [--token-file <PATH> | --token-stdin] [--passphrase-stdin]
+dop token portable --subject <S> (--on | --off) [--passphrase-stdin]
 ```
 
 ### `dop token reseal`
