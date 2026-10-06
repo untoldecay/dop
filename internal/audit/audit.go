@@ -75,6 +75,10 @@ const (
 	// grants that used it. Subject = integration; extra.from, extra.to,
 	// extra.grants (count rewritten, as string).
 	EventTokenRename = "token_rename"
+	// grant_rename — `dop grant rename` moved a grant id and rewrote it in
+	// every active bearer record. Subject = new id; extra.from, extra.to,
+	// extra.bearers (records re-signed, as string).
+	EventGrantRename = "grant_rename"
 	// v1.14.0-rc4 — Tier 3 approval events for secret-print surfaces.
 	// Emitted by `internal/cli/printguard` around the approval dialog.
 	// Requested fires before the dialog opens so a hung dialog still

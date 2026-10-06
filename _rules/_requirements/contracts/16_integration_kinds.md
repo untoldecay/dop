@@ -62,7 +62,7 @@
 ### TUI (Add integration dense form, `internal/tui/integration_views.go`)
 - First screen picks `New integration` or an existing one (`pickOpts`). An existing integration starts at the Credential step and is never mutated: no integration-level row is asked or sent.
 - Stepper `Integration › Credential › Grant`, one dense form per step (contract 14), then review, running, done.
-- Integration step rows: name, kind (`kindPresets`, order api → cli → mcp → other, no escape row), description, then the kind slot: api `base URL` + `scan for docs`, cli `command`, mcp `URL or launcher`, other nothing.
+- Integration step rows: name, kind (`kindPresets`, order api → cli → mcp → other, no escape row), description, then the kind slot: api `base URL` + `scan for docs`, cli `command`, mcp `URL or launcher`, other nothing. Changing the kind in the picker MUST clear the kind slot value (add and edit forms), so a value typed for one kind is never sent as another kind's flag.
 - The kind slot MUST route to `--base-url` (api), `--cmd` (cli), `--mcp-url` when it starts with `http(s)://` else `--mcp-cmd` (mcp) (`integArgs`).
 - A name that already exists MUST be refused at the Integration step ("pick it on the first screen to add a credential").
 - Credential step, Normal tab: credential (prefilled with the integration name once), value (masked), scope note (`scopePresets` + `other…`), and for a new integration protection (+ passphrase when protected).

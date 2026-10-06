@@ -35,6 +35,16 @@
 - MUST move the `Integration.Tokens` key and rewrite every grant on that integration whose `Token` equals `--from`; other grants untouched. One save + push.
 - MUST log one `token_rename` event (contract 10) and print `dop integration rename-token: <integration>: "<old>" → "<new>" (updated <n> grant reference(s))` on stderr.
 
+### CLI — `dop grant rename`
+- `dop grant rename --from <id> --to <id> [--passphrase-stdin]`; both ids required (exit 2 otherwise). Admin session required.
+- MUST refuse (exit 1) a missing `--from` and an existing `--to`. A protected grant takes the owner gate (`requireProtectionOwner`) and the approval passphrase.
+- MUST move the `v.Grants` key and, in every ACTIVE bearer record whose `Grants` lists `--from`, replace the id with `--to` and re-sign through the daemon (`resignCapability` → `putCapability` + sidecar). Revoked and rotated records are left as they are. One save + push.
+- Per bearer kind: the same rule for P-256, ed25519 and unclaimed PIN bearers: rewrite + re-sign only, no reseal, no generation bump, no stale bearers. Reason: exec never reads grant ids: it takes env from the bundle or `env_wrapped` (`execcmd.go::resolveBearer`), and that env's keys come from `Grant.EffectivePrefix()` (integration + credential, or `env_prefix`), not from the id (`tokencmd.go::resolveGrantsToEnv`). So the env is unchanged, the `env_wrapped` AAD (lookup + generation) still matches, and the ed25519 bundle stays correct. Grant ids on the record matter only to admin-side checks (`dop use` protected-grant check, grant show), which see the new id.
+- MUST log one `grant_rename` event (contract 10) and print `dop grant rename: "<from>" → "<to>" (updated <n> bearer(s))` on stderr.
+
+### TUI — grant rename
+- `n` on the grant list or detail, or the Rename action (`grantActions`: Edit, Rename, Remove): one input prefilled with the current id, no review, `enter` saves (a protected grant asks the approval passphrase on the same screen first); running `Renaming grant…`, done `✓ Grant renamed` (grant, was); empty, unchanged or taken ids and CLI failures on the status line. Through `sessionGuard`. After done the grant list shows with the cursor on the new id.
+
 ### TUI — integration detail
 - `enter` on an integration row MUST open its detail with tabs Info / Credentials N / Grants N (contract 14). `e` edit and `r` remove work from the list and the Info tab.
 - Credentials tab rows: name, value as `•••• N chars` (`maskLen`, never the value or a tail), scope note. A placeholder-looking value MUST show an error hint ("Rotate in the real one").
@@ -54,7 +64,7 @@
 - `issue`, `list`, `show`, `revoke`, `prune`, `repin`, `portable --on|--off`, `reseal`, `add-grant`, `remove-grant`, `rotate`; all admin-session gated (contract 01).
 - `repin`, `portable --on` and `rotate` re-issue the bearer through one path (contract 25). `portable` semantics: contract 19.
 - `prune [--older-than 30d] [--dry-run] [--yes]` MUST delete only revoked and rotated records whose age (`vault.Capability.TouchedAt`: `revoked_at` for revoked, rotation seal `BearerWrapped.SealedAt` for rotated; records revoked before `revoked_at` existed fall back to the newest of created / claimed / sealed) is older than the cutoff, plus their files; never active records, never `Generations`; one vault save and one `prune` audit event. A rotated record MUST stay until the cutoff so its agent can still pick up `BearerWrapped`.
-- Every rewrite of an existing bearer record (revoke, repin, reseal, add/remove-grant, rotate, cascade, claim, remote approve, agent migrate, `syncSidecars` re-sign) MUST go through `putCapability`, which carries `PortableWrapped` from the existing entry.
+- Every rewrite of an existing bearer record (revoke, repin, reseal, add/remove-grant, rotate, cascade, grant rename, claim, remote approve, agent migrate, `syncSidecars` re-sign) MUST go through `putCapability`, which carries `PortableWrapped` from the existing entry.
 
 ### Protection interaction
 - `set-token` on a protected integration owned by someone else MUST refuse (CLI-side via `requireProtectionOwner`), AND MUST be caught by the daemon save-guard if somehow bypassed (per contract 15).
@@ -96,6 +106,7 @@
 - Verify the audit event emission site in `runIntegrationSetToken` does not pass `tok.Value` or `*newValue` into the Event struct.
 - Verify `internal/tui/list_remove_views.go::doTokenRotate` builds `exec.Command` with `--value-stdin` and sets `cmd.Stdin`, NOT with a `--value <literal>` flag.
 - Verify `credActions` lists exactly 4 actions in the order: Edit scope note, Rotate value, Rename, Remove credential.
+- PASS if `TestRenameGrant` passes (key moved, active bearers carrying it hold the new id with a valid signature, revoked and unrelated bearers untouched, missing source and existing target refused, `grant_rename` logged with `bearers`).
 - PASS if `TestRenameToken` passes (key moved, referencing grant rewritten, other grant untouched, existing target refused, `token_rename` logged).
 - Verify `cmd/dop` has no `v.Capabilities[id] = capability2VaultCapability(` outside `issueBearer`.
 - Verify `enterIntEdit` picks the current kind in the kind row (so Edit opens on today's value).

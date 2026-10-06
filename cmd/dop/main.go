@@ -61,6 +61,7 @@ usage:
   dop grant add --id ID --integration N --token T   add a grant (admin-required)
   dop grant list                                 list grants (admin-required)
   dop grant show <id> [--all] [--json]           detail view: grant details + tokens using it (admin-required)
+  dop grant rename --from A --to B               rename a grant; bearers carrying it follow (admin-required)
   dop grant remove --id ID                       remove a grant (admin-required)
   dop team add-key --name W --pubkey <age>       add admin recipient (admin-required)
   dop team list                                  list admins (admin-required)
