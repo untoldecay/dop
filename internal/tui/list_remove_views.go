@@ -41,6 +41,7 @@ const (
 )
 
 type integrationListView struct {
+	sessionGuard
 	client  *admin.Client
 	paths   *config.Paths
 	loaded  bool
@@ -168,6 +169,9 @@ var credActions = []listAction{
 }
 
 func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.unlocked(msg); ok {
+		return v, cmd
+	}
 	if v.sub != nil {
 		// An embedded view (add credential, grant detail) owns the screen
 		// until it is done; then the integration reloads.
@@ -271,7 +275,11 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // startRun puts pending in flight; a failure returns to back.
+// startRun runs an action's CLI call; enter is replayed after an unlock.
 func (v *integrationListView) startRun(pending string, back int, cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	if c := v.locked(tea.KeyMsg{Type: tea.KeyEnter}, &v.err); c != nil {
+		return v, c
+	}
 	v.pending, v.back, v.mode, v.err, v.help = pending, back, integModeRun, "", false
 	if v.keep == "" {
 		v.keep = v.selectedName()
@@ -990,6 +998,9 @@ func (v *integrationRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Confirm cascade preview.
 			switch mm.String() {
 			case "y", "Y", "enter":
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
 				v.step, v.err = 3, ""
 				return v, tea.Batch(v.spinStart(), v.doRemove())
 			case "n", "N":
@@ -1603,6 +1614,7 @@ const (
 )
 
 type grantListView struct {
+	sessionGuard
 	client  *admin.Client
 	paths   *config.Paths
 	loaded  bool
@@ -1695,6 +1707,9 @@ func grantHint(id string, g vault.Grant) string {
 }
 
 func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if ok, cmd := v.unlocked(msg); ok {
+		return v, cmd
+	}
 	switch mm := msg.(type) {
 	case tea.WindowSizeMsg:
 		v.width, v.height = mm.Width, mm.Height
@@ -1871,6 +1886,9 @@ func (v *grantListView) updateEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.err = "Enter the approval passphrase to protect this grant."
 			return v, nil
 		}
+		if cmd := v.locked(mm, &v.err); cmd != nil {
+			return v, cmd
+		}
 		v.mode, v.help, v.pending = grantModeRun, false, "edit"
 		return v, v.doEdit()
 	case "backspace":
@@ -1904,6 +1922,9 @@ func (v *grantListView) editBuf() *strings.Builder {
 func (v *grantListView) updateConfirm(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch mm.String() {
 	case "y", "Y", "enter":
+		if cmd := v.locked(mm, &v.err); cmd != nil {
+			return v, cmd
+		}
 		v.mode, v.err, v.pending = grantModeRun, "", "remove"
 		return v, v.doRemove()
 	case "n", "N", "esc":
@@ -2201,6 +2222,9 @@ func (v *grantRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case 1:
 			switch k {
 			case "y", "Y", "enter":
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
 				v.step = 2
 				return v, tea.Batch(v.spinStart(), v.doRemove())
 			case "n", "N":

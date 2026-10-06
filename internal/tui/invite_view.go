@@ -163,6 +163,9 @@ func (v *inviteView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case inviteStepCancelConfirm:
 			switch k {
 			case "y", "enter":
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
 				v.step, v.cancelling = inviteStepRunning, true
 				return v, tea.Batch(v.spinStart(), v.cancelInvite(v.inviteID))
 			case "n", "esc":
@@ -219,6 +222,9 @@ func (v *inviteView) advance() (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 	case inviteStepReview:
+		if cmd := v.locked(tea.KeyMsg{Type: tea.KeyEnter}, &v.err); cmd != nil {
+			return v, cmd
+		}
 		v.err, v.step = "", inviteStepRunning
 		v.lines = nil
 		return v, tea.Batch(v.spinStart(), v.launch(), v.waitForLine())

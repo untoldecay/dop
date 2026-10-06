@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -294,6 +295,35 @@ func TestSessionActive_Missing(t *testing.T) {
 	c := NewClient("/tmp/definitely-does-not-exist-dop-sock-" + t.Name())
 	if c.SessionActive() {
 		t.Fatal("expected inactive")
+	}
+}
+
+func TestSessionActive_Locked(t *testing.T) {
+	sock := shortSock(t)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			var req Request
+			_ = ReadMessage(c, &req)
+			data, _ := json.Marshal(StatusResp{Unlocked: false})
+			_ = WriteMessage(c, Response{OK: true, Data: data})
+			c.Close()
+		}
+	}()
+	c := NewClient(sock)
+	if _, err := c.Status(); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if c.SessionActive() {
+		t.Fatal("daemon answers but is locked: expected inactive")
 	}
 }
 

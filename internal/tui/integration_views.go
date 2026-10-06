@@ -197,6 +197,7 @@ type addIntegrationView struct {
 	credPrefilled       bool
 	integSaved          bool   // the integration + credential call succeeded; a retry only adds the grant
 	probeSummary        string // scan outcome from the CLI stderr
+	saving              string // the running screen's line, per CLI call
 
 	err   string
 	flash string
@@ -349,6 +350,10 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return v, nil
 		}
+		if mm.integSaved { // first call done: now the grant
+			v.saving = "Saving grant…"
+			return v, v.save()
+		}
 		v.stage = integStageDone
 	case tea.KeyMsg:
 		k := mm.String()
@@ -373,7 +378,14 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case integStageReview:
 			switch k {
 			case "enter":
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
 				v.stage, v.err = integStageRun, ""
+				v.saving = map[bool]string{true: "Saving credential…", false: "Saving integration and credential…"}[v.existingIntegration]
+				if v.integSaved {
+					v.saving = "Saving grant…"
+				}
 				return v, tea.Batch(v.spinStart(), v.save())
 			case "esc", "shift+tab":
 				v.stage = integStageGrant
@@ -516,30 +528,35 @@ func (v *addIntegrationView) integArgs() []string {
 	return append(args, "--token", fmt.Sprintf("%s=%s:%s", v.cred.val(), v.value.val(), displayOr(v.scope.val(), "-")))
 }
 
+// save is the next CLI call: integration add (integration and
+// credential), then grant add once that is saved.
 func (v *addIntegrationView) save() tea.Cmd {
-	integArgs, grantArgs, skip := v.integArgs(), v.grant.args(), v.integSaved
+	integArgs, grantArgs := v.integArgs(), v.grant.args()
 	pass, scan := "", v.scan.pick == 1 && !v.existingIntegration
 	if v.protected() {
 		pass = v.pass.in.Value()
 	}
+	if v.integSaved {
+		return func() tea.Msg {
+			if _, err := runDop("", grantArgs...); err != "" {
+				return integrationAddedMsg{err: err, integSaved: true}
+			}
+			return integrationAddedMsg{}
+		}
+	}
 	return func() tea.Msg {
+		stderr, err := runDop(pass, integArgs...)
+		if err != "" {
+			return integrationAddedMsg{err: err}
+		}
+		// The scan outcome is on the CLI's stderr (runProbe).
 		summary := ""
-		if !skip {
-			stderr, err := runDop(pass, integArgs...)
-			if err != "" {
-				return integrationAddedMsg{err: err}
-			}
-			// The scan outcome is on the CLI's stderr (runProbe).
-			for _, line := range strings.Split(stderr, "\n") {
-				if line = strings.TrimSpace(line); scan && (strings.Contains(line, "probe →") || strings.Contains(line, "probe-endpoints skipped")) {
-					summary = displayOr(summary, line)
-				}
+		for _, line := range strings.Split(stderr, "\n") {
+			if line = strings.TrimSpace(line); scan && (strings.Contains(line, "probe →") || strings.Contains(line, "probe-endpoints skipped")) {
+				summary = displayOr(summary, line)
 			}
 		}
-		if _, err := runDop("", grantArgs...); err != "" {
-			return integrationAddedMsg{err: err, integSaved: true, probeSummary: summary}
-		}
-		return integrationAddedMsg{probeSummary: summary}
+		return integrationAddedMsg{integSaved: true, probeSummary: summary}
 	}
 }
 
@@ -592,9 +609,15 @@ func (v *addIntegrationView) View() string {
 	const title = "Add integration"
 	switch v.stage {
 	case integStagePick:
-		return v.pick(title, "", v.pickOpts(), v.pickCur, "", v.err, pickKeys("open"))
+		// New integration, a blank line, then the existing ones.
+		rows, km := optRows(v.pickOpts(), v.pickCur), pickKeys("open")
+		if len(rows) > 1 {
+			rows = append(rows[:1], append([]string{""}, rows[1:]...)...)
+		}
+		body := km.overlay(rows, v.width, frameRows(v.height), v.help)
+		return frame(v.width, v.height, title, nil, "", body, status{err: v.err}.String(), km.footerLine(v.width, v.help))
 	case integStageRun:
-		return v.running(title, "Saving "+v.integName())
+		return v.running(title, v.saving)
 	case integStageDone:
 		rows := [][2]string{{"integration", v.integName()}, {"credential", v.cred.val()}, {"grant", v.grant.id.val()}}
 		if v.probeSummary != "" {
@@ -714,6 +737,9 @@ func (v *addGrantView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if v.stage == grantStageReview {
 			switch k {
 			case "enter":
+				if cmd := v.locked(mm, &v.err); cmd != nil {
+					return v, cmd
+				}
 				args := v.grant.args()
 				v.stage, v.err = grantStageRun, ""
 				return v, tea.Batch(v.spinStart(), func() tea.Msg {
@@ -749,7 +775,7 @@ func (v *addGrantView) View() string {
 	g := &v.grant
 	switch v.stage {
 	case grantStageRun:
-		return v.running(title, "Saving "+g.id.val())
+		return v.running(title, "Saving grant…")
 	case grantStageDone:
 		return v.doneScreen("Grant added", [][2]string{{"grant", g.id.val()}, {"integration", g.integ.val()},
 			{"credential", g.cred.val()}}, "Next: issue a bearer with this grant.", "")

@@ -29,6 +29,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/userprefs"
 )
@@ -410,7 +412,7 @@ func (v *settingsView) View() string {
 	rows := []struct{ label, value, hint string }{
 		{"Agent key backend", v.rowValueFileKeys(), "default: Secure Enclave or ed25519 · alternative: file-backed P-256"},
 		{"Approval popup timeout", v.rowValueApprovalTimeout(), "how long the approval dialog waits before moving to the phone"},
-		{"Admin idle timeout", v.rowValueAdminIdleTTL(), "how long the admin session stays unlocked without activity"},
+		{"Admin idle timeout", v.rowValueAdminIdleTTL(), v.idleHint()},
 		{"Harness", v.rowValueHarness(), "which session variable dop reads for the trust cache"},
 	}
 	st := status{err: v.err, flash: v.flash}
@@ -463,6 +465,15 @@ func (v *settingsView) rowValueApprovalTimeout() string {
 func (v *settingsView) rowValueAdminIdleTTL() string {
 	return shortDur(userprefs.AdminIdleTTLLabel(v.prefs.AdminIdleTTLSeconds))
 }
+
+// idleHint says what the idle pick means, the absolute cap included.
+func (v *settingsView) idleHint() string {
+	if v.prefs.AdminIdleTTLSeconds == userprefs.AdminIdleTTLNever {
+		return "manual logout only; the session also never expires on its own"
+	}
+	return fmt.Sprintf("unlocked until idle this long; sessions also end %dm after login", int(admin.DefaultAbsTTL.Minutes()))
+}
+
 func (v *settingsView) rowValueHarness() string {
 	if v.prefs.Harness == "" {
 		return "unset"

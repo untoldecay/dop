@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -696,6 +697,8 @@ func walkIntegrationAdd(w *walker) {
 	w.send("integrationAddedMsg", integrationAddedMsg{err: "integration add: vault push rejected (non-fast-forward)"})
 	w.dump("integration-add-error", "Add integration · save failed, nothing saved", "edge")
 	w.keys("enter")
+	w.send("integrationAddedMsg", integrationAddedMsg{integSaved: true})
+	w.dump("integration-add-saving-grant", "Add integration · saving the grant (second call)")
 	w.send("integrationAddedMsg", integrationAddedMsg{err: "grant add: vault push rejected (non-fast-forward)", integSaved: true})
 	w.dump("integration-add-grant-error", "Add integration · grant failed, integration saved", "edge")
 	w.keys("enter")
@@ -703,6 +706,15 @@ func walkIntegrationAdd(w *walker) {
 	w.dump("integration-add-done", "Add integration · saved", "key")
 	w.keys("enter")
 	w.dump("integration-add-menu-flash", "Menu · flash after integration save")
+	// session locked at save time: the review stays, the unlock opens
+	// (its Cmd is dropped, so no dialog); cancelling it lands back there.
+	toReview()
+	walkLocked.Store(true)
+	w.keys("enter")
+	walkLocked.Store(false)
+	w.dump("integration-add-save-locked", "Add integration · session locked at save, unlock prompt opening", "edge")
+	w.send("guiUnlockResultMsg", guiUnlockResultMsg{success: false, stderr: "cancelled"})
+	w.dump("integration-add-unlock-cancelled", "Add integration · unlock cancelled, back on the review", "edge")
 	// existing integration: starts on the credential, step 1 shown done
 	w.reset()
 	w.keys("1", "1", "down", "down", "down", "down")
@@ -1595,6 +1607,9 @@ func walkKey(s string) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 }
 
+// walkLocked makes the fake daemon report a locked session.
+var walkLocked atomic.Bool
+
 // walkDaemon answers the admin socket: status → unlocked session,
 // logout → ok, anything else → error (so no decrypt/sign path pretends
 // to succeed).
@@ -1618,7 +1633,7 @@ func walkDaemon(t *testing.T, sock string) {
 				case admin.OpStatus:
 					now := time.Now().Unix()
 					data, _ := json.Marshal(admin.StatusResp{
-						Unlocked: true, AdminPubkey: walkPubkey,
+						Unlocked: !walkLocked.Load(), AdminPubkey: walkPubkey,
 						AgeRecipient:   "age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3290gq",
 						IdleTTLSeconds: 1800, AbsTTLSeconds: 8 * 3600,
 						StartedAtUnix: now - 600, LastActivityUnix: now,
