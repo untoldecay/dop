@@ -272,7 +272,8 @@ type issueView struct {
 	// allow-file-keys prefs captured at construction: the handoff text
 	// and the background-reseal watcher depend on it.
 	prefs       Prefs
-	copied      bool   // set by the c key
+	copied      bool   // last clipboard attempt succeeded (on result, and on c)
+	leaveArmed  bool   // first esc on the bearer screen; a second esc leaves
 	resealFlash string // filled by the background auto-reseal watcher
 	pollCount   int    // bounded loop for the auto-reseal poller
 }
@@ -564,6 +565,8 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		v.bearer, v.pin = mm.bearer, mm.pin
+		// Copy once here, not in View (which repaints on every msg).
+		v.copied = clipboardCopy(v.handoff())
 		// allow-file-keys: watch the record for the claim, then reseal.
 		if v.prefs.AllowFileKeys && v.pin != "" {
 			return v, v.watchForClaimAndReseal()
@@ -586,14 +589,7 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case v.issuing:
 			return v, nil
 		case v.bearer != "":
-			if mm.String() == "c" {
-				copyToClipboard(v.handoff())
-				v.copied = true
-				return v, nil
-			}
-			v.done = true
-			v.flash = "bearer issued · shown once, make sure it was copied"
-			return v, nil
+			return v.bearerKey(mm.String())
 		case mm.String() == "ctrl+c":
 			v.done = true
 			return v, nil
@@ -789,6 +785,30 @@ func (v *issueView) handoff() string {
 	return buildHandoffText(v.bearer, v.pin, v.prefs.AllowFileKeys)
 }
 
+// bearerKey handles the one-time bearer screen: a stray key must not
+// lose the bearer. enter leaves, esc needs a second press, c re-copies,
+// anything else is ignored (and disarms esc).
+func (v *issueView) bearerKey(k string) (tea.Model, tea.Cmd) {
+	switch k {
+	case "enter":
+		v.done = true
+	case "esc", "ctrl+c":
+		if !v.leaveArmed {
+			v.leaveArmed = true
+			return v, nil
+		}
+		v.done = true
+	case "c":
+		v.copied = clipboardCopy(v.handoff())
+		fallthrough
+	default:
+		v.leaveArmed = false
+		return v, nil
+	}
+	v.flash = "bearer issued · shown once, make sure it was copied"
+	return v, nil
+}
+
 func (v *issueView) View() string {
 	const title = "Issue bearer"
 	switch {
@@ -805,11 +825,14 @@ func (v *issueView) View() string {
 			body = append(body, mutedSt.Render("  "+displayOr(v.resealFlash, "Auto-reseal runs once the agent claims.")))
 		}
 		st := status{}
-		if v.copied {
+		switch {
+		case v.leaveArmed:
+			st.setHint("press esc again to leave, the bearer will not be shown again")
+		case v.copied:
 			st.setFlash("copied to clipboard")
 		}
-		return frame(v.width, v.height, "✓ Bearer issued", nil, "shown once, press c to copy", body, st.String(),
-			footer(v.width, hint("enter", "done")))
+		return frame(v.width, v.height, "✓ Bearer issued", nil, "shown once, c copies again", body, st.String(),
+			footer(v.width, hint("enter", "done"), hint("c", "copy")))
 	case v.issuing:
 		return v.running(title, "Issuing a bearer for "+v.subject)
 	case v.review:

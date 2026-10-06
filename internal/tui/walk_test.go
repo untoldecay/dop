@@ -371,6 +371,9 @@ func TestWalkScreens(t *testing.T) {
 	}
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	must(t, os.MkdirAll(out, 0o755))
+	orig := clipboardCopy
+	clipboardCopy = func(string) bool { return true } // keep the real clipboard untouched
+	t.Cleanup(func() { clipboardCopy = orig })
 
 	// ponytail: fixture HOME lives in /tmp, not under outdir — the unix
 	// socket path ($HOME/Library/Application Support/dop/admin.sock) blows
@@ -810,7 +813,9 @@ func walkIssue(w *walker) {
 	w.dump("issue-issuing", "Issue · issuing (spinner)")
 	w.send("issueResultMsg", issueResultMsg{bearer: "tok_7Hq2xWalkFixtureBearer0c1d2e3f", pin: "AB-CD-EF"})
 	w.dump("issue-done", "Issue · bearer + PIN handoff", "key")
-	w.keys("x")
+	w.keys("esc")
+	w.dump("issue-done-esc-armed", "Issue · first esc arms leave (bearer still shown)", "edge")
+	w.keys("esc")
 	w.dump("issue-menu-flash", "Menu · flash after issue")
 	toPortable()
 	w.keys("down", "enter", "enter")

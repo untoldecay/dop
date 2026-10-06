@@ -10,7 +10,8 @@
 //   1. check phase: run `dop update --check-only` (channel from flag or
 //      prefs), parse the stderr for "Latest: <tag>" vs installed.
 //   2. confirm phase: operator sees installed → latest, picks y/n, can
-//      flip the channel with `c`.
+//      flip the channel with `c`. `c` also works on the done screen
+//      when nothing was installed (already up to date / check failed).
 //   3. install phase: run `dop update` (no --check-only), stream
 //      stderr. On rc=0, exit TUI so the stale binary doesn't keep
 //      running (the renamed file is already in place).
@@ -133,6 +134,12 @@ func (v *updateView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		if v.step == updateStepDone {
+			// Nothing installed (already up to date, or the check
+			// failed) → c still flips the channel. Without this, an
+			// operator on the latest stable can never reach dev.
+			if mm.String() == "c" && v.canFlipFromDone() {
+				return v, v.flipChannel()
+			}
 			v.done = true
 			// Successful update means the running binary is stale —
 			// exit the TUI so the next `dop` launch gets the new one.
@@ -151,13 +158,7 @@ func (v *updateView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				v.flash = "Update cancelled"
 				return v, nil
 			case "c":
-				if v.channel == "stable" {
-					v.channel = "dev"
-				} else {
-					v.channel = "stable"
-				}
-				v.step = updateStepChecking
-				return v, tea.Batch(v.spinStart(), v.runCheck())
+				return v, v.flipChannel()
 			}
 		}
 	}
@@ -263,6 +264,43 @@ var updateKeys = keyMap{
 	full:  [][]key.Binding{{hint("enter", "install"), hint("c", "channel"), keyBack}},
 }
 
+// updateDoneKeys is the keymap of the done screens that installed
+// nothing (up to date / check failed): c flips the channel there.
+var updateDoneKeys = keyMap{
+	short: []key.Binding{hint("enter", "done"), hint("c", "channel")},
+	full:  [][]key.Binding{{hint("enter", "done"), hint("c", "channel"), keyBack}},
+}
+
+// flipChannel toggles stable ⇄ dev and re-runs the check.
+func (v *updateView) flipChannel() tea.Cmd {
+	if v.channel == "stable" {
+		v.channel = "dev"
+	} else {
+		v.channel = "stable"
+	}
+	v.step = updateStepChecking
+	v.rc, v.err, v.checkErr, v.flash = 0, "", "", ""
+	v.installed, v.latest = "", ""
+	return tea.Batch(v.spinStart(), v.runCheck())
+}
+
+// canFlipFromDone is true when the done screen was reached without an
+// install attempt — up to date, or the check itself failed.
+func (v *updateView) canFlipFromDone() bool {
+	if v.checkErr != "" {
+		return true
+	}
+	return v.rc == 0 && (v.installed == v.latest || v.latest == "")
+}
+
+// otherChannel is where c would switch to.
+func (v *updateView) otherChannel() string {
+	if v.channel == "stable" {
+		return "dev"
+	}
+	return "stable"
+}
+
 func (v *updateView) View() string {
 	rows := [][2]string{{"installed", v.installed}, {"latest", v.latest}, {"channel", v.channel}}
 	switch v.step {
@@ -286,7 +324,10 @@ func (v *updateView) View() string {
 	}
 	if v.rc == 0 {
 		if v.installed == v.latest || v.latest == "" {
-			return v.doneScreen("Up to date", [][2]string{{"installed", v.installed}, {"channel", v.channel}}, "", "")
+			body := strings.Split(strings.TrimRight(kv([2]string{"installed", v.installed}, [2]string{"channel", v.channel}), "\n"), "\n")
+			body = updateDoneKeys.overlay(body, v.width, frameRows(v.height), v.help)
+			h := "c channel · check the " + v.otherChannel() + " channel"
+			return frame(v.width, v.height, "✓ Up to date", nil, "", body, status{hint: h}.String(), updateDoneKeys.footerLine(v.width, v.help))
 		}
 		return v.doneScreen("Updated to "+v.latest, rows[1:], "Relaunch dop to use the new version.", "")
 	}
@@ -297,5 +338,12 @@ func (v *updateView) View() string {
 		body = append(body, "  "+mutedSt.Render(ln))
 	}
 	v.linesMu.Unlock()
+	if v.canFlipFromDone() {
+		// Check failed: the status line carries the error, so the
+		// c channel hint goes in the body.
+		body = append(body, "", "  "+mutedSt.Render("c channel · check the "+v.otherChannel()+" channel"))
+		body = updateDoneKeys.overlay(body, v.width, frameRows(v.height), v.help)
+		return frame(v.width, v.height, "! Update failed", nil, "", body, status{err: reason}.String(), updateDoneKeys.footerLine(v.width, v.help))
+	}
 	return frame(v.width, v.height, "! Update failed", nil, "", body, status{err: reason}.String(), footer(v.width, hint("enter", "done")))
 }
