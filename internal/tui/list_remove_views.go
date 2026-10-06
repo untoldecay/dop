@@ -13,6 +13,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -38,6 +39,8 @@ const (
 	integModeTokenRotate        = 7
 	integModeTokenRemoveConfirm = 8
 	integModeIntEdit            = 9
+	integModeIntReview          = 10
+	integModeTokenRename        = 11
 )
 
 type integrationListView struct {
@@ -76,34 +79,20 @@ type integrationListView struct {
 	tokenScopeMode       bool
 	tokenScopePickCursor int
 
-	// Integration-level edit form state (integModeIntEdit).
-	intEditField         int
-	intEditNameBuf       textField
-	intEditNameWas       string // snapshot at open time, so rename detection is cheap at save
-	intEditKindCursor    int
-	intEditKindChoice    string
-	intEditDescBuf       textField
-	intEditKindSlotBuf   textField
-	intEditProjectsBuf   textField
-	intEditTagsBuf       textField
-	intEditProtectCursor int
-	intEditProtectChoice bool // mirrors protectionPresets[cursor].value
-	intEditProtectWas    bool // snapshot at enter time, used to decide if passphrase step is needed
-	intEditPassBuf       textField
-}
+	// Integration edit: a dense form (Normal / Advanced tabs), then a
+	// review of the changed rows.
+	ieForm                                                      denseForm
+	ieName, ieDesc, ieURL, ieKind, ieScan, ieProj, ieTags, iePr *formField
+	iePass                                                      *formField
+	ieAdv                                                       []*formField
+	ieAdvTab                                                    bool
+	ieWas                                                       map[*formField]string
+	ieNameWas                                                   string
+	ieProtectWas                                                bool
 
-// Integration edit field constants. Name is field 0 so a rename is the
-// first thing an operator sees.
-const (
-	intEditFieldName       = 0
-	intEditFieldKind       = 1
-	intEditFieldDesc       = 2
-	intEditFieldKindSlot   = 3
-	intEditFieldProjects   = 4
-	intEditFieldTags       = 5
-	intEditFieldProtection = 6
-	intEditFieldPassphrase = 7
-)
+	renameIn, renamePass textinput.Model // credential rename step
+	renameAt             int             // 1: the passphrase input has the caret
+}
 
 func newIntegrationListView(c *admin.Client, p *config.Paths) *integrationListView {
 	return &integrationListView{client: c, paths: p, list: newNameList()}
@@ -165,6 +154,7 @@ var integInfoActions = []listAction{
 var credActions = []listAction{
 	{label: "Edit scope note", key: "s", desc: "the note that says what this credential can do"},
 	{label: "Rotate value", key: "o", desc: "replace the upstream secret with a new value"},
+	{label: "Rename", key: "n", desc: "a new name; the grants that use it follow"},
 	{label: "Remove credential", key: "x", desc: "removes it and the grants that use it"},
 }
 
@@ -219,7 +209,7 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if mm.err != "" {
 			// Errors stay on the screen that caused them, in plain words.
 			v.err = map[string]string{"remove": "Remove", "scope": "Scope note", "rotate": "Rotate",
-				"remove-cred": "Remove credential", "edit": "Save"}[v.pending] + " failed: " + cliErr(mm.err)
+				"remove-cred": "Remove credential", "edit": "Save", "rename-cred": "Rename"}[v.pending] + " failed: " + cliErr(mm.err)
 			v.mode = v.back
 			return v, nil
 		}
@@ -251,6 +241,9 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return v, nil // done screens leave on enter only
 			}
 			v.mode = integModeDetail
+			if v.pending == "edit" {
+				v.tab = 0
+			}
 			if v.pending == "remove" {
 				v.mode = integModeList
 			}
@@ -267,8 +260,13 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateTokenRotate(mm)
 		case integModeTokenRemoveConfirm:
 			return v.updateTokenRemoveConfirm(mm)
-		case integModeIntEdit:
+		case integModeIntEdit, integModeIntReview:
+			if !v.ieForm.typing() && toggleHelp(&v.help, mm) {
+				return v, nil
+			}
 			return v.updateIntEdit(mm)
+		case integModeTokenRename:
+			return v.updateTokenRename(mm)
 		}
 	}
 	return v, nil
@@ -362,6 +360,10 @@ func (v *integrationListView) updateDetail(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "e", "r":
 		return v.runInfoAction(k)
+	case "n":
+		if v.tab == 1 && len(v.tokenNames) > 0 {
+			return v.runTokenAction(listAction{key: "n"})
+		}
 	case "a":
 		// Credentials tab: add a credential (and its grant) to this
 		// integration; Grants tab: add a grant on it.
@@ -390,51 +392,65 @@ func (v *integrationListView) runInfoAction(k string) (tea.Model, tea.Cmd) {
 	return v, nil
 }
 
-// enterIntEdit primes the integration-level edit form with the current
-// values of the selected integration.
+// enterIntEdit builds the integration edit form from the selected
+// integration and snapshots it for the review.
 func (v *integrationListView) enterIntEdit() *integrationListView {
 	name := v.selectedName()
 	if name == "" {
 		return v
 	}
 	it := v.items[name]
-	v.intEditField = intEditFieldName
-	v.intEditNameBuf.SetString(name)
-	v.intEditNameWas = name
-	v.intEditKindChoice = vault.IntegrationKindOf(it)
+	v.ieName, v.ieDesc, v.ieURL, v.ieKind, v.ieScan, v.ieAdv = integRows()
+	v.ieProj, v.ieTags = textRow("projects", "docs, wiki", false, false), textRow("tags", "ro, ci", false, false)
+	v.iePr, v.iePass = pickRow("protection", protectOpts()), textRow("approval passphrase", "", true, true)
+	kind := vault.IntegrationKindOf(it)
 	for i, p := range kindPresets {
-		if p.value == v.intEditKindChoice {
-			v.intEditKindCursor = i
-			break
+		if p.value == kind {
+			v.ieKind.pick = i
 		}
 	}
-	v.intEditDescBuf.SetString(it.Description)
-	switch vault.IntegrationKindOf(it) {
-	case vault.IntegrationKindCLI:
-		v.intEditKindSlotBuf.SetString(it.Metadata["cli_cmd"])
-	case vault.IntegrationKindMCP:
-		if it.Metadata["mcp_url"] != "" {
-			v.intEditKindSlotBuf.SetString(it.Metadata["mcp_url"])
-		} else {
-			v.intEditKindSlotBuf.SetString(it.Metadata["mcp_cmd"])
-		}
-	default: // api, other
-		v.intEditKindSlotBuf.SetString(it.Metadata["base_url"])
+	if it.Protected {
+		v.iePr.pick = 1
 	}
-	v.intEditProjectsBuf.SetString(strings.Join(it.Projects, ","))
-	v.intEditTagsBuf.SetString(strings.Join(it.Tags, ","))
-	v.intEditProtectChoice = it.Protected
-	v.intEditProtectWas = it.Protected
-	for i, p := range protectionPresets {
-		if p.value == it.Protected {
-			v.intEditProtectCursor = i
-			break
-		}
+	v.ieName.in.SetValue(name)
+	v.ieDesc.in.SetValue(it.Description)
+	v.ieURL.in.SetValue(slotValue(kind, it.Metadata))
+	v.ieProj.in.SetValue(strings.Join(it.Projects, ","))
+	v.ieTags.in.SetValue(strings.Join(it.Tags, ","))
+	for i, a := range advFieldSpecs {
+		v.ieAdv[i].in.SetValue(it.Metadata[a.metaKey])
 	}
-	v.intEditPassBuf.Reset()
-	v.err = ""
-	v.mode = integModeIntEdit
+	v.ieNameWas, v.ieProtectWas, v.ieAdvTab, v.ieForm = name, it.Protected, false, denseForm{}
+	v.ieWas = snap(append(v.ieAdv, v.ieName, v.ieDesc, v.ieURL, v.ieKind, v.ieScan, v.ieProj, v.ieTags, v.iePr))
+	v.err, v.mode = "", integModeIntEdit
 	return v
+}
+
+func (v *integrationListView) ieKindVal() string { return kindPresets[v.ieKind.pick].value }
+
+// ieRows are the edit form's rows on the current tab (adv) for the
+// picked kind; the passphrase only when switching to protected.
+func (v *integrationListView) ieRows(adv bool) []*formField {
+	if adv {
+		return advRows(v.ieAdv, v.ieKindVal())
+	}
+	r := append([]*formField{v.ieName, v.ieKind, v.ieDesc}, slotRows(v.ieKindVal(), v.ieURL, v.ieScan)...)
+	r = append(r, v.ieProj, v.ieTags, v.iePr)
+	if v.iePr.pick == 1 && !v.ieProtectWas {
+		r = append(r, v.iePass)
+	}
+	return r
+}
+
+// ieChanges are the review rows: every changed row on both tabs.
+func (v *integrationListView) ieChanges() [][2]string {
+	var rows []*formField
+	for _, f := range append(v.ieRows(false), v.ieRows(true)...) {
+		if f != v.iePass {
+			rows = append(rows, f)
+		}
+	}
+	return changes(rows, v.ieWas)
 }
 
 func (v *integrationListView) updateConfirm(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -496,8 +512,10 @@ func (v *integrationListView) View() string {
 		return v.viewTokenRotate(width, height)
 	case integModeTokenRemoveConfirm:
 		return v.viewTokenRemoveConfirm(width, height)
-	case integModeIntEdit:
+	case integModeIntEdit, integModeIntReview:
 		return v.viewIntEdit(width, height)
+	case integModeTokenRename:
+		return v.viewTokenRename(width, height)
 	}
 
 	km := integListKeys
@@ -545,7 +563,7 @@ var integListKeys = keyMap{
 var integDetailKeys = keyMap{
 	full: [][]key.Binding{
 		{keyMove, hint("enter", "run / open"), hint("tab", "next tab"), hint("shift+tab", "previous tab")},
-		{hint("e", "edit"), hint("r", "remove"), hint("a", "add credential / grant"), keyBack, keyQuit},
+		{hint("e", "edit"), hint("r", "remove"), hint("a", "add credential / grant"), hint("n", "rename credential"), keyBack, keyQuit},
 	},
 	notes: []string{
 		"Projects and tags group integrations and grants; they are not permissions.",
@@ -698,23 +716,33 @@ func (v *integrationListView) viewConfirm(width, height int) string {
 func (v *integrationListView) viewRun(width, height int) string {
 	what := v.selectedTokenName()
 	verb := map[string]string{"remove": "Removing %s…", "scope": "Saving the scope note of %s…",
-		"rotate": "Rotating %s…", "remove-cred": "Removing %s…", "edit": "Saving %s…"}[v.pending]
-	if v.pending == "remove" || v.pending == "edit" {
+		"rotate": "Rotating %s…", "remove-cred": "Removing %s…"}[v.pending]
+	if v.pending == "remove" {
 		what = v.selectedName()
 	}
-	return frame(width, height, fmt.Sprintf(verb, what), nil, "", nil, "", "")
+	title := fmt.Sprintf(verb, what)
+	switch v.pending {
+	case "edit":
+		title = "Saving integration…"
+	case "rename-cred":
+		title = "Renaming credential…"
+	}
+	return frame(width, height, title, nil, "", nil, "", "")
 }
 
 // viewDone is the ✓ outcome of an integration action; any key returns.
 func (v *integrationListView) viewDone(width, height int) string {
 	title := map[string]string{"remove": "✓ Integration removed", "scope": "✓ Scope note saved",
-		"rotate": "✓ Credential rotated", "remove-cred": "✓ Credential removed", "edit": "✓ Integration saved"}[v.pending]
+		"rotate": "✓ Credential rotated", "remove-cred": "✓ Credential removed", "edit": "✓ Integration saved",
+		"rename-cred": "✓ Credential renamed"}[v.pending]
 	rows := [][2]string{{"integration", v.keep}}
 	switch v.pending {
 	case "scope":
 		rows = append(rows, [2]string{"credential", v.selectedTokenName()}, [2]string{"scope note", v.tokenEditBuf.String()})
 	case "rotate", "remove-cred":
 		rows = append(rows, [2]string{"credential", v.selectedTokenName()})
+	case "rename-cred":
+		rows = append(rows, [2]string{"credential", strings.TrimSpace(v.renameIn.Value())}, [2]string{"was", v.selectedTokenName()})
 	}
 	body := append(strings.Split(kv(rows...), "\n"), mutedSt.Render("  The vault is synced with the team."))
 	return frame(width, height, title, nil, "", body, "", footer(width, hint("enter", "done")))
@@ -1121,6 +1149,8 @@ func (v *integrationListView) updateTokenAction(mm tea.KeyMsg) (tea.Model, tea.C
 		stepCursor(&v.tokenActionCursor, len(credActions), 1)
 	case "enter":
 		return v.runTokenAction(credActions[v.tokenActionCursor])
+	case "n":
+		return v.runTokenAction(listAction{key: "n"})
 	}
 	return v, nil
 }
@@ -1152,8 +1182,70 @@ func (v *integrationListView) runTokenAction(a listAction) (tea.Model, tea.Cmd) 
 		v.mode = integModeTokenRotate
 	case "x":
 		v.mode = integModeTokenRemoveConfirm
+	case "n":
+		v.renameIn, v.renamePass, v.renameAt = newFormInput(false), newFormInput(true), 0
+		v.renameIn.SetValue(tokenName)
+		v.renameIn.CursorEnd()
+		v.err, v.mode = "", integModeTokenRename
 	}
 	return v, nil
+}
+
+// updateTokenRename is the rename step: enter saves; a protected
+// integration asks its approval passphrase on the same screen first.
+func (v *integrationListView) updateTokenRename(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	v.err = ""
+	integ, from := v.selectedName(), v.selectedTokenName()
+	to := strings.TrimSpace(v.renameIn.Value())
+	switch mm.String() {
+	case "esc":
+		if v.renameAt == 1 {
+			v.renameAt = 0
+			return v, nil
+		}
+		v.mode = integModeTokenAction
+	case "enter":
+		_, taken := v.items[integ].Tokens[to]
+		switch {
+		case to == "":
+			v.err = "Enter a name."
+		case to == from:
+			v.err = "That is its current name."
+		case taken:
+			v.err = integ + " already has a credential " + to
+		case v.items[integ].Protected && v.renameAt == 0:
+			v.renameAt = 1
+		case v.items[integ].Protected && v.renamePass.Value() == "":
+			v.err = "Enter the approval passphrase."
+		default:
+			args, pass := []string{"integration", "rename-token", "--integration", integ, "--from", from, "--to", to}, ""
+			if v.items[integ].Protected {
+				args, pass = append(args, "--passphrase-stdin"), v.renamePass.Value()
+			}
+			return v.startRun("rename-cred", integModeTokenRename, func() tea.Msg {
+				_, err := runDop(pass, args...)
+				return integActionMsg{err: err}
+			})
+		}
+	default:
+		if v.renameAt == 1 {
+			edit(&v.renamePass, mm)
+		} else {
+			edit(&v.renameIn, mm)
+		}
+	}
+	return v, nil
+}
+
+func (v *integrationListView) viewTokenRename(width, height int) string {
+	w := wiz{width: width, height: height}
+	in := []string{inputRow(&v.renameIn)}
+	if v.renameAt == 1 {
+		v.renameIn.Blur()
+		in = []string{"  " + v.renameIn.View(), "", mutedSt.Render("Approval passphrase"), inputRow(&v.renamePass)}
+	}
+	return w.screen("Rename credential", v.selectedName(), "New name for "+v.selectedTokenName(), in,
+		"The grants that use it follow the new name.", v.err, "", keyMap{short: []key.Binding{hint("enter", "save"), keyBack}})
 }
 
 func (v *integrationListView) selectedTokenName() string {
@@ -1304,193 +1396,83 @@ func (v *integrationListView) doTokenRemove() tea.Cmd {
 	}
 }
 
-// updateIntEdit handles the integration-level edit form.
-// Text fields: Name, Desc, KindSlot, Projects, Tags, Passphrase.
-// Picker fields: Kind, Protection. Passphrase only when flipping
-// unprotected → protected.
+// updateIntEdit: the dense form (tab flips Normal / Advanced), then the
+// review; enter there saves, or closes when nothing changed.
 func (v *integrationListView) updateIntEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
-	v.err = ""
-	if v.intEditField == intEditFieldKind {
-		switch mm.String() {
-		case "esc":
-			v.mode = v.from
-		case "up", "k":
-			stepCursor(&v.intEditKindCursor, len(kindPresets), -1)
-		case "down", "j":
-			stepCursor(&v.intEditKindCursor, len(kindPresets), 1)
-		case "enter", "tab":
-			v.intEditKindChoice = kindPresets[v.intEditKindCursor].value
-			v.intEditField = intEditFieldDesc
-		case "shift+tab":
-			v.intEditField = intEditFieldName
-		}
-		return v, nil
-	}
-	if v.intEditField == intEditFieldProtection {
-		switch mm.String() {
-		case "esc":
-			v.mode = v.from
-		case "up", "k":
-			stepCursor(&v.intEditProtectCursor, len(protectionPresets), -1)
-		case "down", "j":
-			stepCursor(&v.intEditProtectCursor, len(protectionPresets), 1)
+	k := mm.String()
+	if v.mode == integModeIntReview {
+		switch k {
 		case "enter":
-			v.intEditProtectChoice = protectionPresets[v.intEditProtectCursor].value
-			if v.intEditProtectChoice && !v.intEditProtectWas {
-				v.intEditField = intEditFieldPassphrase
-			} else {
-				return v.saveIntEdit()
+			if len(v.ieChanges()) == 0 {
+				v.mode, v.tab = integModeDetail, 0
+				return v, nil
 			}
-		case "tab":
-			v.intEditProtectChoice = protectionPresets[v.intEditProtectCursor].value
-			if v.intEditProtectChoice && !v.intEditProtectWas {
-				v.intEditField = intEditFieldPassphrase
-			}
-		case "shift+tab":
-			v.intEditField = intEditFieldTags
+			v.keep = vault.NormalizeIntegrationName(v.ieName.val()) // cursor follows a rename
+			return v.startRun("edit", integModeIntReview, v.doIntEdit())
+		case "esc", "shift+tab":
+			v.mode, v.err = integModeIntEdit, ""
 		}
 		return v, nil
 	}
-	// Text fields: caret keys and runes go to the field; navigation
-	// keys fall through.
-	key := mm.String()
-	if buf := v.intEditCurBuf(); buf != nil {
-		switch key {
-		case "left", "right", "home", "end", "ctrl+a", "ctrl+e", "backspace", "delete", "ctrl+d":
-			buf.handleKey(key, mm.Runes)
-			return v, nil
-		default:
-			if len(mm.Runes) > 0 && key != "enter" && key != "tab" && key != "shift+tab" && key != "up" && key != "down" && key != "esc" {
-				buf.InsertRunes(mm.Runes)
-				return v, nil
-			}
-		}
+	v.err = ""
+	f := &v.ieForm
+	if f.open == 0 && (k == "tab" || k == "shift+tab") {
+		v.ieAdvTab, f.cur = !v.ieAdvTab, 0
+		return v, nil
 	}
-	switch key {
-	case "esc":
+	switch f.key(v.ieRows(v.ieAdvTab), mm) {
+	case formBack:
 		v.mode = v.from
-	case "enter", "tab", "down":
-		switch v.intEditField {
-		case intEditFieldName:
-			v.intEditField = intEditFieldKind
-		case intEditFieldDesc, intEditFieldKindSlot, intEditFieldProjects:
-			v.intEditField++
-		case intEditFieldTags:
-			v.intEditField = intEditFieldProtection
-		case intEditFieldPassphrase:
-			if key != "enter" {
-				break
-			}
-			if v.intEditPassBuf.Len() == 0 {
-				v.err = "Enter the approval passphrase to protect this integration."
-				return v, nil
-			}
-			return v.saveIntEdit()
-		}
-	case "shift+tab", "up":
-		switch v.intEditField {
-		case intEditFieldPassphrase:
-			v.intEditField = intEditFieldProtection
-		case intEditFieldDesc:
-			v.intEditField = intEditFieldKind
-		case intEditFieldName:
-		default:
-			v.intEditField--
+	case formNext:
+		v.ieAdvTab = false
+		if v.err = f.missing(v.ieRows(false)); v.err == "" {
+			v.mode = integModeIntReview
 		}
 	}
 	return v, nil
 }
 
-func (v *integrationListView) saveIntEdit() (tea.Model, tea.Cmd) {
-	if n := strings.TrimSpace(v.intEditNameBuf.String()); n != "" {
-		v.keep = n // cursor follows a rename
-	}
-	return v.startRun("edit", integModeIntEdit, v.doIntEdit())
-}
-
-func (v *integrationListView) intEditCurBuf() *textField {
-	switch v.intEditField {
-	case intEditFieldName:
-		return &v.intEditNameBuf
-	case intEditFieldDesc:
-		return &v.intEditDescBuf
-	case intEditFieldKindSlot:
-		return &v.intEditKindSlotBuf
-	case intEditFieldProjects:
-		return &v.intEditProjectsBuf
-	case intEditFieldTags:
-		return &v.intEditTagsBuf
-	case intEditFieldPassphrase:
-		return &v.intEditPassBuf
-	}
-	return nil
-}
-
+// doIntEdit renames first when the name changed (its own subcommand,
+// audit event and grant rewrite), then `integration add` with every
+// row. The CLI merges and keeps metadata it is not given, so an
+// Advanced row goes only when changed (cleared: an empty metadata key).
 func (v *integrationListView) doIntEdit() tea.Cmd {
-	nameWas := v.intEditNameWas
-	nameNew := strings.TrimSpace(v.intEditNameBuf.String())
-	// A different name renames FIRST (its own CLI subcommand, audit
-	// event and grant rewrite), then the renamed integration is updated.
-	name := nameWas
-	if nameNew != "" && nameNew != nameWas {
-		name = nameNew
+	from, to := v.ieNameWas, v.ieName.val()
+	kind := v.ieKindVal()
+	args := []string{"integration", "add", "--name", to, "--kind", kind}
+	if d := v.ieDesc.val(); d != "" {
+		args = append(args, "--description", d)
 	}
-	kind := v.intEditKindChoice
-	desc := v.intEditDescBuf.String()
-	slot := v.intEditKindSlotBuf.String()
-	projects := strings.TrimSpace(v.intEditProjectsBuf.String())
-	tags := strings.TrimSpace(v.intEditTagsBuf.String())
-	protectChoice := v.intEditProtectChoice
-	protectWas := v.intEditProtectWas
-	passphrase := v.intEditPassBuf.String()
+	args = append(args, slotArgs(kind, v.ieURL.val())...)
+	if v.ieScan.pick == 1 && (kind == vault.IntegrationKindAPI || kind == vault.IntegrationKindMCP) {
+		args = append(args, "--probe-endpoints")
+	}
+	// Always pass projects + tags (empty clears, nonempty replaces).
+	args = append(args, "--projects", v.ieProj.val(), "--tags", v.ieTags.val())
+	for _, i := range advFieldsForKind(kind) {
+		if f := v.ieAdv[i]; f.val() != v.ieWas[f] {
+			if f.val() == "" {
+				args = append(args, "--metadata", advFieldSpecs[i].metaKey+"=")
+			} else {
+				args = append(args, advFieldSpecs[i].cliFlag, f.val())
+			}
+		}
+	}
+	protect, pass := v.iePr.pick == 1, ""
+	switch {
+	case protect && !v.ieProtectWas:
+		args, pass = append(args, "--protected", "--passphrase-stdin"), v.iePass.in.Value()
+	case !protect && v.ieProtectWas:
+		args = append(args, "--protected=false")
+	}
 	return func() tea.Msg {
-		self, _ := os.Executable()
-		if nameNew != "" && nameNew != nameWas {
-			rename := exec.Command(self, "integration", "rename", "--from", nameWas, "--to", nameNew)
-			rename.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
-			var rstderr bytes.Buffer
-			rename.Stderr = &rstderr
-			if err := rename.Run(); err != nil {
-				return integActionMsg{err: strings.TrimSpace(rstderr.String())}
+		if to != from {
+			if _, err := runDop("", "integration", "rename", "--from", from, "--to", to); err != "" {
+				return integActionMsg{err: err}
 			}
 		}
-		args := []string{"integration", "add", "--name", name, "--kind", kind}
-		if desc != "" {
-			args = append(args, "--description", desc)
-		}
-		if slot != "" {
-			switch kind {
-			case vault.IntegrationKindCLI:
-				args = append(args, "--cmd", slot)
-			case vault.IntegrationKindMCP:
-				if strings.HasPrefix(slot, "http://") || strings.HasPrefix(slot, "https://") {
-					args = append(args, "--mcp-url", slot)
-				} else {
-					args = append(args, "--mcp-cmd", slot)
-				}
-			default:
-				args = append(args, "--base-url", slot)
-			}
-		}
-		// Always pass projects + tags (empty clears, nonempty replaces).
-		args = append(args, "--projects", projects, "--tags", tags)
-		switch {
-		case protectChoice && !protectWas:
-			args = append(args, "--protected", "--passphrase-stdin")
-		case !protectChoice && protectWas:
-			args = append(args, "--protected=false")
-		}
-		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
-		if protectChoice && !protectWas {
-			cmd.Stdin = strings.NewReader(passphrase + "\n")
-		}
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return integActionMsg{err: strings.TrimSpace(stderr.String())}
-		}
-		return integActionMsg{}
+		_, err := runDop(pass, args...)
+		return integActionMsg{err: err}
 	}
 }
 
@@ -1534,63 +1516,31 @@ func (v *integrationListView) viewTokenRemoveConfirm(width, height int) string {
 	return frame(width, height, "Remove credential "+tn+"?", nil, "", body, status{err: v.err}.String(), confirmFoot("remove"))
 }
 
-// viewIntEdit is the integration edit form: one row per field, the
-// focused one with › and the caret; pickers open in place.
+// viewIntEdit is the integration edit form: dense rows, tabs Normal /
+// Advanced on the title row, the review after it.
 func (v *integrationListView) viewIntEdit(width, height int) string {
-	f := v.intEditField
-	text := func(field int, label string, buf *textField) string {
-		if f != field {
-			return formRow(false, label, buf.String(), "")
+	title := "Edit " + ansi.Truncate(v.ieNameWas, max(width-40, 12), "…")
+	w := wiz{width: width, height: height, help: v.help}
+	if v.mode == integModeIntReview {
+		if ch := v.ieChanges(); len(ch) > 0 {
+			return w.review(title, "Save "+v.ieName.val()+"?", ch, "save", false, v.err)
 		}
-		b, a := buf.Split()
-		return formRow(true, label, b, a)
+		return w.review(title, "No changes.", nil, "close", false, v.err)
 	}
-	body := []string{text(intEditFieldName, "name", &v.intEditNameBuf)}
-	if f == intEditFieldName {
-		body = append(body, mutedSt.Render("  Renaming also renames the grants that use it."))
+	rows, f := v.ieRows(v.ieAdvTab), &v.ieForm
+	tabs := []tab{{"Normal", -1, !v.ieAdvTab}, {"Advanced", -1, v.ieAdvTab}}
+	km := f.formKeys(rows, "Review", hint("tab", map[bool]string{true: "normal", false: "advanced"}[v.ieAdvTab]))
+	hintTxt := ""
+	switch {
+	case v.ieAdvTab:
+		hintTxt = "Optional, stored on the integration."
+	case f.cur < len(rows) && rows[f.cur] == v.ieName:
+		hintTxt = "Renaming also renames the grants that use it."
+	case f.cur < len(rows) && (rows[f.cur] == v.ieProj || rows[f.cur] == v.ieTags):
+		hintTxt = "Comma-separated."
 	}
-	if f == intEditFieldKind {
-		var opts [][2]string
-		for _, p := range kindPresets {
-			opts = append(opts, [2]string{p.label, p.hint})
-		}
-		body = append(body, pickRows("kind", opts, v.intEditKindCursor)...)
-	} else {
-		body = append(body, formRow(false, "kind", v.intEditKindChoice, ""))
-	}
-	slotLbl := map[string]string{vault.IntegrationKindCLI: "command", vault.IntegrationKindMCP: "MCP URL or command",
-		vault.IntegrationKindOther: "extra config"}[v.intEditKindChoice]
-	if slotLbl == "" {
-		slotLbl = "base URL"
-	}
-	body = append(body, text(intEditFieldDesc, "description", &v.intEditDescBuf), text(intEditFieldKindSlot, slotLbl, &v.intEditKindSlotBuf))
-	if f == intEditFieldKindSlot {
-		_, h := kindSlotLabel(v.intEditKindChoice)
-		body = append(body, mutedSt.Render("  "+h))
-	}
-	body = append(body, text(intEditFieldProjects, "projects", &v.intEditProjectsBuf), text(intEditFieldTags, "tags", &v.intEditTagsBuf))
-	if f == intEditFieldProjects || f == intEditFieldTags {
-		body = append(body, mutedSt.Render("  Comma-separated."))
-	}
-	if f == intEditFieldProtection {
-		body = append(body, pickRows("protection", protectOpts(), v.intEditProtectCursor)...)
-	} else {
-		body = append(body, formRow(false, "protection", protectWord(v.intEditProtectChoice), ""))
-	}
-	if v.intEditProtectChoice && !v.intEditProtectWas {
-		if f == intEditFieldPassphrase {
-			b, a := v.intEditPassBuf.SplitMasked("•")
-			body = append(body, formRow(true, "approval passphrase", b, a))
-		} else {
-			body = append(body, formRow(false, "approval passphrase", strings.Repeat("•", v.intEditPassBuf.Len()), ""))
-		}
-	}
-	verb := "next"
-	if f == intEditFieldPassphrase || (f == intEditFieldProtection && !(protectionPresets[v.intEditProtectCursor].value && !v.intEditProtectWas)) {
-		verb = "save"
-	}
-	foot := footer(width, hint("enter", verb), hint("tab", "field"), keyBack)
-	return frame(width, height, "Edit "+v.selectedName(), nil, "", body, status{err: v.err}.String(), foot)
+	body := km.overlay(f.view(rows, width, "Review"), width, frameRows(height), v.help)
+	return frame(width, height, title, tabs, "", body, status{err: v.err, hint: hintTxt}.String(), km.footerLine(width, v.help))
 }
 
 // ---------- Grant list ----------
@@ -1602,15 +1552,7 @@ const (
 	grantModeRun     = 3
 	grantModeDone    = 4
 	grantModeEdit    = 5
-)
-
-// Edit fields; the passphrase only when flipping unprotected → protected.
-const (
-	grantEditFieldProjects   = 0
-	grantEditFieldTags       = 1
-	grantEditFieldEnvPrefix  = 2
-	grantEditFieldProtection = 3
-	grantEditFieldPassphrase = 4
+	grantModeReview  = 6
 )
 
 type grantListView struct {
@@ -1635,15 +1577,10 @@ type grantListView struct {
 	list          list.Model
 	width, height int
 
-	editField   int
-	editProject strings.Builder
-	editTags    strings.Builder
-	editPrefix  strings.Builder
-	// grant-level protection toggle in the edit form.
-	editProtectCursor int
-	editProtectChoice bool
-	editProtectWas    bool
-	editPassBuf       strings.Builder
+	// edit: a dense form, then a review of the changed rows.
+	editForm                            denseForm
+	edProj, edTags, edEnv, edPr, edPass *formField
+	edWas                               map[*formField]string
 }
 
 func newGrantListView(c *admin.Client, p *config.Paths) *grantListView {
@@ -1732,7 +1669,7 @@ func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if mm.err != "" {
 			// Errors stay on the screen that caused them, in plain words.
 			if mm.kind == "edit" {
-				v.err, v.mode = "Save failed: "+cliErr(mm.err), grantModeEdit
+				v.err, v.mode = "Save failed: "+cliErr(mm.err), grantModeReview
 			} else {
 				v.err, v.mode = "Remove failed: "+cliErr(mm.err), v.from
 			}
@@ -1760,14 +1697,20 @@ func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateDetail(mm)
 		case grantModeConfirm:
 			return v.updateConfirm(mm)
-		case grantModeEdit:
+		case grantModeEdit, grantModeReview:
+			if !v.editForm.typing() && toggleHelp(&v.help, mm) {
+				return v, nil
+			}
 			return v.updateEdit(mm)
 		case grantModeDone:
 			if mm.String() != "enter" {
 				return v, nil // done screens leave on enter only
 			}
-			v.done = v.solo
-			v.mode, v.pending = grantModeList, ""
+			v.done, v.mode = v.solo, grantModeList
+			if v.pending == "edit" {
+				v.done, v.mode = false, grantModeDetail
+			}
+			v.pending = ""
 			return v, v.load
 		}
 	}
@@ -1827,96 +1770,63 @@ func (v *grantListView) runAction(k string) (tea.Model, tea.Cmd) {
 }
 
 func (v *grantListView) openEditor() {
-	id := v.selectedID()
-	g := v.items[id]
-	v.editProject.Reset()
-	v.editProject.WriteString(strings.Join(g.Projects, ","))
-	v.editTags.Reset()
-	v.editTags.WriteString(strings.Join(g.Tags, ","))
-	v.editPrefix.Reset()
-	v.editPrefix.WriteString(g.EnvPrefix)
-	v.editProtectChoice = g.Protected
-	v.editProtectWas = g.Protected
-	for i, p := range protectionPresets {
-		if p.value == g.Protected {
-			v.editProtectCursor = i
-			break
-		}
+	g := v.items[v.selectedID()]
+	v.edProj, v.edTags = textRow("projects", "docs, wiki", false, false), textRow("tags", "ro, ci", false, false)
+	v.edEnv, v.edPr = textRow("env prefix", g.EffectivePrefix(), false, false), pickRow("protection", protectOpts())
+	v.edPass = textRow("approval passphrase", "", true, true)
+	v.edProj.in.SetValue(strings.Join(g.Projects, ","))
+	v.edTags.in.SetValue(strings.Join(g.Tags, ","))
+	v.edEnv.in.SetValue(g.EnvPrefix)
+	if g.Protected {
+		v.edPr.pick = 1
 	}
-	v.editPassBuf.Reset()
-	v.editField = grantEditFieldProjects
-	v.mode = grantModeEdit
-	v.err = ""
+	v.editForm, v.edWas = denseForm{}, snap([]*formField{v.edProj, v.edTags, v.edEnv, v.edPr})
+	v.mode, v.err = grantModeEdit, ""
 }
 
-func (v *grantListView) updateEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
-	v.err = ""
-	needsPass := v.editProtectChoice && !v.editProtectWas
-	last := grantEditFieldProtection
-	if needsPass {
-		last = grantEditFieldPassphrase
+// editRows: the passphrase only when switching to protected.
+func (v *grantListView) editRows() []*formField {
+	r := []*formField{v.edProj, v.edTags, v.edEnv, v.edPr}
+	if v.edPr.pick == 1 && !v.items[v.selectedID()].Protected {
+		r = append(r, v.edPass)
 	}
-	k := mm.String()
-	if v.editField == grantEditFieldProtection && (k == "up" || k == "down" || k == "k" || k == "j") {
-		d := 1
-		if k == "up" || k == "k" {
-			d = -1
+	return r
+}
+
+func (v *grantListView) editChanges() [][2]string {
+	return changes(v.editRows()[:4], v.edWas)
+}
+
+// updateEdit: the dense form, then the review; enter there saves, or
+// closes when nothing changed.
+func (v *grantListView) updateEdit(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if v.mode == grantModeReview {
+		switch mm.String() {
+		case "enter":
+			if len(v.editChanges()) == 0 {
+				v.mode = grantModeDetail
+				return v, nil
+			}
+			if cmd := v.locked(mm, &v.err); cmd != nil {
+				return v, cmd
+			}
+			v.mode, v.help, v.pending, v.err = grantModeRun, false, "edit", ""
+			return v, v.doEdit()
+		case "esc", "shift+tab":
+			v.mode, v.err = grantModeEdit, ""
 		}
-		stepCursor(&v.editProtectCursor, len(protectionPresets), d)
-		v.editProtectChoice = protectionPresets[v.editProtectCursor].value
 		return v, nil
 	}
-	switch k {
-	case "esc":
+	v.err = ""
+	switch v.editForm.key(v.editRows(), mm) {
+	case formBack:
 		v.mode = v.from
-	case "tab", "down":
-		if v.editField < last {
-			v.editField++
-		}
-	case "shift+tab", "up":
-		if v.editField > grantEditFieldProjects {
-			v.editField--
-		}
-	case "enter":
-		if v.editField < last {
-			v.editField++
-			return v, nil
-		}
-		if needsPass && v.editPassBuf.Len() == 0 {
-			v.err = "Enter the approval passphrase to protect this grant."
-			return v, nil
-		}
-		if cmd := v.locked(mm, &v.err); cmd != nil {
-			return v, cmd
-		}
-		v.mode, v.help, v.pending = grantModeRun, false, "edit"
-		return v, v.doEdit()
-	case "backspace":
-		if buf := v.editBuf(); buf != nil && buf.Len() > 0 {
-			s := buf.String()
-			buf.Reset()
-			buf.WriteString(s[:len(s)-1])
-		}
-	default:
-		if buf := v.editBuf(); buf != nil && len(mm.Runes) > 0 {
-			buf.WriteString(string(mm.Runes))
+	case formNext:
+		if v.err = v.editForm.missing(v.editRows()); v.err == "" {
+			v.mode = grantModeReview
 		}
 	}
 	return v, nil
-}
-
-func (v *grantListView) editBuf() *strings.Builder {
-	switch v.editField {
-	case grantEditFieldProjects:
-		return &v.editProject
-	case grantEditFieldTags:
-		return &v.editTags
-	case grantEditFieldEnvPrefix:
-		return &v.editPrefix
-	case grantEditFieldPassphrase:
-		return &v.editPassBuf
-	}
-	return nil
 }
 
 func (v *grantListView) updateConfirm(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1951,46 +1861,25 @@ func (v *grantListView) doRemove() tea.Cmd {
 func (v *grantListView) doEdit() tea.Cmd {
 	id := v.selectedID()
 	g := v.items[id]
-	projects := strings.TrimSpace(v.editProject.String())
-	tags := strings.TrimSpace(v.editTags.String())
-	prefix := strings.TrimSpace(v.editPrefix.String())
+	// `dop grant add` is upsert: the same id + integration + credential
+	// with new fields overwrites the record in place.
+	args := []string{"grant", "add", "--id", id, "--integration", g.Integration, "--token", g.Token,
+		"--projects", v.edProj.val(), "--tags", v.edTags.val()}
+	if p := v.edEnv.val(); p != "" {
+		args = append(args, "--env-prefix", p)
+	}
 	// Grant-level protection rides the CLI's tri-state --protected; only
-	// lock-flips feed a passphrase.
-	protectChoice := v.editProtectChoice
-	protectWas := v.editProtectWas
-	passphrase := v.editPassBuf.String()
+	// a switch to protected feeds a passphrase.
+	protect, pass := v.edPr.pick == 1, ""
+	switch {
+	case protect && !g.Protected:
+		args, pass = append(args, "--protected", "--passphrase-stdin"), v.edPass.in.Value()
+	case !protect && g.Protected:
+		args = append(args, "--protected=false")
+	}
 	return func() tea.Msg {
-		self, _ := os.Executable()
-		// `dop grant add` is upsert; passing the same id + integration +
-		// token with new metadata overwrites the record in place.
-		args := []string{
-			"grant", "add",
-			"--id", id,
-			"--integration", g.Integration,
-			"--token", g.Token,
-			"--projects", projects,
-			"--tags", tags,
-		}
-		if prefix != "" {
-			args = append(args, "--env-prefix", prefix)
-		}
-		switch {
-		case protectChoice && !protectWas:
-			args = append(args, "--protected", "--passphrase-stdin")
-		case !protectChoice && protectWas:
-			args = append(args, "--protected=false")
-		}
-		cmd := exec.Command(self, args...)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
-		if protectChoice && !protectWas {
-			cmd.Stdin = strings.NewReader(passphrase + "\n")
-		}
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return grantActionMsg{kind: "edit", err: strings.TrimSpace(stderr.String())}
-		}
-		return grantActionMsg{kind: "edit"}
+		_, err := runDop(pass, args...)
+		return grantActionMsg{kind: "edit", err: err}
 	}
 }
 
@@ -2033,16 +1922,16 @@ func (v *grantListView) View() string {
 		body = append(body, mutedSt.Render("  Bearers holding it fail on their next exec."))
 		return frame(width, height, "Remove "+id+"?", nil, "", body, "", confirmFoot("remove"))
 	case grantModeRun:
-		verb := "Removing %s…"
+		title := "Removing " + id + "…"
 		if v.pending == "edit" {
-			verb = "Saving %s…"
+			title = "Saving grant…"
 		}
-		return frame(width, height, fmt.Sprintf(verb, id), nil, "", nil, "", "")
+		return frame(width, height, title, nil, "", nil, "", "")
 	case grantModeDone:
 		title := map[string]string{"remove": "✓ Grant removed", "edit": "✓ Grant saved"}[v.pending]
 		body := append(strings.Split(kv([2]string{"grant", id}), "\n"), mutedSt.Render("  The vault is synced with the team."))
 		return frame(width, height, title, nil, "", body, "", footer(width, hint("enter", "done")))
-	case grantModeEdit:
+	case grantModeEdit, grantModeReview:
 		return v.viewEdit(width, height)
 	}
 
@@ -2100,36 +1989,29 @@ func (v *grantListView) viewDetail(width, height int) string {
 	return frame(width, height, title, nil, ctx, body, st.String(), km.footerLine(width, v.help))
 }
 
-// viewEdit is the grant edit form: one row per field, › and the caret
-// on the focused one; the protection picker opens in place.
+// viewEdit is the grant edit form (dense rows), then its review.
 func (v *grantListView) viewEdit(width, height int) string {
-	f := v.editField
-	body := []string{
-		formRow(f == grantEditFieldProjects, "projects", v.editProject.String(), ""),
-		formRow(f == grantEditFieldTags, "tags", v.editTags.String(), ""),
-		formRow(f == grantEditFieldEnvPrefix, "env prefix", v.editPrefix.String(), ""),
+	title := "Edit " + ansi.Truncate(v.selectedID(), max(width-20, 12), "…")
+	if v.mode == grantModeReview {
+		w := wiz{width: width, height: height, help: v.help}
+		if ch := v.editChanges(); len(ch) > 0 {
+			return w.review(title, "Save "+v.selectedID()+"?", ch, "save", false, v.err)
+		}
+		return w.review(title, "No changes.", nil, "close", false, v.err)
 	}
-	switch f {
-	case grantEditFieldProjects, grantEditFieldTags:
-		body = append(body, mutedSt.Render("  Comma-separated."))
-	case grantEditFieldEnvPrefix:
-		body = append(body, mutedSt.Render("  Blank keeps the default, "+v.items[v.selectedID()].EffectivePrefix()+"."))
+	rows, f := v.editRows(), &v.editForm
+	hintTxt := ""
+	if f.cur < len(rows) {
+		switch rows[f.cur] {
+		case v.edProj, v.edTags:
+			hintTxt = "Comma-separated."
+		case v.edEnv:
+			hintTxt = "Blank keeps the default, " + v.edEnv.in.Placeholder + "."
+		}
 	}
-	if f == grantEditFieldProtection {
-		body = append(body, pickRows("protection", protectOpts(), v.editProtectCursor)...)
-	} else {
-		body = append(body, formRow(false, "protection", protectWord(v.editProtectChoice), ""))
-	}
-	needsPass := v.editProtectChoice && !v.editProtectWas
-	if needsPass {
-		body = append(body, formRow(f == grantEditFieldPassphrase, "approval passphrase", strings.Repeat("•", v.editPassBuf.Len()), ""))
-	}
-	verb := "next"
-	if f == grantEditFieldPassphrase || (f == grantEditFieldProtection && !needsPass) {
-		verb = "save"
-	}
-	foot := footer(width, hint("enter", verb), hint("tab", "field"), keyBack)
-	return frame(width, height, "Edit "+v.selectedID(), nil, "", body, status{err: v.err}.String(), foot)
+	km := f.formKeys(rows, "Review")
+	body := km.overlay(f.view(rows, width, "Review"), width, frameRows(height), v.help)
+	return frame(width, height, title, nil, "", body, status{err: v.err, hint: hintTxt}.String(), km.footerLine(width, v.help))
 }
 
 // ---------- Grant remove ----------

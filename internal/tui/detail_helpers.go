@@ -549,6 +549,26 @@ func (d *denseForm) formKeys(rows []*formField, action string, extra ...key.Bind
 		append([]key.Binding{hint("esc", "cancel an edit"), hint("ctrl+u", "clear")}, extra...)}}
 }
 
+// snap records each row's value, for changes.
+func snap(rows []*formField) map[*formField]string {
+	was := map[*formField]string{}
+	for _, f := range rows {
+		was[f] = f.val()
+	}
+	return was
+}
+
+// changes are the rows whose value differs from was, as review kv rows.
+func changes(rows []*formField, was map[*formField]string) [][2]string {
+	var out [][2]string
+	for _, f := range rows {
+		if f.val() != was[f] {
+			out = append(out, [2]string{f.label, displayOr(f.val(), "none")})
+		}
+	}
+	return out
+}
+
 // ---- multi-select picker (issue grants, bearer add grant) ----
 
 // pickItem is one multi-select row: its group header, the name column,

@@ -71,6 +71,10 @@ const (
 	// old_name + new_name + referrers (count of grants rewritten).
 	// Fires once per rename; the rename itself is atomic at save time.
 	EventIntegrationRenamed = "integration_renamed"
+	// `dop integration rename-token` renamed a credential and rewrote the
+	// grants that used it. Subject = integration; extra.from, extra.to,
+	// extra.grants (count rewritten, as string).
+	EventTokenRename = "token_rename"
 	// v1.14.0-rc4 — Tier 3 approval events for secret-print surfaces.
 	// Emitted by `internal/cli/printguard` around the approval dialog.
 	// Requested fires before the dialog opens so a hung dialog still

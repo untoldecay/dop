@@ -216,29 +216,16 @@ func newAddIntegrationView(c *admin.Client, p *config.Paths) *addIntegrationView
 		vlt = &vault.Vault{}
 	}
 	v := &addIntegrationView{client: c, paths: p, vlt: vlt, stage: integStagePick}
-	var kinds [][2]string
-	for _, k := range kindPresets {
-		kinds = append(kinds, [2]string{k.label, k.hint})
-	}
 	var scopes [][2]string
 	for _, s := range scopePresets {
 		scopes = append(scopes, [2]string{s.label, map[bool]string{true: "type your own"}[s.value == ""]})
 	}
-	var probe [][2]string
-	for _, s := range probePresets {
-		probe = append(probe, [2]string{s.label, s.hint})
-	}
-	v.name, v.kind = textRow("name", "notion, github, db-primary", true, false), pickRow("kind", kinds)
-	v.desc, v.url = textRow("description", "Team wiki and docs", false, false), textRow("base URL", "", false, false)
-	v.scan = pickRow("scan for docs", probe)
+	v.name, v.desc, v.url, v.kind, v.scan, v.adv = integRows()
 	v.cred, v.value = textRow("credential", "notion", true, false), textRow("value", "the API key or password", true, true)
 	v.scope, v.protect = pickRow("scope note", scopes), pickRow("protection", protectOpts())
 	v.scope.other = true
 	v.scope.in.Placeholder = "read-only on /docs"
 	v.pass = textRow("approval passphrase", "", true, true)
-	for _, a := range advFieldSpecs {
-		v.adv = append(v.adv, textRow(a.label, a.placeholder, false, false))
-	}
 	v.grant = newGrantForm(vlt, true)
 	return v
 }
@@ -281,26 +268,10 @@ func (v *addIntegrationView) integName() string {
 func (v *addIntegrationView) rows() []*formField {
 	switch v.stage {
 	case integStageInteg:
-		r := []*formField{v.name, v.kind, v.desc}
-		switch v.kindVal() {
-		case vault.IntegrationKindAPI:
-			v.url.label, v.url.in.Placeholder = "base URL", "https://api.example.com/v1"
-			r = append(r, v.url, v.scan)
-		case vault.IntegrationKindCLI:
-			v.url.label, v.url.in.Placeholder = "command", "gh"
-			r = append(r, v.url)
-		case vault.IntegrationKindMCP:
-			v.url.label, v.url.in.Placeholder = "URL or launcher", "https://mcp.example.com/sse or npx my-mcp"
-			r = append(r, v.url, v.scan)
-		}
-		return r
+		return append([]*formField{v.name, v.kind, v.desc}, slotRows(v.kindVal(), v.url, v.scan)...)
 	case integStageCred:
 		if v.advTab {
-			var r []*formField
-			for _, i := range advFieldsForKind(v.kindVal()) {
-				r = append(r, v.adv[i])
-			}
-			return r
+			return advRows(v.adv, v.kindVal())
 		}
 		r := []*formField{v.cred, v.value, v.scope}
 		if !v.existingIntegration {
@@ -497,22 +468,7 @@ func (v *addIntegrationView) integArgs() []string {
 		if d := v.desc.val(); d != "" {
 			args = append(args, "--description", d)
 		}
-		args = append(args, "--kind", v.kindVal())
-		if u := v.url.val(); u != "" {
-			switch v.kindVal() {
-			case vault.IntegrationKindCLI:
-				args = append(args, "--cmd", u)
-			case vault.IntegrationKindMCP:
-				// An http(s) URL is the MCP URL; anything else a stdio launcher.
-				if strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
-					args = append(args, "--mcp-url", u)
-				} else {
-					args = append(args, "--mcp-cmd", u)
-				}
-			case vault.IntegrationKindAPI:
-				args = append(args, "--base-url", u)
-			}
-		}
+		args = append(append(args, "--kind", v.kindVal()), slotArgs(v.kindVal(), v.url.val())...)
 		if (v.kindVal() == vault.IntegrationKindAPI || v.kindVal() == vault.IntegrationKindMCP) && v.scan.pick == 1 {
 			args = append(args, "--probe-endpoints")
 		}
@@ -654,6 +610,82 @@ func (v *addIntegrationView) View() string {
 	body := append([]string{stepper(v.stage, "Integration", "Credential", "Grant"), ""}, f.view(rows, v.width, action)...)
 	body = km.overlay(body, v.width, frameRows(v.height), v.help)
 	return frame(v.width, v.height, title, tabs, counter(v.stage, 3), body, status{err: v.err, hint: hintTxt}.String(), km.footerLine(v.width, v.help))
+}
+
+// ---- integration rows shared by Add integration and the integration edit form ----
+
+// integRows builds the integration-level rows: name, description, the
+// kind slot, kind and scan pickers, one Advanced row per advFieldSpecs.
+func integRows() (name, desc, url, kind, scan *formField, adv []*formField) {
+	var kinds, probe [][2]string
+	for _, k := range kindPresets {
+		kinds = append(kinds, [2]string{k.label, k.hint})
+	}
+	for _, s := range probePresets {
+		probe = append(probe, [2]string{s.label, s.hint})
+	}
+	for _, a := range advFieldSpecs {
+		adv = append(adv, textRow(a.label, a.placeholder, false, false))
+	}
+	return textRow("name", "notion, github, db-primary", true, false), textRow("description", "Team wiki and docs", false, false),
+		textRow("base URL", "", false, false), pickRow("kind", kinds), pickRow("scan for docs", probe), adv
+}
+
+// slotRows are the kind's own rows: base URL + scan (api), command
+// (cli), URL or launcher + scan (mcp), none (other).
+func slotRows(kind string, url, scan *formField) []*formField {
+	switch kind {
+	case vault.IntegrationKindAPI:
+		url.label, url.in.Placeholder = "base URL", "https://api.example.com/v1"
+		return []*formField{url, scan}
+	case vault.IntegrationKindCLI:
+		url.label, url.in.Placeholder = "command", "gh"
+		return []*formField{url}
+	case vault.IntegrationKindMCP:
+		url.label, url.in.Placeholder = "URL or launcher", "https://mcp.example.com/sse or npx my-mcp"
+		return []*formField{url, scan}
+	}
+	return nil
+}
+
+// slotValue is the kind slot's stored value (the metadata slotArgs writes).
+func slotValue(kind string, m map[string]string) string {
+	switch kind {
+	case vault.IntegrationKindCLI:
+		return m["cli_cmd"]
+	case vault.IntegrationKindMCP:
+		return displayOr(m["mcp_url"], m["mcp_cmd"])
+	}
+	return m["base_url"]
+}
+
+// slotArgs is the kind slot as `dop integration add` flags.
+func slotArgs(kind, u string) []string {
+	if u == "" {
+		return nil
+	}
+	switch kind {
+	case vault.IntegrationKindCLI:
+		return []string{"--cmd", u}
+	case vault.IntegrationKindMCP:
+		// An http(s) URL is the MCP URL; anything else a stdio launcher.
+		if strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+			return []string{"--mcp-url", u}
+		}
+		return []string{"--mcp-cmd", u}
+	case vault.IntegrationKindAPI:
+		return []string{"--base-url", u}
+	}
+	return nil
+}
+
+// advRows are the Advanced rows that apply to kind.
+func advRows(adv []*formField, kind string) []*formField {
+	var r []*formField
+	for _, i := range advFieldsForKind(kind) {
+		r = append(r, adv[i])
+	}
+	return r
 }
 
 // ---------- Add grant ----------
@@ -798,16 +830,20 @@ func (v *addGrantView) View() string {
 type advFieldSpec struct {
 	label, placeholder string
 	cliFlag            string // flag passed to `dop integration add`
+	metaKey            string // where the CLI stores it in Integration.Metadata
 	hiddenFor          []string
 }
 
 var advFieldSpecs = []advFieldSpec{
-	{"auth env template", "KEY=$TOKEN;KEY2=$SERVER_ROOT", "--cli-auth-env", []string{"api", "mcp", "other"}},
-	{"server root", "https://host, when it differs from the URL", "--server-root", nil},
-	{"allowed scope hint", "Agent_Collab,Skills_Registry", "--allowed", nil},
-	{"auth style", "bearer-header, basic, query-param", "--auth-style", []string{"cli", "mcp", "other"}},
-	{"install hint", "go install example.com/mycli@latest", "--cli-install", []string{"api", "mcp", "other"}},
-	{"help entry", "mycli --help", "--cli-help", []string{"api", "mcp", "other"}},
+	{"auth env template", "KEY=$TOKEN;KEY2=$SERVER_ROOT", "--cli-auth-env", "cli_auth_env", []string{"api", "mcp", "other"}},
+	{"server root", "https://host, when it differs from the URL", "--server-root", "server_root", nil},
+	{"allowed scope hint", "Agent_Collab,Skills_Registry", "--allowed", "allowed", nil},
+	{"auth style", "bearer-header, basic, query-param", "--auth-style", "auth_style", []string{"cli", "mcp", "other"}},
+	{"install hint", "go install example.com/mycli@latest", "--cli-install", "cli_install", []string{"api", "mcp", "other"}},
+	{"help entry", "mycli --help", "--cli-help", "cli_help", []string{"api", "mcp", "other"}},
+	{"endpoints URL", "https://api.example.com/openapi.json", "--endpoints-url", "endpoints_url", []string{"cli", "mcp", "other"}},
+	{"auth header", "Bearer", "--auth-header", "auth_header", []string{"cli", "mcp", "other"}},
+	{"args hint", "exec --inherit-env", "--args-hint", "cli_args_hint", []string{"api", "mcp", "other"}},
 }
 
 // advFieldsForKind returns the subset of advFieldSpecs applicable to
@@ -875,21 +911,6 @@ var probePresets = []struct {
 }{
 	{"no", false, "store only the URL you entered (default)"},
 	{"yes", true, "scan common OpenAPI paths or MCP tools/list"},
-}
-
-// kindSlotLabel returns the row label + hint for the kind-adaptive
-// step 3 based on which kind the operator picked at step 1.
-func kindSlotLabel(kind string) (label, hint string) {
-	switch kind {
-	case vault.IntegrationKindCLI:
-		return "Command (binary name)", "e.g. dop, boiler — must be on the agent's PATH"
-	case vault.IntegrationKindMCP:
-		return "MCP URL (or stdio cmd)", "an HTTP URL or a launcher command like npx my-mcp"
-	case vault.IntegrationKindOther:
-		return "(no extra config)", "other kind — this row is skipped"
-	default: // api, empty
-		return "Base URL", "optional — sets an env var like NOTION_BASE_URL"
-	}
 }
 
 // pos is the current step's index in fl; the review step is len(fl).
