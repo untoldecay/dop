@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/capability"
@@ -128,7 +129,7 @@ func cascadeGrantRemoval(
 
 		// Zero-grant bearer → revoke outright.
 		if len(c.Grants) == 0 {
-			c.Status = capability.RecordStatusRevoked
+			c.Status, c.RevokedAt = capability.RecordStatusRevoked, time.Now().UTC().Truncate(time.Second)
 			out.FullyEmptied = append(out.FullyEmptied, c.Subject)
 			rec := vaultCapability2Record(c, capID)
 			if err := signRecordViaDaemon(client, &rec); err != nil {
@@ -167,7 +168,7 @@ func cascadeGrantRemoval(
 
 		case vault.KeyTypeEd25519:
 			if forceRevokeEd25519 {
-				c.Status = capability.RecordStatusRevoked
+				c.Status, c.RevokedAt = capability.RecordStatusRevoked, time.Now().UTC().Truncate(time.Second)
 				rec := vaultCapability2Record(c, capID)
 				if err := signRecordViaDaemon(client, &rec); err != nil {
 					return out, fmt.Errorf("sign ed25519 revoke %s: %w", c.LookupID, err)

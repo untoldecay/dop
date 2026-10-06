@@ -9,7 +9,7 @@ Every `dop` command, grouped by what you're trying to do. Bare `dop` launches th
 - [Vault attach + sync](#vault-attach--sync) — `init`, `pull`, `push`, `vault edit`, `doctor`
 - [Integrations](#integrations) — `add`, `list`, `remove`, `remove-token`, `set-token`
 - [Grants](#grants) — `add`, `list`, `show`, `remove`
-- [Tokens](#tokens-bearers) — `issue`, `list`, `show`, `revoke`, `repin`, `reseal`, `add-grant`, `remove-grant`, `rotate`
+- [Tokens](#tokens-bearers) — `issue`, `list`, `show`, `revoke`, `prune`, `repin`, `reseal`, `add-grant`, `remove-grant`, `rotate`
 - [Claim + approval](#claim--approval) — `claim`, `pending`, `approve`, `reject`, `approve-remote`
 - [Agent keys](#agent-keys) — `list`, `info`, `migrate`, `sweep`, `delete`
 - [Execution plane](#execution-plane) — `exec`, `whoami`, `env`
@@ -424,6 +424,22 @@ dop token revoke <subject|cap-id-prefix|lookup-prefix>
 ```
 
 Deletes bundle, record sidecar, local agent key file. Bumps generation.
+
+### `dop token prune`
+
+Delete old revoked and rotated records.
+
+```
+dop token prune [--older-than 30d] [--dry-run] [--yes]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--older-than` | `30d` | Cutoff. Go durations plus `d` and `w`. |
+| `--dry-run` | false | Print the candidates (subject, status, age, lookup id) and change nothing. |
+| `--yes` | false | Skip the `prune N records? [y/N]` prompt (`DOP_FROM_TUI=1` skips it too). |
+
+A record is a candidate when it is revoked or rotated and it was revoked (`revoked_at`) or rotated (the rotation seal) longer ago than the cutoff, so a rotated bearer's agent keeps the full cutoff to pick up the new bearer. Records revoked before `revoked_at` existed age from their newest creation, claim or seal time. Active records are never pruned. Removes the records from the vault, deletes their bundle, record and local agent key files, saves the vault once and writes one `prune` audit event. Generation counters stay. Prints `pruned N records (older than 30d)`, or `nothing to prune`.
 
 ### `dop token repin`
 

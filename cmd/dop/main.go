@@ -47,6 +47,7 @@ usage:
   dop token list                                 list capabilities (admin-required)
   dop token show <lookup|subject> [--json]       detail view: subject, expiry, binding, grants (admin-required)
   dop token revoke <name>                        revoke a capability (admin-required)
+  dop token prune [--older-than 30d] [--dry-run] [--yes]  delete revoked/rotated records older than the cutoff (admin-required)
   dop token repin --subject S [--pin-ttl D]      re-issue an unclaimed bearer with a new PIN (admin-required)
   dop token portable --subject S (--on|--off)    --on re-issues the bearer as portable (claimed: rotated in place; unclaimed: new bearer + PIN); --off removes the copy dop use reads
   dop token reseal <lookup|subject>              re-encrypt grant env to the agent's SE key (v1.12; admin-required)

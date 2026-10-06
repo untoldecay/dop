@@ -27,6 +27,7 @@ const (
 	EventPortable      = "portable" // portable stash stored or removed
 	EventRevoke        = "revoke"
 	EventRotate        = "rotate"        // claimed bearer rotated in place
+	EventPrune         = "prune"         // old revoked/rotated records deleted (extra: count, lookup_ids)
 	EventInviteCancel  = "invite_cancel" // pending admin invite deleted
 	EventExec          = "exec"
 	// v1.9.7 — `dop env` (like exec) surfaces plaintext values,

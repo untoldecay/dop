@@ -216,7 +216,7 @@ func runTeamRemove(args []string) int {
 			if c.Status != capability.RecordStatusActive {
 				continue
 			}
-			c.Status = capability.RecordStatusRevoked
+			c.Status, c.RevokedAt = capability.RecordStatusRevoked, time.Now().UTC().Truncate(time.Second)
 			c.Generation = v.BumpGeneration(c.Subject)
 			v.Capabilities[capID] = c
 			// Delete on-disk artifacts.
