@@ -2339,11 +2339,22 @@ func runTokenRotate(args []string) int {
 		return 1
 	}
 	old := v.Capabilities[oldCapID]
-	newLookupID, newGen, err := rotateBearer(client, paths, v, vaultPath, oldCapID, "")
+	portableTo := ""
+	if old.PortableWrapped != "" {
+		st, err := client.Status()
+		if err != nil || st.AgeRecipient == "" {
+			fmt.Fprintf(os.Stderr, "dop token rotate: portable copy needs an admin session with an age recipient (%v)\n", err)
+			return 1
+		}
+		portableTo = st.AgeRecipient
+	}
+	newLookupID, newGen, err := rotateBearer(client, paths, v, vaultPath, oldCapID, portableTo)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop token rotate: %v\n", err)
 		return 1
 	}
+	audit.Append(paths, audit.Event{Kind: audit.EventRotate, Subject: old.Subject, LookupID: newLookupID,
+		Extra: map[string]string{"replaces": old.LookupID, "old_gen": fmt.Sprint(old.Generation), "new_gen": fmt.Sprint(newGen)}})
 	fmt.Fprintf(os.Stderr,
 		"dop token rotate: rotated %s\n"+
 			"  old lookup: %s (status=rotated; BearerWrapped attached)\n"+
@@ -2538,9 +2549,10 @@ func rotateBearer(client *admin.Client, paths *config.Paths, v *vault.Vault, vau
 // stdlib flag parser stops at the first non-flag arg).
 //
 // Handles all forms the stdlib parser accepts:
-//   -flag, --flag                (bool or absent-value)
-//   -flag=v, --flag=v            (attached value)
-//   -flag v, --flag v            (space-separated, for non-bool flags)
+//
+//	-flag, --flag                (bool or absent-value)
+//	-flag=v, --flag=v            (attached value)
+//	-flag v, --flag v            (space-separated, for non-bool flags)
 //
 // It needs the FlagSet to tell bool flags apart from value flags — bool
 // flags don't consume the next arg. Unknown flags are passed through
