@@ -871,17 +871,13 @@ type listView struct {
 	grantPickPassBuf   textField
 	grantPickPassPhase bool // true once protected picks required a passphrase screen
 
-	// v1.13.0-rc9 — repin form state. Two fields: bearer paste +
-	// PIN TTL (preset picker). pinResult is set once the CLI returns.
-	repinBearerBuf  strings.Builder
-	repinTTLCursor  int
-	repinField      int // 0 = bearer, 1 = TTL picker
-	repinNewPin     string
-	repinNewExpires string
+	// Repin: PIN validity picker, then the portable wizard below
+	// (confirm, passphrase for protected grants, new bearer + PIN).
+	repinTTLCursor int
 
-	// Portable toggle: confirm (0), passphrase (1, off always, on only
-	// for protected grants). on re-issues: an unclaimed bearer comes back
-	// as a new bearer + PIN, shown once.
+	// Portable toggle (and repin): confirm (0), passphrase (1, off always,
+	// on/repin only for protected grants). on and repin re-issue: an
+	// unclaimed bearer comes back as a new bearer + PIN, shown once.
 	portStep   int
 	portPass   textField
 	portNew    string
@@ -924,7 +920,7 @@ const (
 	listModeConfirm   = 2
 	listModeRun       = 3
 	listModeGrantPick = 5 // add-grant / remove-grant picker
-	listModeRepin     = 6 // bearer + PIN TTL form
+	listModeRepin     = 6 // PIN validity picker
 	listModeDone      = 7 // ✓ outcome (revoke, reseal, grants, repin, portable)
 	listModePortable  = 8 // portable copy on/off wizard
 )
@@ -1039,7 +1035,7 @@ func (v *listView) currentActions() []listAction {
 	}
 	acts := []listAction{{label: "Reseal env", key: "s", desc: "push current credential values into this bearer's env"}}
 	if c.Binding != nil && c.Binding.Kind == "pin" && c.Binding.Pubkey == "" {
-		acts = append(acts, listAction{label: "Repin", key: "p", desc: "new PIN for a bearer the agent has not claimed yet"})
+		acts = append(acts, listAction{label: "Repin", key: "p", desc: "re-issue with a new PIN, the agent has not claimed it yet"})
 	}
 	if c.PortableWrapped == "" {
 		acts = append(acts, listAction{label: "Portable: make portable", key: "o", desc: "re-issue it so dop use works from your shells"})
@@ -1073,14 +1069,14 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.loadErr = mm.err
 		v.cursor = max(min(v.cursor, len(v.visible())-1), 0)
 	case listActionMsg:
-		if mm.err != "" && v.mode == listModeRun && strings.HasPrefix(v.pendingAction, "portable") {
+		if mm.err != "" && v.mode == listModeRun && v.pendingAction == "portable-off" {
 			v.portableErr("Portable copy failed: " + cliErr(mm.err))
 			return v, nil
 		}
 		if mm.err != "" {
 			// Errors stay on the detail that caused them, in plain words.
 			v.err = map[string]string{"revoke": "Revoke", "reseal": "Reseal", "add": "Add grant",
-				"remove": "Remove grant", "repin": "Repin"}[v.pendingAction] + " failed: " + cliErr(mm.err)
+				"remove": "Remove grant"}[v.pendingAction] + " failed: " + cliErr(mm.err)
 			v.mode = listModeAction
 			v.pendingAction = ""
 			return v, nil
@@ -1088,7 +1084,7 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.doneNote = mm.flash
 		v.mode = listModeDone
 		return v, nil
-	case issueResultMsg: // portable --on
+	case issueResultMsg: // portable --on, repin
 		if mm.err != "" {
 			v.portableErr("Re-issue failed: " + cliErr(mm.err))
 			return v, nil
@@ -1098,12 +1094,6 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Copy once here, not in View (which repaints on every msg).
 			v.portCopied = clipboardCopy(v.portHandoff())
 		}
-		v.mode = listModeDone
-		return v, nil
-	case repinSuccessMsg:
-		v.repinNewPin = mm.pin
-		v.repinNewExpires = mm.expires
-		v.repinBearerBuf.Reset() // scrub bearer from memory
 		v.mode = listModeDone
 		return v, nil
 	case tea.KeyMsg:
@@ -1134,11 +1124,6 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case listModePortable:
 			return v.updatePortableMode(mm)
 		case listModeDone:
-			if mm.String() == "c" && v.pendingAction == "repin" {
-				copyToClipboard(v.repinNewPin)
-				v.flash = "PIN copied to clipboard"
-				return v, nil
-			}
 			if v.portNew != "" {
 				if !onceKey(mm.String(), &v.portArmed, &v.portCopied, v.portHandoff()) {
 					return v, nil
@@ -1150,7 +1135,7 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if v.pendingAction == "portable-off" {
 				v.mode = listModeAction // back to the Info tab, reloaded
 			}
-			v.pendingAction, v.doneNote, v.repinNewPin, v.portNew, v.portPin = "", "", "", "", ""
+			v.pendingAction, v.doneNote, v.portNew, v.portPin = "", "", "", ""
 			return v, v.load
 		}
 	}
@@ -1276,11 +1261,8 @@ func (v *listView) runAction(a listAction) (tea.Model, tea.Cmd) {
 		v.pendingAction = "reseal"
 		return v, v.doReseal()
 	case "p":
-		v.mode = listModeRepin
-		v.pendingAction = "repin"
-		v.repinField = 0
-		v.repinBearerBuf.Reset()
-		v.repinTTLCursor = 0
+		v.mode, v.pendingAction, v.repinTTLCursor = listModeRepin, "repin", 0
+		v.portPass.Reset()
 	case "o":
 		v.mode, v.portStep, v.pendingAction = listModePortable, 0, "portable-on"
 		if c := v.capabilities[v.selectedIndex()]; c.PortableWrapped != "" {
@@ -1459,60 +1441,18 @@ func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return v, nil
 }
 
-// updateRepinMode drives the two-field repin form: bearer paste
-// (field 0) + PIN TTL preset picker (field 1). esc steps back a field,
-// then to the detail; enter on field 1 shells out to `dop token repin`.
+// updateRepinMode is the PIN validity picker; enter goes on to the
+// portable wizard's confirm, esc back to the detail.
 func (v *listView) updateRepinMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch mm.String() {
 	case "esc":
-		if v.repinField == 1 {
-			v.repinField, v.err = 0, ""
-			return v, nil
-		}
-		v.mode = listModeAction
-		v.pendingAction = ""
-		v.repinBearerBuf.Reset()
-		v.err = ""
-		return v, nil
-	case "tab", "shift+tab":
-		v.repinField = (v.repinField + 1) % 2
-		return v, nil
-	}
-	if v.repinField == 0 {
-		switch mm.String() {
-		case "enter":
-			if strings.TrimSpace(v.repinBearerBuf.String()) == "" {
-				v.err = "Paste the bearer the agent holds."
-				return v, nil
-			}
-			v.err = ""
-			v.repinField = 1
-			return v, nil
-		case "backspace":
-			s := v.repinBearerBuf.String()
-			if len(s) > 0 {
-				v.repinBearerBuf.Reset()
-				v.repinBearerBuf.WriteString(s[:len(s)-1])
-			}
-		default:
-			if len(mm.Runes) > 0 {
-				v.repinBearerBuf.WriteString(string(mm.Runes))
-			}
-		}
-		return v, nil
-	}
-	// Field 1 — TTL picker.
-	switch mm.String() {
+		v.mode, v.pendingAction, v.err = listModeAction, "", ""
 	case "up", "k":
 		stepCursor(&v.repinTTLCursor, len(repinTTLPresets), -1)
 	case "down", "j":
 		stepCursor(&v.repinTTLCursor, len(repinTTLPresets), 1)
 	case "enter":
-		if cmd := v.locked(mm, &v.err); cmd != nil {
-			return v, cmd
-		}
-		v.mode = listModeRun
-		return v, v.doRepin()
+		v.mode, v.portStep, v.err = listModePortable, 0, ""
 	}
 	return v, nil
 }
@@ -1523,7 +1463,9 @@ func (v *listView) updatePortableMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := mm.String()
 	if k == "esc" {
 		v.err = ""
-		if v.portStep == 0 {
+		if v.portStep == 0 && v.pendingAction == "repin" {
+			v.mode = listModeRepin // back to the PIN validity picker
+		} else if v.portStep == 0 {
 			v.mode, v.pendingAction = listModeAction, ""
 			v.portPass.Reset()
 		}
@@ -1590,14 +1532,17 @@ func (v *listView) portHandoff() string {
 	return bearerHandoff(v.portNew, v.portPin, LoadPrefs(v.paths).AllowFileKeys)
 }
 
-// doPortable shells out to dop token portable; the passphrase goes on
-// stdin, never in argv. --on answers with an issueResultMsg (bearer and
-// PIN when the bearer was re-issued unclaimed).
+// doPortable shells out to dop token portable (or repin); the passphrase
+// goes on stdin, never in argv. --on and repin answer with an
+// issueResultMsg (bearer and PIN when the bearer was re-issued unclaimed).
 func (v *listView) doPortable() tea.Cmd {
-	subject, on := v.doneSubj, v.pendingAction == "portable-on"
+	subject, on := v.doneSubj, v.pendingAction != "portable-off"
 	args := []string{"token", "portable", "--subject", subject, "--off"}
-	if on {
+	switch v.pendingAction {
+	case "portable-on":
 		args[4] = "--on"
+	case "repin":
+		args = []string{"token", "repin", "--subject", subject, "--pin-ttl", repinTTLPresets[v.repinTTLCursor].value}
 	}
 	stdin := ""
 	if v.portNeedsPass() {
@@ -1623,83 +1568,6 @@ func (v *listView) doPortable() tea.Cmd {
 		}
 		return parseIssueOut(stdout.String())
 	}
-}
-
-// doRepin shells out to `dop token repin` with the pasted bearer in
-// a temp token-file so it never shows up in the process list.
-func (v *listView) doRepin() tea.Cmd {
-	idx := v.selectedIndex()
-	if idx < 0 {
-		return func() tea.Msg { return listActionMsg{err: "no selection"} }
-	}
-	subject := v.capabilities[idx].Subject
-	bearer := strings.TrimSpace(v.repinBearerBuf.String())
-	ttl := repinTTLPresets[v.repinTTLCursor].value
-	return func() tea.Msg {
-		// Write bearer to a short-lived file so it's not visible in
-		// `ps aux` as a CLI arg. Mode 0600; removed in defer.
-		tmp, err := os.CreateTemp("", "dop-repin-*.tok")
-		if err != nil {
-			return listActionMsg{err: fmt.Sprintf("temp file: %v", err)}
-		}
-		defer os.Remove(tmp.Name())
-		_, _ = tmp.WriteString(bearer)
-		tmp.Close()
-		_ = os.Chmod(tmp.Name(), 0o600)
-
-		self, _ := os.Executable()
-		cmd := exec.Command(self, "token", "repin",
-			"--subject", subject,
-			"--token-file", tmp.Name(),
-			"--pin-ttl", ttl)
-		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return listActionMsg{err: strings.TrimSpace(stderr.String())}
-		}
-		// Parse the new PIN out of stdout. The CLI prints a block
-		// like: "new PIN: XX-XX-XX (expires 2026-10-02T...)"
-		combined := stdout.String() + stderr.String()
-		pin, exp := extractRepinPin(combined)
-		return repinSuccessMsg{pin: pin, expires: exp}
-	}
-}
-
-// extractRepinPin pulls the new PIN + validity window out of the
-// `dop token repin` output. The CLI prints:
-//
-//	dop token repin: reissued PIN for X (valid 5m0s)
-//	  new PIN (shown ONCE):
-//	XX-XX-XX
-func extractRepinPin(s string) (pin, expires string) {
-	for _, line := range strings.Split(s, "\n") {
-		line = strings.TrimSpace(line)
-		if looksLikePIN(line) {
-			pin = line
-			continue
-		}
-		// Match "(valid N)" where N is a duration string.
-		if i := strings.Index(line, "(valid "); i >= 0 {
-			rest := line[i+len("(valid "):]
-			if j := strings.Index(rest, ")"); j >= 0 {
-				expires = strings.TrimSpace(rest[:j])
-				if d, err := time.ParseDuration(expires); err == nil {
-					expires = shortDuration(d)
-				}
-			}
-		}
-	}
-	return
-}
-
-// repinSuccessMsg is emitted by doRepin when the CLI succeeds, so
-// the Update loop can transition to listModeRepinDone with the PIN
-// surfaced for display + clipboard copy.
-type repinSuccessMsg struct {
-	pin     string
-	expires string
 }
 
 func (v *listView) updateConfirmMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2084,7 +1952,7 @@ func (v *listView) viewConfirm(width, height int) string {
 // (the subprocess can't be cancelled).
 func (v *listView) viewRun(width, height int) string {
 	verb := map[string]string{"revoke": "Revoking %s…", "reseal": "Resealing the env of %s…",
-		"add": "Adding grants to %s…", "remove": "Removing grants from %s…", "repin": "Repinning %s…",
+		"add": "Adding grants to %s…", "remove": "Removing grants from %s…", "repin": "Re-issuing %s…",
 		"portable-on": "Re-issuing %s…", "portable-off": "Removing portable copy…"}[v.pendingAction]
 	if verb == "" {
 		verb = "Working on %s…"
@@ -2119,39 +1987,30 @@ func (v *listView) viewDone(width, height int) string {
 			return onceScreen(width, height, "✓ Bearer re-issued", v.doneSubj, v.portNew, v.portPin, g, v.portArmed, v.portCopied)
 		}
 		title, note = "✓ Bearer is portable", strings.Join(g, "\n")
+	case "repin":
+		h := strings.Split(v.portHandoff(), "\n")
+		portable := v.capabilities[v.selectedIndex()].PortableWrapped != "" // still the old record until the reload
+		g := useGuidance(LoadPrefs(v.paths).Harness, v.doneSubj, portable, "run "+strings.TrimSpace(h[len(h)-1]))
+		return onceScreen(width, height, "✓ Bearer re-issued", v.doneSubj, v.portNew, v.portPin, g, v.portArmed, v.portCopied)
 	case "portable-off":
 		title, note = "✓ Portable copy removed", "dop use no longer works for this bearer."
-	default: // repin
-		title, note = "✓ Bearer repinned", "Share the new PIN with the agent along with its bearer."
-		rows = append(rows, [2]string{"new PIN", v.repinNewPin}, [2]string{"valid", shortDur(v.repinNewExpires)})
-		st.setFlash(v.flash)
 	}
 	body := strings.Split(kv(rows...), "\n")
 	for _, l := range strings.Split(note, "\n") {
 		body = append(body, mutedSt.Render("  "+l))
 	}
-	return frame(width, height, title, nil, map[bool]string{true: "press c to copy the PIN"}[v.pendingAction == "repin"], body, st.String(), footer(width, hint("enter", "done")))
+	return frame(width, height, title, nil, "", body, st.String(), footer(width, hint("enter", "done")))
 }
 
-// viewRepin is the two-field repin form: bearer paste + PIN validity.
+// viewRepin is the PIN validity picker of a repin.
 func (v *listView) viewRepin(width, height int) string {
-	label := func(field int, s string) string {
-		if v.repinField == field {
-			return "  " + bodySt.Render(s)
-		}
-		return "  " + mutedSt.Render(s)
-	}
-	paste := "  " + strings.Repeat("•", v.repinBearerBuf.Len())
-	if v.repinField == 0 {
-		paste += focusSt.Render("▎")
-	}
-	body := []string{label(0, "current bearer (the agent holds it)"), paste, "", label(1, "new PIN valid for")}
+	body := []string{"  " + bodySt.Render("new PIN valid for")}
 	for i, p := range repinTTLPresets {
 		row := fmt.Sprintf("%-4s", p.value)
 		if p.label == "" {
 			row = p.value
 		}
-		if v.repinField == 1 && i == v.repinTTLCursor {
+		if i == v.repinTTLCursor {
 			row = focusSt.Render("› " + row)
 		} else {
 			row = "  " + bodySt.Render(row)
@@ -2161,11 +2020,7 @@ func (v *listView) viewRepin(width, height int) string {
 		}
 		body = append(body, row)
 	}
-	verb := "next"
-	if v.repinField == 1 {
-		verb = "repin"
-	}
-	foot := footer(width, hint("enter", verb), hint("tab", "field"), keyBack)
+	foot := footer(width, hint("enter", "next"), keyBack)
 	return frame(width, height, "Repin "+v.doneSubj, nil, "", body, status{err: v.err}.String(), foot)
 }
 
@@ -2183,6 +2038,10 @@ func (v *listView) viewPortable(width, height int) string {
 		}
 		lines = append(lines, "same grants and expiry; dop use then works from your shells")
 	}
+	if v.pendingAction == "repin" {
+		title, verb = "Re-issue "+v.doneSubj+" with a new PIN?", "re-issue"
+		lines = []string{"the old bearer and PIN stop working", "the agent gets the new bearer and PIN from you"}
+	}
 	if v.portStep == 0 {
 		for i, l := range lines {
 			lines[i] = mutedSt.Render("  " + l)
@@ -2190,7 +2049,7 @@ func (v *listView) viewPortable(width, height int) string {
 		return w.confirmScreen(title, lines, verb, v.err)
 	}
 	helper := ""
-	if v.pendingAction == "portable-on" {
+	if v.pendingAction != "portable-off" {
 		helper = "The bearer holds protected grants."
 	}
 	before, after := v.portPass.SplitMasked("•")

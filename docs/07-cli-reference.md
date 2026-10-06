@@ -427,19 +427,21 @@ Deletes bundle, record sidecar, local agent key file. Bumps generation.
 
 ### `dop token repin`
 
-Reissue a PIN for a PIN-bound capability that hasn't been claimed yet.
+Give an unclaimed PIN-bound bearer a new PIN, for example when the first one expired before the agent claimed.
 
 ```
-dop token repin --subject <S> [--token-file <PATH>] [--pin-ttl 1h]
+dop token repin --subject <S> [--pin-ttl 1h] [--passphrase-stdin]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--subject` | "" | Required. |
-| `--token-file` | "" | Current bearer path. Else `$DOP_TOKEN`. |
 | `--pin-ttl` | `1h` | New PIN window. |
+| `--passphrase-stdin` | false | Read the approval passphrase from stdin (asked only when the bearer holds a protected grant). |
 
-Refuses to repin an already-claimed capability (revoke + reissue to rebind).
+DOP never keeps a bearer it has handed out, so repin re-issues it the way `dop token portable --on` does for an unclaimed bearer: a new bearer with the same subject, grants, expiry and binding policy and a new PIN, the old record revoked in the same save (its bundle and record files removed). A portable copy, when the old bearer had one, is stored again from the new bearer. Prints the bearer and PIN once, like `dop token issue`; hand both to the agent.
+
+Refuses a claimed bearer (use `dop token rotate`), a bearer that is not PIN-bound, and a revoked or expired one.
 
 ### `dop token portable`
 
