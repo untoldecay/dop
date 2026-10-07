@@ -46,6 +46,11 @@ dop
 Everything happens in that one screen. Press `?` to see what each key does,
 `esc` to go back.
 
+**Before you start: create the vault.** DOP keeps your keys in a private git
+repository that you create yourself — an empty repo on GitHub, GitLab or any git
+host. DOP asks for its URL during setup. Everyone you invite needs read and write
+(pull and push) access to that repo, or DOP can't sync for them.
+
 ## What it does
 
 **One place for your team's keys.**
@@ -72,8 +77,10 @@ you change things at the same time, DOP combines both — it only asks when you
 both changed the very same thing.
 
 **Works where your agents already live.**
-Claude Code, Codex, Cursor, plain terminal windows — and shared workspaces where
-people and agents talk in the same rooms, like Buzz.
+First, shared workspaces where people and agents work in the same rooms, like
+[Buzz](https://buzz.xyz/) ([GitHub](https://github.com/block/buzz)) or
+[Berd](https://berd.xyz/). Also Claude Code, Codex, Cursor and plain terminal
+windows.
 
 **Prefer typing commands?** Every action on screen is also a `dop` command, for
 scripts and servers.
