@@ -827,13 +827,15 @@ dop credential-helper remove --host <H>
 |---|---|---|
 | `DOP_TOKEN` | — | Bearer for `exec`, `whoami`, `env`, `claim`, `watch`. |
 | `DOP_TOKEN_FILE` | — | Path to a file containing a bearer. Writable targets auto-rotate on bearer rotation. |
+| `DOP_HOME` | OS config dir (`~/Library/Application Support/dop` on macOS) | For recording, demos, tests and CI — not everyday use. Runs a fully separate install (own keys, vault, session, settings); the default one is never read or touched. Only lasts for that command/shell: a new terminal or `unset DOP_HOME` returns to the default. The TUI shows a red `DOP_HOME` badge and `dop doctor` an `install:home` line while it's set. Keep it short — macOS caps the session socket path at ~100 chars. |
+| `DOP_RECORDING` | — | `1` hides the TUI `DOP_HOME` badge (VHS recordings only). |
 | `DOP_VAULT` | — | Override the vault path. |
 | `DOP_NO_TUI` | — | `1` makes bare `dop` print usage instead of launching the TUI. |
 | `DOP_ADMIN_TTL` | `15m` | Admin session idle timeout. |
 | `DOP_ADMIN_MAX_TTL` | `60m` | Admin session absolute timeout. |
 | `DOP_AUTO_PULL` | `5m` | Max staleness before `dop exec` auto-pulls. |
-| `DOP_AUTOPULL_MAX_AGE_SEC` | `15` | Rate-limit window for the exec/env silent auto-pull. |
-| `DOP_NO_AUTO_PULL` | — | `1` disables the login + exec/env auto-pull. |
+| `DOP_AUTOPULL_MAX_AGE_SEC` | `15` | Freshness window for every silent auto-pull (exec/env, admin loads, TUI screen entry). |
+| `DOP_NO_AUTO_PULL` | — | `1` disables every auto-pull: login, exec/env, admin loads, TUI screen entry. |
 | `DOP_NO_AUTO_PUSH` | — | `1` disables the auto-push after admin-plane saves. |
 | `DOP_ALLOW_FILE_KEYS` | — | `1` permits file-backed P-256 agent keys (Linux/CI; macOS fallback). |
 | `DOP_ALLOW_ADMIN_SHRINK` | — | Internal: lets `dop team remove` bypass the admin-shrink save guard. Do not set manually. |

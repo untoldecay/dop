@@ -341,6 +341,13 @@ func runDoctor(args []string) int {
 		}
 	}
 
+	// --- install location (contract 26) ---
+	if h := config.HomeOverride(); h != "" {
+		def, _ := config.DefaultRoot()
+		line("!", "install:home", fmt.Sprintf("DOP_HOME=%s — a separate install, not your default (%s). "+
+			"Open a new terminal or run `unset DOP_HOME` to return.", h, def))
+	}
+
 	// --- basic ---
 	if _, err := exec.LookPath("sops"); err != nil {
 		line("✗", "binary:sops", "not on $PATH — brew install sops")

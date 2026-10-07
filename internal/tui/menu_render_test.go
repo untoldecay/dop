@@ -129,3 +129,24 @@ func TestShortDuration(t *testing.T) {
 		}
 	}
 }
+
+func TestFrameHomeBadge(t *testing.T) {
+	t.Setenv("DOP_HOME", "/tmp/dop-demo")
+	head := strings.SplitN(frame(100, 10, "Bearers", nil, "3 active", nil, "", ""), "\n", 2)[0]
+	if !strings.Contains(head, "DOP_HOME /tmp/dop-demo") || !strings.Contains(head, "3 active") {
+		t.Fatalf("badge + context missing from title row: %q", head)
+	}
+	t.Setenv("DOP_RECORDING", "1")
+	head = strings.SplitN(frame(100, 10, "Bearers", nil, "3 active", nil, "", ""), "\n", 2)[0]
+	if strings.Contains(head, "DOP_HOME") {
+		t.Fatalf("DOP_RECORDING=1 must hide the badge: %q", head)
+	}
+}
+
+func TestFrameNoBadgeByDefault(t *testing.T) {
+	t.Setenv("DOP_HOME", "")
+	head := strings.SplitN(frame(100, 10, "Bearers", nil, "", nil, "", ""), "\n", 2)[0]
+	if strings.Contains(head, "DOP_HOME") || strings.TrimSpace(ansi.Strip(head)) != "Bearers" {
+		t.Fatalf("default install must render the plain title row: %q", head)
+	}
+}

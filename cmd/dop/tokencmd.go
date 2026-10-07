@@ -1112,6 +1112,9 @@ func vaultFilePath(paths *config.Paths) string {
 // loadVaultViaDaemon asks the daemon to decrypt vault.yaml; parses it.
 // If vault.yaml doesn't exist yet, returns a fresh v1 vault.
 func loadVaultViaDaemon(client *admin.Client, paths *config.Paths) (*vault.Vault, string, error) {
+	// Pull before every admin load so load → mutate → save starts from
+	// the team's latest state instead of whatever the last pull left.
+	autoPullBeforeLoad(paths)
 	vp := vaultFilePath(paths)
 	fi, err := os.Stat(vp)
 	if err != nil && !os.IsNotExist(err) {
@@ -1281,6 +1284,8 @@ func autoPushVault(paths *config.Paths) {
 	_ = runGit(io.Discard, paths.Vault, "add", "-A")
 	_ = runGitAllowExit(io.Discard, paths.Vault, []int{0, 1}, "commit", "-m", "dop: sync (auto)")
 	if err := runGit(io.Discard, paths.Vault, "push"); err == nil {
+		// Local == remote right now; no need to fetch for a window.
+		touchPullMarker(paths)
 		return
 	}
 	// Push failed. If we're already inside a merge-retry, don't recurse
@@ -1315,6 +1320,35 @@ func autoPullVault(paths *config.Paths) {
 		if !strings.Contains(err.Error(), "up to date") {
 			fmt.Fprintf(os.Stderr, "  (auto-sync note: %v)\n", err)
 		}
+	}
+}
+
+// autoPullInProgress stops autoPullBeforeLoad from re-entering while a
+// pull-merge is already running (the merge path saves the vault).
+var autoPullInProgress bool
+
+// autoPullBeforeLoad is the admin-side counterpart of autoPullIfStale:
+// a rate-limited fetch+merge run right before the vault is loaded for
+// an admin read or mutation, so two admins rarely edit diverged copies.
+// Quiet except for real merge conflicts — offline or no-remote setups
+// shouldn't print a note on every command. Same opt-out
+// (DOP_NO_AUTO_PULL=1) and window (DOP_AUTOPULL_MAX_AGE_SEC).
+func autoPullBeforeLoad(paths *config.Paths) {
+	if autoPullInProgress || os.Getenv("DOP_NO_AUTO_PULL") == "1" || paths == nil {
+		return
+	}
+	if _, err := os.Stat(filepath.Join(paths.Vault, ".git")); err != nil {
+		return
+	}
+	if vaultPullFresh(paths) {
+		return
+	}
+	autoPullInProgress = true
+	defer func() { autoPullInProgress = false }()
+	err := autoPullAndMerge(paths)
+	touchPullMarker(paths)
+	if err != nil && strings.Contains(err.Error(), "conflict") {
+		fmt.Fprintf(os.Stderr, "  (team vault changed: %v)\n", err)
 	}
 }
 

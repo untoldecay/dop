@@ -1,6 +1,7 @@
 // Package config resolves DOP's on-disk paths.
 //
-// Layout under $XDG_CONFIG_HOME/dop (default ~/.config/dop):
+// Layout under $XDG_CONFIG_HOME/dop (default ~/.config/dop; on macOS
+// ~/Library/Application Support/dop), or under $DOP_HOME when set:
 //
 //	config.yaml         optional overrides
 //	keys/age.txt        age private key (mode 0600) — the single decryption root
@@ -31,12 +32,15 @@ type Paths struct {
 
 // Resolve returns the standard DOP paths for the current user. It does NOT
 // create anything on disk — callers use EnsureDirs when they need the tree.
+//
+// DOP_HOME replaces the whole root — a separate install (own keys, vault,
+// session daemon, settings) that never reads or touches the default one.
+// Used for throwaway demo/recording installs and tests.
 func Resolve() (*Paths, error) {
-	base, err := os.UserConfigDir()
+	root, err := resolveRoot()
 	if err != nil {
-		return nil, fmt.Errorf("resolve user config dir: %w", err)
+		return nil, err
 	}
-	root := filepath.Join(base, dirName)
 	return &Paths{
 		Root:    root,
 		KeysDir: filepath.Join(root, "keys"),
@@ -45,6 +49,35 @@ func Resolve() (*Paths, error) {
 		Logs:    filepath.Join(root, "logs"),
 		Config:  filepath.Join(root, "config.yaml"),
 	}, nil
+}
+
+func resolveRoot() (string, error) {
+	if h := HomeOverride(); h != "" {
+		return h, nil
+	}
+	return DefaultRoot()
+}
+
+// DefaultRoot is the root DOP uses when DOP_HOME is not set.
+func DefaultRoot() (string, error) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user config dir: %w", err)
+	}
+	return filepath.Join(base, dirName), nil
+}
+
+// HomeOverride returns DOP_HOME as an absolute path, or "" when unset.
+// Callers that show the active install (TUI header, doctor) use it.
+func HomeOverride() string {
+	h := os.Getenv("DOP_HOME")
+	if h == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(h); err == nil {
+		return abs
+	}
+	return h
 }
 
 // EnsureDirs creates the root/keys/logs directories with restrictive

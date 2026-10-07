@@ -1144,25 +1144,41 @@ func autoPullIfStale(paths *config.Paths) {
 	if _, err := os.Stat(filepath.Join(paths.Vault, ".git")); err != nil {
 		return
 	}
+	if vaultPullFresh(paths) {
+		return
+	}
+	autoPullVault(paths)
+	// Touch the sidecar whether or not the pull succeeded — a failed
+	// pull shouldn't trigger another one 10ms later. The ModTime is
+	// what gates us, not the file contents.
+	touchPullMarker(paths)
+}
+
+// vaultPullFresh reports whether the last auto-pull (or successful
+// auto-push) happened within the freshness window — 15s by default,
+// DOP_AUTOPULL_MAX_AGE_SEC to override. Shared by the agent exec path,
+// the admin load path and the TUI's screen-entry sync.
+func vaultPullFresh(paths *config.Paths) bool {
 	maxAge := 15 * time.Second
 	if raw := os.Getenv("DOP_AUTOPULL_MAX_AGE_SEC"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 			maxAge = time.Duration(n) * time.Second
 		}
 	}
-	marker := filepath.Join(paths.Root, "last-pull.ts")
-	if fi, err := os.Stat(marker); err == nil {
-		if time.Since(fi.ModTime()) < maxAge {
-			return
-		}
-	}
-	autoPullVault(paths)
-	// Touch the sidecar whether or not the pull succeeded — a failed
-	// pull shouldn't trigger another one 10ms later. The ModTime is
-	// what gates us, not the file contents.
+	fi, err := os.Stat(filepath.Join(paths.Root, "last-pull.ts"))
+	return err == nil && time.Since(fi.ModTime()) < maxAge
+}
+
+// touchPullMarker bumps last-pull.ts so vaultPullFresh gates the next
+// pull for one freshness window.
+func touchPullMarker(paths *config.Paths) {
 	_ = os.MkdirAll(paths.Root, 0o700)
-	f, err := os.Create(marker)
-	if err == nil {
+	marker := filepath.Join(paths.Root, "last-pull.ts")
+	now := time.Now()
+	if err := os.Chtimes(marker, now, now); err == nil {
+		return
+	}
+	if f, err := os.Create(marker); err == nil {
 		f.Close()
 	}
 }
