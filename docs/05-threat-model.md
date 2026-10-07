@@ -40,7 +40,7 @@ The trust unit is the OS user account. If something runs as your uid, it inherit
 
 ## For the exact rules
 
-The MUST/MUST-NOT contracts live under [`_rules/_requirements/contracts/`](../_rules/_requirements/contracts/00_index.md). Plane separation (01), capability envelope (04), signed records and trust (05), the approval gate (07), audit shape (10), and protected credentials (15) are the ones most relevant above. If this doc says one thing and a contract says another, the contract wins.
+The guarantees above are pinned by numbered MUST/MUST-NOT design contracts kept in the maintainers' working notes (not published in this repo). Plane separation (01), capability envelope (04), signed records and trust (05), the approval gate (07), audit shape (10), and protected credentials (15) are the ones most relevant above. If this doc says one thing and a contract says another, the contract wins.
 
 ## What's next
 

@@ -68,7 +68,7 @@ Every DOP feature as of **v1.13.0**, in one scannable table. Grouped by surface,
 | Developer / ops | `--passphrase-stdin` | Every passphrase prompt accepts stdin alternative; TUI uses this for secret-safe hand-off. | v1.13.0-rc12 |
 | Developer / ops | `DOP_NO_TUI=1` | Headless invocations; TUI never opens. Used by the TUI's own subprocess calls to the CLI. | v1.0 |
 | Developer / ops | 39 E2E shell scripts | Full command-path coverage in `testdata/e2e/`. `./scripts/test.sh` runs the suite. | v1.0+ |
-| Developer / ops | Contract-driven features | Every feature has (or updates) a numbered contract in `_rules/_requirements/contracts/` (01-18). | v1.0+ |
+| Developer / ops | Contract-driven features | Every feature has (or updates) a numbered design contract (kept in the maintainers' working notes, not published). | v1.0+ |
 
 ## Documented contracts
 

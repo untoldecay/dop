@@ -9,20 +9,12 @@
 coverage.txt
 /dist/
 
-# Local BeadsLog devlogs (session narratives — private engineering notes;
-# structured artifacts live in _rules/_documentation/ + _rules/_requirements/)
-/_rules/_devlog/*
-# ... but keep the devlog index + generation prompt tracked (bd requires
-# _index.md to be updated+committed on every devlog-bearing commit).
-!/_rules/_devlog/_index.md
-!/_rules/_devlog/_generate-devlog.md
-
-# Internal plans — private design notes, not for the public repo
-/_rules/_plans/
+# Whole _rules/ tree is local-only for now: devlogs, plans, contracts,
+# prompts, guides, orchestration (BeadsLog + agent working material).
+/_rules/
 
 # BeadsLog runtime state (init locally with `bd init`)
 /.beads/
 /.gitattributes
 /CLAUDE.md
-/_rules/_orchestration/
 __pycache__/
