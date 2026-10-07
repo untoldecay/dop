@@ -7,21 +7,31 @@
 
 # DOP — Doors of Perception
 
-**1Password for your AI agents.** Give each agent its own key to just the tools
-it needs. Your real passwords and API keys never leave the vault.
+**An open-source 1Password for the AI era.** Your team and its AI agents work on
+the same tools — without anyone pasting a key into a chat.
+
+People and AI agents now work side by side. To be useful, they need the same
+context: the team's docs, tickets, code and conversations. That context lives in
+a dozen tools, each behind its own key. So the keys travel — pasted into AI
+chats, DMed to teammates, "I'll change them later…". They rarely are.
+
+DOP gives the team one vault for those keys, and gives every agent its own pass
+to exactly the tools it needs.
 
 ## In practice
 
 Alice connects Notion and Linear. Bob connects GitHub. They share one vault.
 
-Now either of them can give any AI agent access to any of those tools — not just
-the ones they added themselves. Alice's research agent can read Bob's GitHub repos.
-Bob's release agent can read Alice's Linear tickets and post the changelog to
+Now either of them can give any agent access to any of those tools — not just
+the ones they added themselves. Alice's research agent reads Bob's GitHub repos.
+Bob's release agent reads Alice's Linear tickets and writes the changelog in
 Notion. Nobody ever sends anyone a password.
 
-So a team pools its tools once, and every agent can work across them: one agent
-can **bridge** what used to live in separate silos, with exactly the access it
-needs — and lose it in seconds.
+The team pools its tools once; every agent works from that shared context,
+**bridging** what used to sit in separate places — with only the access it
+needs, and lost in seconds when it's done. The agent never even sees the keys:
+DOP hands them straight to the tool when the agent uses it, never into the
+conversation.
 
 ![DOP tour: add a service, give an agent access, hand it over, grow its access, revoke it](out/tour.gif)
 
@@ -62,7 +72,8 @@ you change things at the same time, DOP combines both — it only asks when you
 both changed the very same thing.
 
 **Works where your agents already live.**
-Claude Code, Codex, Cursor and plain terminal windows.
+Claude Code, Codex, Cursor, plain terminal windows — and shared workspaces where
+people and agents talk in the same rooms, like Buzz.
 
 **Prefer typing commands?** Every action on screen is also a `dop` command, for
 scripts and servers.
