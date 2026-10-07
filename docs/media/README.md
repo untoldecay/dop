@@ -7,10 +7,25 @@
 
 # DOP — Doors of Perception
 
-**1Password for your AI agents.** Give each agent a scoped, revocable slice of
-your team's API keys. The raw keys never leave the vault.
+**1Password for your AI agents.** Give each agent its own key to just the tools
+it needs. Your real passwords and API keys never leave the vault.
 
-![DOP tour: add a service, issue a scoped bearer, hand it to an agent, grow its access, revoke it](out/tour.gif)
+## In practice
+
+Alice connects Notion and Linear. Bob connects GitHub. They share one vault.
+
+Now either of them can give any AI agent access to any of those tools — not just
+the ones they added themselves. Alice's research agent can read Bob's GitHub repos.
+Bob's release agent can read Alice's Linear tickets and post the changelog to
+Notion. Nobody ever sends anyone a password.
+
+So a team pools its tools once, and every agent can work across them: one agent
+can **bridge** what used to live in separate silos, with exactly the access it
+needs — and lose it in seconds.
+
+![DOP tour: add a service, give an agent access, hand it over, grow its access, revoke it](out/tour.gif)
+
+## Try it
 
 ```bash
 brew install git sops cloudflared
@@ -18,63 +33,56 @@ curl -fsSL https://raw.githubusercontent.com/untoldecay/dop/main/scripts/install
 dop
 ```
 
-`?` shows every key, `esc` goes back. That's the learning curve.
+Everything happens in that one screen. Press `?` to see what each key does,
+`esc` to go back.
 
----
+## What it does
 
-### Your vault, your git repo
+**One place for your team's keys.**
+You add a tool once — paste its API key, and it's stored locked (encrypted). The
+vault is a private repository your team already owns, like a shared folder only
+your team can read. No new account, no server to run, nothing sent to us.
 
-Keys live in a `sops`+`age` encrypted file in a private repo you own. No
-server, no account, no telemetry. Every change syncs with your team's copy.
-[Onboarding →](../01-onboarding.md)
+**Each agent gets only what it needs.**
+Instead of handing an agent your real key, you give it a pass: "read Notion, post
+to Slack, for 3 days". The agent can use those tools and nothing else. When the
+pass expires, it stops working on its own.
 
-### Scoped, expiring bearers
+**Change your mind any time.**
+Give an agent one more tool, or take one away, without starting over. Or cancel
+its pass entirely — it stops working on its very next try.
 
-An agent gets a bearer: a named set of grants (`notion.read`,
-`slack.read-only`) with an expiry. Its commands see those keys and nothing
-else. Add or remove grants any time; revoke takes effect on the next call.
-[Recipes →](../RECIPES.md)
+**Approve new agents from your phone.**
+When a new agent asks for access, it shows a QR code. Scan it with your phone,
+type your approval code, done. Nothing to install on the phone.
 
-### Approve agents from your phone
+**Made for small teams.**
+Invite a teammate; they join when they're ready and you let them in. If two of
+you change things at the same time, DOP combines both — it only asks when you
+both changed the very same thing.
 
-A new agent shows a QR code. Scan it, type your approval passphrase, done.
-Nothing to install on the phone. Each agent then proves its own key on every
-call. [Secure elements →](../04-secure-elements.md)
+**Works where your agents already live.**
+Claude Code, Codex, Cursor and plain terminal windows.
 
-### Built for small teams
+**Prefer typing commands?** Every action on screen is also a `dop` command, for
+scripts and servers.
 
-Invite another admin; they join whenever they're ready and you approve them
-from the Team tab. Two admins editing at once get merged, not overwritten.
-[Teams →](../02-teams.md)
+## When not to use DOP
 
-### Works with your harness
+Running a large company with hundreds of agents, strict audit requirements or a
+security team? Use Vault, Doppler or Infisical. DOP is for small teams who are
+past "paste the key in the chat" but don't want to run security infrastructure.
 
-Claude Code skill + `/dop-use`, plus Codex, opencode, Cursor and plain
-shells. [Agents & harnesses →](../03-agentic-hubs.md)
+## Learn more
 
-### Everything has a CLI
+The docs use DOP's own words: a **credential** is a stored key, a **grant** is a
+named slice of it ("read Notion"), a **bearer** is the pass an agent holds.
 
-Every TUI action is a `dop` command too — for scripts, CI and headless boxes.
-[CLI reference →](../07-cli-reference.md) · [CI / headless →](../06-ci-headless.md)
+- [Features](../00-features.md) — everything DOP does, in detail
+- [Getting started](../01-onboarding.md) — install, first vault, first agent
+- [Teams](../02-teams.md) — sharing, invites, a lost laptop
+- [Agents & tools](../03-agentic-hubs.md) — Claude Code, Codex, Cursor, shared rooms
+- [How agent identity works](../04-secure-elements.md) · [What DOP protects (and doesn't)](../05-threat-model.md)
+- [Servers & CI](../06-ci-headless.md) · [Every command](../07-cli-reference.md) · [Recipes](../RECIPES.md)
 
----
-
-### When not to use DOP
-
-Need SOC2 audit retention, central RBAC or hundreds of agents? Use Vault,
-Doppler or Infisical. DOP is for the gap between "paste the token in chat" and
-"run a Vault cluster for five people".
-
-### Docs
-
-[Features](../00-features.md) ·
-[Onboarding](../01-onboarding.md) ·
-[Teams](../02-teams.md) ·
-[Harnesses](../03-agentic-hubs.md) ·
-[Secure elements](../04-secure-elements.md) ·
-[Threat model](../05-threat-model.md) ·
-[CI / headless](../06-ci-headless.md) ·
-[CLI reference](../07-cli-reference.md) ·
-[Recipes](../RECIPES.md)
-
-Updates: `dop update` (or More › Update) · [Releases](https://github.com/untoldecay/dop/releases)
+Updates: `dop update` (or More › Update in the app) · [Release notes](https://github.com/untoldecay/dop/releases)
