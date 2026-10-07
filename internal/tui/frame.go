@@ -4,11 +4,14 @@
 package tui
 
 import (
+	"os"
 	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/fray/dop/internal/config"
 )
 
 // tab is one title-row tab; a negative count hides the count.
@@ -45,9 +48,19 @@ func frame(width, height int, title string, tabs []tab, context string, body []s
 		}
 		head += "   " + st.Render(l)
 	}
+	ctx := ""
 	if context != "" {
-		pad := width - lipgloss.Width(head) - lipgloss.Width(context)
-		head += strings.Repeat(" ", max(pad, 2)) + mutedSt.Render(context)
+		ctx = mutedSt.Render(context)
+	}
+	if b := homeBadge(); b != "" {
+		ctx = dangerSt.Render(b)
+		if context != "" {
+			ctx += "  " + mutedSt.Render(context)
+		}
+	}
+	if ctx != "" {
+		pad := width - lipgloss.Width(head) - lipgloss.Width(ctx)
+		head += strings.Repeat(" ", max(pad, 2)) + ctx
 	}
 	body = strings.Split(strings.Join(body, "\n"), "\n")
 	rows := frameRows(height)
@@ -64,6 +77,17 @@ func frame(width, height int, title string, tabs []tab, context string, body []s
 		lines[i] = ansi.Truncate(l, width, "…")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// homeBadge marks every screen while DOP_HOME points at a separate
+// install, so the operator never mistakes it for their real one
+// (contract 26). DOP_RECORDING=1 hides it for VHS recordings.
+func homeBadge() string {
+	h := config.HomeOverride()
+	if h == "" || os.Getenv("DOP_RECORDING") == "1" {
+		return ""
+	}
+	return "DOP_HOME " + h
 }
 
 // status is the one-line status row: one source at a time, error >

@@ -52,18 +52,32 @@ func Resolve() (*Paths, error) {
 }
 
 func resolveRoot() (string, error) {
-	if h := os.Getenv("DOP_HOME"); h != "" {
-		abs, err := filepath.Abs(h)
-		if err != nil {
-			return "", fmt.Errorf("resolve DOP_HOME: %w", err)
-		}
-		return abs, nil
+	if h := HomeOverride(); h != "" {
+		return h, nil
 	}
+	return DefaultRoot()
+}
+
+// DefaultRoot is the root DOP uses when DOP_HOME is not set.
+func DefaultRoot() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user config dir: %w", err)
 	}
 	return filepath.Join(base, dirName), nil
+}
+
+// HomeOverride returns DOP_HOME as an absolute path, or "" when unset.
+// Callers that show the active install (TUI header, doctor) use it.
+func HomeOverride() string {
+	h := os.Getenv("DOP_HOME")
+	if h == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(h); err == nil {
+		return abs
+	}
+	return h
 }
 
 // EnsureDirs creates the root/keys/logs directories with restrictive

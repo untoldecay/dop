@@ -827,7 +827,8 @@ dop credential-helper remove --host <H>
 |---|---|---|
 | `DOP_TOKEN` | — | Bearer for `exec`, `whoami`, `env`, `claim`, `watch`. |
 | `DOP_TOKEN_FILE` | — | Path to a file containing a bearer. Writable targets auto-rotate on bearer rotation. |
-| `DOP_HOME` | OS config dir (`~/Library/Application Support/dop` on macOS) | Use a different DOP folder: a fully separate install with its own keys, vault, session and settings. The default install is never read or touched. For throwaway demo/recording installs: `DOP_HOME=/tmp/demo dop`. Keep it short — the session socket lives inside it and macOS caps socket paths at ~100 chars. |
+| `DOP_HOME` | OS config dir (`~/Library/Application Support/dop` on macOS) | For recording, demos, tests and CI — not everyday use. Runs a fully separate install (own keys, vault, session, settings); the default one is never read or touched. Only lasts for that command/shell: a new terminal or `unset DOP_HOME` returns to the default. The TUI shows a red `DOP_HOME` badge and `dop doctor` an `install:home` line while it's set. Keep it short — macOS caps the session socket path at ~100 chars. |
+| `DOP_RECORDING` | — | `1` hides the TUI `DOP_HOME` badge (VHS recordings only). |
 | `DOP_VAULT` | — | Override the vault path. |
 | `DOP_NO_TUI` | — | `1` makes bare `dop` print usage instead of launching the TUI. |
 | `DOP_ADMIN_TTL` | `15m` | Admin session idle timeout. |
