@@ -1,4 +1,4 @@
-# DOP — Doors of Perception
+# DOP
 
 **An open-source 1Password for the AI era.** Your team and its AI agents work on
 the same tools — without anyone pasting a key into a chat.
