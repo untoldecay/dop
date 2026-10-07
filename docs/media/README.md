@@ -1,8 +1,8 @@
 <!--
   DRAFT — TUI-first README (bd dop-wbp, plan _rules/_plans/readme-tui-first-landing.md).
-  Lives next to the GIFs so they render in preview. When approved, move to the repo
+  Lives next to the GIF so it renders in preview. When approved, move to the repo
   root and rewrite paths: out/… → docs/media/out/…, ../… → docs/….
-  Recorded GIFs: issue, bearers. 🎬 blocks = not recorded yet.
+  Re-record the tour: docs/media/record.sh tour
 -->
 
 # DOP — Doors of Perception
@@ -10,7 +10,7 @@
 **1Password for your AI agents.** Give each agent a scoped, revocable slice of
 your team's API keys. The raw keys never leave the vault.
 
-![Issue a bearer to an agent in the DOP TUI](out/issue.gif)
+![DOP tour: add a service, issue a scoped bearer, hand it to an agent, grow its access, revoke it](out/tour.gif)
 
 ```bash
 brew install git sops cloudflared
@@ -22,57 +22,40 @@ dop
 
 ---
 
-### Store your keys once
+### Your vault, your git repo
 
-Add Notion, GitHub, Linear… to an encrypted vault in a private git repo you own.
-No server, no account.
+Keys live in a `sops`+`age` encrypted file in a private repo you own. No
+server, no account, no telemetry. Every change syncs with your team's copy.
+[Onboarding →](../01-onboarding.md)
 
-> 🎬 *GIF 1 — Add › Integration → Notion → paste a key → probe ✓*
+### Scoped, expiring bearers
 
-CLI: `dop integration add` · [Onboarding →](../01-onboarding.md)
+An agent gets a bearer: a named set of grants (`notion.read`,
+`slack.read-only`) with an expiry. Its commands see those keys and nothing
+else. Add or remove grants any time; revoke takes effect on the next call.
+[Recipes →](../RECIPES.md)
 
-### Give an agent only what it needs
+### Approve agents from your phone
 
-Pick grants (`notion.read`, `github.write`), set an expiry, issue. DOP writes
-the message to paste into the agent's chat.
+A new agent shows a QR code. Scan it, type your approval passphrase, done.
+Nothing to install on the phone. Each agent then proves its own key on every
+call. [Secure elements →](../04-secure-elements.md)
 
-> 🎬 *GIF 2 — grant picker: space toggles, the env-prefix collision warning
-> flashes, then resolves*
+### Built for small teams
 
-CLI: `dop token issue` · [Recipes →](../RECIPES.md)
-
-### Approve from your phone
-
-The agent shows a QR code. Scan it, type your approval passphrase, done.
-Nothing to install on the phone.
-
-> 🎬 *GIF 3 — terminal QR next to the phone's passphrase form*
-
-[How pairing works →](../04-secure-elements.md)
-
-### See and revoke everything
-
-Every bearer, what it can reach, when it expires. Revoke takes effect on the
-agent's next call.
-
-![Revoke a bearer from List › Bearers](out/bearers.gif)
-
-CLI: `dop token list` · `dop token revoke` · [Threat model →](../05-threat-model.md)
-
-### Bring your team
-
-Invite a teammate; they join whenever they're ready. Approve them from the
-Team tab.
-
-> 🎬 *GIF 5 — More › Team › invite → Pending → `a` approve*
-
-CLI: `dop team invite` · [Teams →](../02-teams.md)
+Invite another admin; they join whenever they're ready and you approve them
+from the Team tab. Two admins editing at once get merged, not overwritten.
+[Teams →](../02-teams.md)
 
 ### Works with your harness
 
-Claude Code skill + `/dop-use`, plus Codex, opencode, Cursor and plain shells.
+Claude Code skill + `/dop-use`, plus Codex, opencode, Cursor and plain
+shells. [Agents & harnesses →](../03-agentic-hubs.md)
 
-CLI: `dop skill install` · [Agents & harnesses →](../03-agentic-hubs.md)
+### Everything has a CLI
+
+Every TUI action is a `dop` command too — for scripts, CI and headless boxes.
+[CLI reference →](../07-cli-reference.md) · [CI / headless →](../06-ci-headless.md)
 
 ---
 

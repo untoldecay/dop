@@ -2,7 +2,7 @@
 # Re-records README GIFs from a fresh demo install (contract 26).
 #
 #   docs/media/record.sh            # every docs/media/*.tape
-#   docs/media/record.sh issue      # just issue.tape
+#   docs/media/record.sh tour       # just tour.tape
 #
 # Run from anywhere; needs dop ≥ v1.17 and vhs on PATH.
 # Guide: _rules/_requirements/vhs_recording_guide.md

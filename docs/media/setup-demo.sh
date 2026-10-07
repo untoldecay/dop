@@ -63,5 +63,5 @@ echo -n "$PASS" | "$DOP" admin login --passphrase-stdin >/dev/null 2>&1
 
 echo "demo install ready: DOP_HOME=$DEMO (remote $REMOTE)"
 echo "  try it:  DOP_HOME=$DEMO dop"
-echo "  record:  docs/media/record.sh issue   (or vhs docs/media/<name>.tape)"
+echo "  record:  docs/media/record.sh tour   (or vhs docs/media/<name>.tape)"
 echo "  remove:  docs/media/setup-demo.sh --clean"
