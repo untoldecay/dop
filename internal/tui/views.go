@@ -808,6 +808,9 @@ func toGrantInfo(g vault.Grant) tuiGrantInfo {
 // loadGrantsForList — best-effort read of the vault to surface grants.
 // v1.8: also returns per-project rows and an info map keyed by grant ID.
 func loadGrantsForList(client *admin.Client, paths *config.Paths) ([]string, map[string]tuiGrantInfo) {
+	if vaultSyncDue(paths) {
+		syncVault(paths)
+	}
 	vp := paths.Vault + "/vault.yaml"
 	raw, err := os.ReadFile(vp)
 	if err != nil {
@@ -946,6 +949,9 @@ type listActionMsg struct {
 }
 
 func (v *listView) load() tea.Msg {
+	if vaultSyncDue(v.paths) {
+		syncVault(v.paths) // same in-view pull as loadVaultForListing
+	}
 	vp := v.paths.Vault + "/vault.yaml"
 	raw, err := os.ReadFile(vp)
 	if err != nil {

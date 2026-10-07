@@ -125,6 +125,31 @@ type rootModel struct {
 	// by either invoking pendingUnlockFn (on success) or printing a
 	// stderr line + tea.Quit (on failure).
 	pendingUnlockFn func(*rootModel) (tea.Model, tea.Cmd)
+
+	// pendingSyncFn is the screen waiting for the screen-entry vault
+	// pull (syncThen) to finish; keys are ignored meanwhile.
+	pendingSyncFn func(*rootModel) (tea.Model, tea.Cmd)
+}
+
+// vaultSyncedMsg — the screen-entry pull finished. note is a merge
+// conflict line to show, or "".
+type vaultSyncedMsg struct{ note string }
+
+// syncThen pulls the team vault before opening fn's screen, when the
+// last pull is older than the freshness window. Otherwise opens it now.
+func (m *rootModel) syncThen(fn func(*rootModel) (tea.Model, tea.Cmd)) (tea.Model, tea.Cmd) {
+	if !vaultSyncDue(m.paths) {
+		return fn(m)
+	}
+	m.pendingSyncFn = fn
+	m.st.setFlash("syncing with the team vault…")
+	paths := m.paths
+	return m, func() tea.Msg { return vaultSyncedMsg{note: syncVault(paths)} }
+}
+
+// withVaultSync wraps a menu leaf so it opens through syncThen.
+func withVaultSync(fn func(*rootModel) (tea.Model, tea.Cmd)) func(*rootModel) (tea.Model, tea.Cmd) {
+	return func(m *rootModel) (tea.Model, tea.Cmd) { return m.syncThen(fn) }
 }
 
 // guiUnlockResultMsg is delivered by the runGUIUnlock Cmd when the
@@ -155,6 +180,9 @@ type menuGroup struct {
 	// "Issue" primary opens the issue flow directly instead of a
 	// sub-page. When direct != nil, items is ignored.
 	direct func(*rootModel) (tea.Model, tea.Cmd)
+	// sync pulls the team vault (rate-limited) before any of this
+	// group's screens open, so they show the latest team state.
+	sync bool
 }
 
 func newRootModel() *rootModel {
@@ -238,7 +266,7 @@ func (m *rootModel) rebuildMenu() {
 		m.menu = nil
 		m.groups = []menuGroup{
 			{
-				label: "Add", hint: "service, grant, device, team member", key: "1",
+				label: "Add", hint: "service, grant, device, team member", key: "1", sync: true,
 				items: []menuItem{
 					{label: "Integration", hint: "a service and its first credential", fn: (*rootModel).openAddIntegration},
 					{label: "Grant", hint: "map a name to a credential", fn: (*rootModel).openAddGrant},
@@ -248,11 +276,11 @@ func (m *rootModel) rebuildMenu() {
 				},
 			},
 			{
-				label: "Issue", hint: "hand a bearer to an agent", key: "2",
+				label: "Issue", hint: "hand a bearer to an agent", key: "2", sync: true,
 				direct: (*rootModel).openIssue,
 			},
 			{
-				label: "List", hint: "integrations, grants, bearers, team", key: "3",
+				label: "List", hint: "integrations, grants, bearers, team", key: "3", sync: true,
 				items: []menuItem{
 					{label: "Integrations", hint: "services and their credentials", fn: (*rootModel).openIntegrationList},
 					{label: "Grants", hint: "names mapped to credentials", fn: (*rootModel).openGrantList},
@@ -261,7 +289,7 @@ func (m *rootModel) rebuildMenu() {
 				},
 			},
 			{
-				label: "Remove", hint: "revoke a bearer, drop a grant, retire a service", key: "4",
+				label: "Remove", hint: "revoke a bearer, drop a grant, retire a service", key: "4", sync: true,
 				items: []menuItem{
 					{label: "Bearer", hint: "revoke an issued bearer", fn: (*rootModel).openRevoke},
 					{label: "Grant", hint: "drop a grant", fn: (*rootModel).openGrantRemove},
@@ -327,6 +355,13 @@ func (m *rootModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch sz := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = sz.Width, sz.Height
+	case vaultSyncedMsg:
+		if fn := m.pendingSyncFn; fn != nil {
+			m.pendingSyncFn = nil
+			m.st.setFlash(sz.note)
+			return fn(m)
+		}
+		return m, nil
 	case guiUnlockResultMsg:
 		if m.child != nil && m.pendingUnlockFn == nil {
 			break // a view's sessionGuard save
@@ -372,6 +407,9 @@ func (m *rootModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	// Root menu key routing.
 	if km, ok := msg.(tea.KeyMsg); ok {
+		if m.pendingSyncFn != nil && km.String() != "ctrl+c" {
+			return m, nil // a screen is about to open after the pull
+		}
 		m.st.onKey(true) // ponytail: the cursor is the menu's only input
 		if toggleHelp(&m.help, km) {
 			return m, nil
@@ -507,7 +545,7 @@ func (m *rootModel) updateGroupsMenu(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.quit()
 	case "a":
 		if m.pendingCount > 0 {
-			return m.openPendingApprove()
+			return m.syncThen((*rootModel).openPendingApprove)
 		}
 	}
 	if m.inGroup < 0 {
@@ -534,6 +572,12 @@ func (m *rootModel) updateGroupsMenu(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	// Inside a group — show its items.
 	items := m.groups[m.inGroup].items
+	leaf := func(i int) func(*rootModel) (tea.Model, tea.Cmd) {
+		if m.groups[m.inGroup].sync {
+			return withVaultSync(items[i].fn)
+		}
+		return items[i].fn
+	}
 	switch s {
 	case "esc", "backspace":
 		m.inGroup = -1
@@ -549,13 +593,13 @@ func (m *rootModel) updateGroupsMenu(km tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if m.cursor >= 0 && m.cursor < len(items) {
-			return m.guardAdminAction(items[m.cursor].fn)
+			return m.guardAdminAction(leaf(m.cursor))
 		}
 	}
 	// Numeric shortcut within the sub-menu (1..len(items)).
 	if n, ok := parseDigit(s); ok {
 		if n >= 1 && n <= len(items) {
-			return m.guardAdminAction(items[n-1].fn)
+			return m.guardAdminAction(leaf(n - 1))
 		}
 	}
 	return m, nil
@@ -570,6 +614,9 @@ func (m *rootModel) enterGroup(i int) (tea.Model, tea.Cmd) {
 	}
 	g := m.groups[i]
 	if g.direct != nil {
+		if g.sync {
+			return m.guardAdminAction(withVaultSync(g.direct))
+		}
 		return m.guardAdminAction(g.direct)
 	}
 	m.inGroup = i

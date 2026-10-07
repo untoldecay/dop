@@ -285,6 +285,10 @@ func runPull(args []string) int {
 	keepTeam := fs.Bool("keep-team", false, "throw away your changes, use the team's version")
 	keepMine := fs.Bool("keep-mine", false, "throw away the team's changes, use your version (needs `dop push --force` next)")
 	noMerge := fs.Bool("no-merge", false, "diagnose only; do not attempt to merge")
+	// Hidden: the TUI's screen-entry sync. Rate-limited, quiet, always
+	// exits 0; only a merge conflict is printed (stderr) for the TUI
+	// to surface.
+	auto := fs.Bool("auto", false, "")
 	// Back-compat aliases from v1.10.1.
 	takeTheirs := fs.Bool("take-theirs", false, "alias for --keep-team")
 	takeOurs := fs.Bool("take-ours", false, "alias for --keep-mine")
@@ -302,6 +306,11 @@ func runPull(args []string) int {
 	}
 
 	paths, _ := config.Resolve()
+
+	if *auto {
+		autoPullBeforeLoad(paths)
+		return 0
+	}
 
 	// Step 1: try the boring case first — nothing on our side, just fetch.
 	if err := runGit(io.Discard, paths.Vault, "pull", "--ff-only"); err == nil {

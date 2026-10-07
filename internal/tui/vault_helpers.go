@@ -6,7 +6,12 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -24,6 +29,11 @@ import (
 //   YAML parse failures include the original error but callers may prefer
 //     a generic "vault file looks malformed — try dop pull --keep-team".
 func loadVaultForListing(client *admin.Client, paths *config.Paths) (*vault.Vault, string, error) {
+	// In-view reloads (tabs, back from a detail, after a save) pull
+	// too; rate-limited, so right after a screen-entry sync it's a stat.
+	if vaultSyncDue(paths) {
+		syncVault(paths)
+	}
 	vp := paths.Vault + "/vault.yaml"
 	raw, err := os.ReadFile(vp)
 	if err != nil {
@@ -132,4 +142,43 @@ func vaultAttached(paths *config.Paths) bool {
 		return true
 	}
 	return false
+}
+
+// vaultSyncDue reports whether a screen-entry pull should run: the
+// vault is a git checkout, auto-pull isn't disabled, and the last pull
+// (last-pull.ts, shared with the CLI) is older than the freshness
+// window — 15s, or DOP_AUTOPULL_MAX_AGE_SEC.
+func vaultSyncDue(paths *config.Paths) bool {
+	if paths == nil || os.Getenv("DOP_NO_AUTO_PULL") == "1" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(paths.Vault, ".git")); err != nil {
+		return false
+	}
+	maxAge := 15 * time.Second
+	if raw := os.Getenv("DOP_AUTOPULL_MAX_AGE_SEC"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			maxAge = time.Duration(n) * time.Second
+		}
+	}
+	fi, err := os.Stat(filepath.Join(paths.Root, "last-pull.ts"))
+	return err != nil || time.Since(fi.ModTime()) >= maxAge
+}
+
+// syncVault runs `dop pull --auto` (fetch + smart merge, rate-limited,
+// quiet). Returns a merge-conflict line for the status bar, or "".
+func syncVault(paths *config.Paths) string {
+	if testing.Testing() {
+		return "" // os.Executable is the test binary, not dop
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	cmd := exec.Command(self, "pull", "--auto")
+	cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+	return strings.Trim(strings.TrimSpace(stderr.String()), "()")
 }
