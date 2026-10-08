@@ -770,6 +770,22 @@ func resolveViaAgentKey(agentName string) (map[string]string, resolveResult, err
 		if json.Unmarshal(blob, &rec) != nil {
 			continue
 		}
+		// The admin rotated this bearer: the new one waits in
+		// BearerWrapped, sealed to this key. Follow it (and any later
+		// rotation) the way the bearer path does — open it, re-tag the
+		// key — so a bearer-free agent doesn't lose its env.
+		for hops := 0; rec.Status == capability.RecordStatusRotated && rec.BearerWrapped != nil && hops < 8; hops++ {
+			info, rerr := detectAndRotate(paths, lookupID)
+			if rerr != nil || info == nil {
+				break
+			}
+			lookupID = info.newLookupID
+			nb, nerr := os.ReadFile(filepath.Join(paths.Vault, "capabilities", lookupID+".record"))
+			rec = capability.Record{}
+			if nerr != nil || json.Unmarshal(nb, &rec) != nil {
+				break
+			}
+		}
 		if rec.Status != capability.RecordStatusActive {
 			continue
 		}
