@@ -845,13 +845,16 @@ func removeBearerFiles(paths *config.Paths, lookupID, name string) {
 // runTokenRepin re-issues an unclaimed PIN-bound bearer with a new PIN:
 // same subject, grants, expiry and binding, the old record revoked in the
 // same save. DOP never keeps the bearer, so a new PIN needs a new bearer.
-// A portable stash follows the new bearer.
+// A portable stash follows the new bearer. --reclaim does the same for a
+// claimed bearer: the agent's key is dropped and it claims again (any key
+// type — the way out for ed25519 bearers that can't rotate in place).
 func runTokenRepin(args []string) int {
 	fs := flag.NewFlagSet("token repin", flag.ExitOnError)
 	subject := fs.String("subject", "", "subject whose bearer gets a new PIN (required)")
 	// v1.13.0-rc11 — matches the issue-time default (1h for chat UX).
 	pinTTL := fs.String("pin-ttl", defaultPinTTL, "PIN validity window")
 	passStdin := fs.Bool("passphrase-stdin", false, "read the approval passphrase from stdin")
+	reclaim := fs.Bool("reclaim", false, "claimed bearer: retire it and issue a fresh PIN-bound bearer; the agent claims again")
 	_ = fs.Parse(args)
 	fail := func(f string, a ...any) int {
 		fmt.Fprintf(os.Stderr, "dop token repin: "+f+"\n", a...)
@@ -882,8 +885,8 @@ func runTokenRepin(args []string) int {
 	}
 	old := v.Capabilities[id]
 	switch {
-	case old.Binding != nil && old.Binding.Pubkey != "":
-		return fail("bearer %q is already claimed; use dop token rotate", *subject)
+	case old.Binding != nil && old.Binding.Pubkey != "" && !*reclaim:
+		return fail("bearer %q is already claimed; use dop token rotate to keep the agent's key, or --reclaim for a new claim", *subject)
 	case old.Binding == nil || old.Binding.Kind != vault.BindingKindPIN:
 		return fail("bearer %q is not PIN-bound; nothing to repin", *subject)
 	case !old.ExpiresAt.IsZero() && time.Now().After(old.ExpiresAt):
@@ -898,7 +901,7 @@ func runTokenRepin(args []string) int {
 	}
 	if n, err := activeBySubject(v, *subject); err == nil {
 		audit.Append(paths, audit.Event{Kind: audit.EventRepin, Subject: *subject, LookupID: v.Capabilities[n].LookupID,
-			Extra: map[string]string{"pin_ttl": pinDur.String(), "replaces": old.LookupID}})
+			Extra: map[string]string{"pin_ttl": pinDur.String(), "replaces": old.LookupID, "reclaim": fmt.Sprint(*reclaim)}})
 	}
 	return 0
 }

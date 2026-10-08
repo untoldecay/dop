@@ -877,6 +877,10 @@ type listView struct {
 	// Repin: PIN validity picker, then the portable wizard below
 	// (confirm, passphrase for protected grants, new bearer + PIN).
 	repinTTLCursor int
+	// Re-issue of a claimed bearer: reissueCursor picks among
+	// reissueOptions(); reclaim sends `repin --reclaim` (new claim).
+	reissueCursor int
+	reclaim       bool
 
 	// Portable toggle (and repin): confirm (0), passphrase (1, off always,
 	// on/repin only for protected grants). on and repin re-issue: an
@@ -926,6 +930,7 @@ const (
 	listModeRepin     = 6 // PIN validity picker
 	listModeDone      = 7 // ✓ outcome (revoke, reseal, grants, repin, portable)
 	listModePortable  = 8 // portable copy on/off wizard
+	listModeReissue   = 9 // claimed bearer: rotate (keep key) or new claim
 )
 
 func newListView(c *admin.Client, p *config.Paths) *listView {
@@ -1040,13 +1045,12 @@ func (v *listView) currentActions() []listAction {
 		return nil
 	}
 	acts := []listAction{{label: "Reseal env", key: "s", desc: "push current credential values into this bearer's env"}}
+	// Re-issue: one entry for every way to get a new bearer value.
+	// Unclaimed → new PIN; claimed → rotate (keep the key) or new claim.
 	if c.Binding != nil && c.Binding.Kind == "pin" && c.Binding.Pubkey == "" {
-		acts = append(acts, listAction{label: "Repin", key: "p", desc: "re-issue with a new PIN, the agent has not claimed it yet"})
-	}
-	// Rotate: claimed P-256 only (the new bearer is sealed to the agent's
-	// key, no new claim). Unclaimed bearers re-issue through Repin.
-	if c.Binding != nil && c.Binding.Pubkey != "" && c.Binding.KeyType == vault.KeyTypeP256 {
-		acts = append(acts, listAction{label: "Rotate bearer", key: "t", desc: "new bearer value, delivered to the agent's key, no new claim"})
+		acts = append(acts, listAction{label: "Re-issue", key: "p", desc: "new bearer + new PIN, the agent has not claimed it yet"})
+	} else if len(reissueOptions(c)) > 0 {
+		acts = append(acts, listAction{label: "Re-issue", key: "p", desc: "new bearer value: keep the agent's key, or start a new claim"})
 	}
 	if c.PortableWrapped == "" {
 		acts = append(acts, listAction{label: "Portable: make portable", key: "o", desc: "re-issue it so dop use works from your shells"})
@@ -1135,6 +1139,8 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateGrantPickMode(mm)
 		case listModeRepin:
 			return v.updateRepinMode(mm)
+		case listModeReissue:
+			return v.updateReissueMode(mm)
 		case listModePortable:
 			return v.updatePortableMode(mm)
 		case listModeDone:
@@ -1284,16 +1290,12 @@ func (v *listView) runAction(a listAction) (tea.Model, tea.Cmd) {
 		v.mode = listModeRun
 		v.pendingAction = "reseal"
 		return v, v.doReseal()
-	case "t":
-		// rotate doesn't need confirmation: the agent switches on its
-		// own; the old value only lets that agent pick up the new one.
-		if cmd := v.locked(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")}, &v.err); cmd != nil {
-			return v, cmd
-		}
-		v.mode = listModeRun
-		v.pendingAction = "rotate"
-		return v, v.doTokenCmd("rotate")
 	case "p":
+		v.reclaim = false
+		if c := v.capabilities[v.selectedIndex()]; c.Binding != nil && c.Binding.Pubkey != "" {
+			v.mode, v.reissueCursor, v.err = listModeReissue, 0, ""
+			return v, nil
+		}
 		v.mode, v.pendingAction, v.repinTTLCursor = listModeRepin, "repin", 0
 		v.portPass.Reset()
 	case "o":
@@ -1480,9 +1482,81 @@ func (v *listView) updateGrantPickMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // updateRepinMode is the PIN validity picker; enter goes on to the
 // portable wizard's confirm, esc back to the detail.
+// reissueOption is one way to re-issue a claimed bearer.
+type reissueOption struct {
+	key, label, desc string
+}
+
+// reissueOptions lists what a claimed bearer allows: rotate needs a
+// P-256 key (the new bearer is sealed to it); a new claim needs a PIN
+// binding. Empty for anything else.
+func reissueOptions(c vault.Capability) []reissueOption {
+	if c.Binding == nil || c.Binding.Pubkey == "" {
+		return nil
+	}
+	var o []reissueOption
+	if c.Binding.KeyType == vault.KeyTypeP256 {
+		o = append(o, reissueOption{"rotate", "Keep the agent's key", "new bearer sealed to the agent's key, picked up on its next exec"})
+	}
+	if c.Binding.Kind == "pin" {
+		o = append(o, reissueOption{"reclaim", "New claim", "new bearer + PIN, the agent claims again and you approve it"})
+	}
+	return o
+}
+
+// updateReissueMode picks how to re-issue a claimed bearer: rotate runs
+// at once (no confirmation — the agent switches on its own); a new claim
+// continues to the PIN validity picker with --reclaim.
+func (v *listView) updateReissueMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	opts := reissueOptions(v.capabilities[v.selectedIndex()])
+	switch mm.String() {
+	case "esc":
+		v.mode, v.err = listModeAction, ""
+	case "up", "k":
+		stepCursor(&v.reissueCursor, len(opts), -1)
+	case "down", "j":
+		stepCursor(&v.reissueCursor, len(opts), 1)
+	case "enter":
+		if v.reissueCursor >= len(opts) {
+			return v, nil
+		}
+		switch opts[v.reissueCursor].key {
+		case "rotate":
+			if cmd := v.locked(mm, &v.err); cmd != nil {
+				return v, cmd
+			}
+			v.mode, v.pendingAction = listModeRun, "rotate"
+			return v, v.doTokenCmd("rotate")
+		case "reclaim":
+			v.reclaim = true
+			v.mode, v.pendingAction, v.repinTTLCursor = listModeRepin, "repin", 0
+			v.portPass.Reset()
+		}
+	}
+	return v, nil
+}
+
+func (v *listView) viewReissue(width, height int) string {
+	opts := reissueOptions(v.capabilities[v.selectedIndex()])
+	body := []string{"  " + bodySt.Render("how should "+v.doneSubj+" get its new bearer?"), ""}
+	for i, o := range opts {
+		row := "  " + bodySt.Render(o.label)
+		if i == v.reissueCursor {
+			row = focusSt.Render("› " + o.label)
+		}
+		body = append(body, row, "    "+mutedSt.Render(o.desc))
+	}
+	foot := footer(width, hint("enter", "re-issue"), keyBack)
+	return frame(width, height, "Re-issue "+v.doneSubj, nil, "", body, status{err: v.err}.String(), foot)
+}
+
 func (v *listView) updateRepinMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch mm.String() {
 	case "esc":
+		if v.reclaim {
+			v.mode, v.pendingAction, v.err = listModeReissue, "", ""
+			return v, nil
+		}
 		v.mode, v.pendingAction, v.err = listModeAction, "", ""
 	case "up", "k":
 		stepCursor(&v.repinTTLCursor, len(repinTTLPresets), -1)
@@ -1580,6 +1654,9 @@ func (v *listView) doPortable() tea.Cmd {
 		args[4] = "--on"
 	case "repin":
 		args = []string{"token", "repin", "--subject", subject, "--pin-ttl", repinTTLPresets[v.repinTTLCursor].value}
+		if v.reclaim {
+			args = append(args, "--reclaim")
+		}
 	}
 	stdin := ""
 	if v.portNeedsPass() {
@@ -1711,6 +1788,8 @@ func (v *listView) View() string {
 		return v.viewGrantPick(width, height)
 	case listModeRepin:
 		return v.viewRepin(width, height)
+	case listModeReissue:
+		return v.viewReissue(width, height)
 	case listModePortable:
 		return v.viewPortable(width, height)
 	case listModeDone:
@@ -2105,7 +2184,11 @@ func (v *listView) viewRepin(width, height int) string {
 		body = append(body, row)
 	}
 	foot := footer(width, hint("enter", "next"), keyBack)
-	return frame(width, height, "Repin "+v.doneSubj, nil, "", body, status{err: v.err}.String(), foot)
+	title := "New PIN for " + v.doneSubj
+	if v.reclaim {
+		title = "New claim for " + v.doneSubj
+	}
+	return frame(width, height, title, nil, "", body, status{err: v.err}.String(), foot)
 }
 
 // viewPortable is the portable wizard: confirm, then the approval
