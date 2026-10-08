@@ -375,11 +375,13 @@ func runClaim(args []string) int {
 		pathsClaim, _ := config.Resolve()
 		clientClaim := admin.NewClient(admin.SockPath(pathsClaim))
 		if err := printguard.Guard(printguard.Request{
-			Kind:    printguard.KindClaim,
-			Subject: env.Subject,
-			Out:     os.Stdout,
-			Paths:   pathsClaim,
-			Client:  clientClaim,
+			Kind:          printguard.KindClaim,
+			Subject:       env.Subject,
+			Out:           os.Stdout,
+			Paths:         pathsClaim,
+			Client:        clientClaim,
+			ClaimApproved: !*skipApproval,
+			LookupID:      lookupID,
 		}); err != nil {
 			fmt.Fprintln(os.Stderr, "  (claim succeeded; export line NOT printed. Set DOP_TOKEN from your bearer env, or wait for the approval popup.)")
 			return 0

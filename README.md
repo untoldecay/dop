@@ -22,9 +22,9 @@ Notion. Nobody ever sends anyone a password.
 
 The team pools its tools once; every agent works from that shared context,
 **bridging** what used to sit in separate places — with only the access it
-needs, and lost in seconds when it's done. The agent never even sees the keys:
-DOP hands them straight to the tool when the agent uses it, never into the
-conversation.
+needs, and lost in seconds when it's done. The keys never enter the agent's
+conversation or files: DOP hands them only to the command the agent runs, for as
+long as it runs. ([Do agents see the keys? →](docs/05-threat-model.md#do-agents-see-the-keys))
 
 ![DOP tour: add a service, give an agent access, hand it over, grow its access, revoke it](docs/media/out/tour.gif)
 

@@ -704,6 +704,8 @@ Shell-eval-able `export KEY='value'` lines for the current bearer's scoped env. 
 dop env
 ```
 
+It prints raw keys, so it's an approval-gated surface — except for a **claimed agent**: when the agent proves it holds the key bound to the bearer (the same check `exec` does), it prints with no approval, across restarts and harnesses. Audited as `print_approval_granted` with `channel=key_proof`. Unbound (`--no-bind`) or unclaimed bearers still need approval. Prefer `dop exec` anyway: the keys reach only the one command instead of the agent's shell.
+
 Auto-pull applies; opt out with `DOP_NO_AUTO_PULL=1`.
 
 ---

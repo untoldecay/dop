@@ -20,6 +20,14 @@ The trust unit is the OS user account. If something runs as your uid, it inherit
 
 **Admin-to-admin "hands off" marker.** The `--protected` flag locks an integration or grant to a specific admin's pubkey. Non-owners trying to mutate it through DOP get a loud refusal, an audit event, and (if they tried a direct daemon write) a server-side revert. Four-admin teams get a workable "this credential is Alice's — Bob, don't rotate it" story without per-record encryption.
 
+## Do agents see the keys?
+
+**Yes, at the moment they use them — but they never hold them.** When an agent runs `dop exec -- <command>`, DOP decrypts the keys and puts them in the environment of that one command. They have to be in plain text there: that's what lets the command call the Notion or GitHub API. They are never written to disk, never placed in the agent's conversation or files, and they're gone when the command ends. What the agent keeps is a bearer — a pass, not a key — limited to its grants, expiring on its own, revocable at once, and audited on every use.
+
+**The limit: DOP is not a proxy.** An agent that *wants* to see a key can run a command that prints it (`dop exec -- printenv NOTION_TOKEN`). The risk DOP removes is the key pasted into a chat, shared between teammates, or left in an `.env` file forever — not a malicious agent using a key while it has access. `dop env`, which prints keys in plain text, is approval-gated, except for a claimed agent proving its bound key.
+
+**To narrow that window:** use reduced-scope keys on the service side (read-only where possible), issue short-lived bearers, prefer `dop exec` over `eval "$(dop env)"` so keys reach one command instead of the agent's shell, and revoke at the first doubt.
+
 ## What DOP deliberately doesn't protect
 
 **A same-uid attacker on an admin host.** If malware runs as you while your admin daemon is unlocked, it can ask the daemon to issue bearers, sign records, or decrypt capability env. The daemon socket is 0600; a process running as you can open it. This is the same posture as "same-uid attacker gets your SSH agent" — DOP's countermeasures are an unlocked daemon with a short-lived session and audit entries you can review, not a trust boundary against your own uid.

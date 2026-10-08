@@ -99,6 +99,16 @@ func runUse(args []string) int {
 	// Refuse if the capability wasn't stashed. Explicit hint rather
 	// than a vague "nothing to unwrap" since this is the most common
 	// first-encounter error.
+	if crec.PortableWrapped == "" && crec.Binding != nil && crec.Binding.Pubkey != "" {
+		// dop-8g7 — a claimed bearer is a fixed agent identity; agents
+		// reaching for `dop use` out of habit need the exec pointer.
+		fmt.Fprintf(os.Stderr,
+			"dop use: %q is claimed by an agent — `dop use` is only for portable bearers.\n"+
+				"  On that agent's machine, run commands with its bound key (no approval needed):\n"+
+				"    dop exec --agent-name %s -- <command>\n",
+			subject, subject)
+		return 1
+	}
 	if crec.PortableWrapped == "" {
 		fmt.Fprintf(os.Stderr,
 			"dop use: capability %q has no portable stash — the bearer value is not retrievable.\n"+
