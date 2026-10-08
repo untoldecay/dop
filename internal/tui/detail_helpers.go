@@ -213,13 +213,18 @@ func wizKeys(verb string, extra ...key.Binding) keyMap {
 	}
 }
 
-// screen renders one step: muted prompt, the input rows, a muted
-// helper line; err (danger) or hint (muted) on the status line.
-// counter is "2 of 4" (empty for single-step forms).
+// screen renders one step: muted prompt, a blank line, the input rows,
+// a muted helper line; err (danger) or hint (muted) on the status line.
+// counter is "2 of 4" (empty for single-step forms). Text sits in
+// column 2 like done / confirm bodies; column 0 holds only the cursor.
 func (w wiz) screen(title, counter, prompt string, input []string, helper, err, hint string, km keyMap) string {
-	body := append([]string{mutedSt.Render(prompt)}, input...)
+	var body []string
+	if prompt != "" {
+		body = []string{"  " + mutedSt.Render(prompt), ""}
+	}
+	body = append(body, input...)
 	if helper != "" {
-		body = append(body, "", mutedSt.Render(helper))
+		body = append(body, "", "  "+mutedSt.Render(helper))
 	}
 	body = km.overlay(body, w.width, frameRows(w.height), w.help)
 	return frame(w.width, w.height, title, nil, counter, body, status{err: err, hint: hint}.String(), km.footerLine(w.width, w.help))
@@ -228,7 +233,7 @@ func (w wiz) screen(title, counter, prompt string, input []string, helper, err, 
 // review is a wizard's last step: the question, the answers as kv
 // rows, enter <verb> (danger when destructive) · esc back.
 func (w wiz) review(title, question string, rows [][2]string, verb string, destructive bool, err string) string {
-	body := append([]string{bodySt.Render(question), ""}, strings.Split(strings.TrimRight(kv(rows...), "\n"), "\n")...)
+	body := append([]string{"  " + bodySt.Render(question), ""}, strings.Split(strings.TrimRight(kv(rows...), "\n"), "\n")...)
 	km := keyMap{full: [][]key.Binding{{hint("enter", verb), hint("shift+tab", "edit"), keyBack}}}
 	body = km.overlay(body, w.width, frameRows(w.height), w.help)
 	vst, sep := bodySt, mutedSt.Render(" · ")

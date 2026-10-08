@@ -413,7 +413,7 @@ func (v *inviteView) View() string {
 	switch v.step {
 	case inviteStepRunning:
 		if v.help {
-			body := append([]string{mutedSt.Render("Last output")}, outputTail(&v.linesMu, v.lines, 10)...)
+			body := append([]string{"  " + mutedSt.Render("Last output")}, outputTail(&v.linesMu, v.lines, 10)...)
 			return frame(v.width, v.height, title, nil, "", body, "", footer(v.width, keyClose))
 		}
 		line := "Staging the invite for " + label
@@ -445,7 +445,7 @@ func (v *inviteView) View() string {
 		}
 		rows = append(rows, [2]string{"passphrase", strings.Repeat("•", len(v.passBuf.Value()))})
 		if v.help && v.err != "" {
-			body := append([]string{mutedSt.Render("Last output")}, outputTail(&v.linesMu, v.lines, 10)...)
+			body := append([]string{"  " + mutedSt.Render("Last output")}, outputTail(&v.linesMu, v.lines, 10)...)
 			return frame(v.width, v.height, title, nil, "review", body, status{err: v.err}.String(), footer(v.width, keyClose))
 		}
 		return v.review(title, "Invite this "+what+"?", rows, "invite", false, v.err)

@@ -2133,7 +2133,7 @@ func (v *listView) viewDone(width, height int) string {
 	case "reseal":
 		title, note = "✓ Env resealed", v.doneNote
 	case "rotate":
-		title, note = "✓ Bearer rotated", "The agent switches to the new bearer on its next exec, no new claim.\nThe old value only lets that agent pick up the new one."
+		title, note = "✓ Bearer rotated", "The agent picks up the new bearer on its next exec, no new claim."
 	case "add", "remove":
 		n := "Grant"
 		if strings.Contains(v.doneNote, ",") {
@@ -2168,7 +2168,7 @@ func (v *listView) viewDone(width, height int) string {
 
 // viewRepin is the PIN validity picker of a repin.
 func (v *listView) viewRepin(width, height int) string {
-	body := []string{"  " + bodySt.Render("new PIN valid for")}
+	body := []string{"  " + mutedSt.Render("New PIN valid for"), ""}
 	for i, p := range repinTTLPresets {
 		row := fmt.Sprintf("%-4s", p.value)
 		if p.label == "" {
@@ -2229,7 +2229,7 @@ func (v *listView) viewPortable(width, height int) string {
 // passphrase row when a protected grant is picked.
 func (v *listView) viewGrantPick(width, height int) string {
 	title := "Add grants to " + v.doneSubj
-	body := append([]string{mutedSt.Render("Grants to add")}, v.grantPick.rows(width, frameRows(height)-3, nil)...)
+	body := append([]string{"  " + mutedSt.Render("Grants to add"), ""}, v.grantPick.rows(width, frameRows(height)-4, nil)...)
 	st := status{err: v.err}
 	st.setHint(fmt.Sprintf("%d selected", len(v.grantPick.picked())))
 	foot := footer(width, hint("space", "toggle"), hint("enter", "add"), keyBack)

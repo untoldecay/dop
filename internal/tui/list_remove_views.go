@@ -1243,7 +1243,7 @@ func (v *integrationListView) viewTokenRename(width, height int) string {
 	in := []string{inputRow(&v.renameIn)}
 	if v.renameAt == 1 {
 		v.renameIn.Blur()
-		in = []string{"  " + v.renameIn.View(), "", mutedSt.Render("Approval passphrase"), inputRow(&v.renamePass)}
+		in = []string{"  " + v.renameIn.View(), "", "  " + mutedSt.Render("Approval passphrase"), inputRow(&v.renamePass)}
 	}
 	return w.screen("Rename credential", v.selectedName(), "New name for "+v.selectedTokenName(), in,
 		"The grants that use it follow the new name.", v.err, "", keyMap{short: []key.Binding{hint("enter", "save"), keyBack}})
@@ -1855,7 +1855,7 @@ func (v *grantListView) viewRename(width, height int) string {
 	in := []string{inputRow(&v.renameIn)}
 	if v.renameAt == 1 {
 		v.renameIn.Blur()
-		in = []string{"  " + v.renameIn.View(), "", mutedSt.Render("Approval passphrase"), inputRow(&v.renamePass)}
+		in = []string{"  " + v.renameIn.View(), "", "  " + mutedSt.Render("Approval passphrase"), inputRow(&v.renamePass)}
 	}
 	return w.screen("Rename grant", "", "New id for "+v.selectedID(), in,
 		"Bearers carrying it follow the new id.", v.err, "", keyMap{short: []key.Binding{hint("enter", "save"), keyBack}})

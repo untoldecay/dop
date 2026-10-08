@@ -119,6 +119,6 @@ func (v *resetView) View() string {
 	body := strings.Split(strings.TrimRight(kv([2]string{"removes", midTrunc(v.paths.Root, 66)}, [2]string{"binary", midTrunc(displayOr(binPath, "the dop binary"), 66)}), "\n"), "\n")
 	body = append(body, "", mutedSt.Render("  Admin keys, approval hash, vault clone (the remote stays), agent keys,"),
 		mutedSt.Render("  caches, pending files, audit log and credential map go away."), "",
-		mutedSt.Render("Type UNINSTALL to confirm"), inputRow(&v.confBuf))
+		"  "+mutedSt.Render("Type UNINSTALL to confirm"), inputRow(&v.confBuf))
 	return frame(v.width, v.height, "Uninstall dop?", nil, "", body, status{err: v.err}.String(), confirmFoot("uninstall"))
 }

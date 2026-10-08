@@ -612,7 +612,7 @@ func (v *addIntegrationView) View() string {
 		}
 	}
 	km := f.formKeys(rows, action, extra...)
-	body := append([]string{stepper(v.stage, "Integration", "Credential", "Grant"), ""}, f.view(rows, v.width, action)...)
+	body := append([]string{"  " + stepper(v.stage, "Integration", "Credential", "Grant"), ""}, f.view(rows, v.width, action)...)
 	body = km.overlay(body, v.width, frameRows(v.height), v.help)
 	return frame(v.width, v.height, title, tabs, counter(v.stage, 3), body, status{err: v.err, hint: hintTxt}.String(), km.footerLine(v.width, v.help))
 }
