@@ -86,7 +86,12 @@ type Request struct {
 	// itself is still admin-approved. Only KindEnv honours it — `dop
 	// use` is portable recall and keeps its approval.
 	KeyProven bool
-	// LookupID goes on the key-proof audit event.
+	// ClaimApproved is set by `dop claim` once the admin approved this
+	// claim in the same process (QR / phone or popup). Its export line
+	// then needs no second prompt seconds later (dop-8g7). Only KindClaim
+	// honours it; `claim --skip-approval` never sets it.
+	ClaimApproved bool
+	// LookupID goes on the key-proof / claim audit event.
 	LookupID string
 }
 
@@ -119,12 +124,19 @@ func Guard(req Request) error {
 	if os.Getenv("DOP_FROM_TUI") == "1" {
 		return nil
 	}
-	if req.KeyProven && req.Kind == KindEnv {
+	channel := ""
+	switch {
+	case req.KeyProven && req.Kind == KindEnv:
+		channel = "key_proof"
+	case req.ClaimApproved && req.Kind == KindClaim:
+		channel = "claim_approval"
+	}
+	if channel != "" {
 		audit.Append(req.Paths, audit.Event{
 			Kind:     audit.EventPrintApprovalGranted,
 			Subject:  req.Subject,
 			LookupID: req.LookupID,
-			Extra:    map[string]string{"surface": string(req.Kind), "channel": "key_proof"},
+			Extra:    map[string]string{"surface": string(req.Kind), "channel": channel},
 		})
 		return nil
 	}

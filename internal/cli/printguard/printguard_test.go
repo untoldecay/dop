@@ -68,3 +68,20 @@ func TestEnvWithoutProofStillGated(t *testing.T) {
 	p := guardPaths(t)
 	refusesWithoutApproval(t, Request{Kind: KindEnv, Subject: "s", Out: &bytes.Buffer{}, Paths: p})
 }
+
+func TestApprovedClaimPrintsWithoutSecondPrompt(t *testing.T) {
+	p := guardPaths(t)
+	if err := Guard(Request{Kind: KindClaim, Subject: "honey", Out: &bytes.Buffer{}, Paths: p, ClaimApproved: true}); err != nil {
+		t.Fatalf("approved claim's export line must not prompt again: %v", err)
+	}
+	if !strings.Contains(auditLog(t, p), "claim_approval") {
+		t.Fatal("claim-approval grant must be audited")
+	}
+}
+
+func TestClaimApprovedOnlyCoversClaim(t *testing.T) {
+	p := guardPaths(t)
+	refusesWithoutApproval(t, Request{Kind: KindEnv, Subject: "s", Out: &bytes.Buffer{}, Paths: p, ClaimApproved: true})
+	refusesWithoutApproval(t, Request{Kind: KindUse, Subject: "s", Out: &bytes.Buffer{}, Paths: p, ClaimApproved: true})
+	refusesWithoutApproval(t, Request{Kind: KindClaim, Subject: "s", Out: &bytes.Buffer{}, Paths: p})
+}

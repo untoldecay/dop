@@ -14,6 +14,8 @@ Agents live in the hub. When they need to touch an outside API, they reach for D
 ## Why keep them separate
 
 - **Credentials never land in the shared log.** The hub's whole point is that everyone sees everyone's events. A Notion PAT in that log is a Notion PAT every room member has forever. `dop exec` keeps the raw token in the vault and the scope in the agent's one child process — nothing to post, nothing to replay.
+- **Claim once, then no more approvals.** Pairing an agent needs your approval once (QR or popup) — that's you confirming "this is the agent I just gave the claim command to". After that the agent's key on its machine *is* its identity: `dop exec` (and `dop env`) never ask again, even after the agent restarts or the hub spawns a fresh shell per tool call. An approval request you didn't expect means someone else is claiming — refuse it.
+- **Use `dop exec`, not `eval "$(dop env)"`.** `exec` hands the keys to one command; `dop env` puts them in the agent's shell, where an `env` or `echo` can surface them. `dop use` is only for portable bearers (yours, recalled in any shell) — a claimed agent never needs it.
 - **Audit stays per-use.** Every `dop exec` is a line in DOP's audit log tied to the agent's `ed25519` key. The hub logs what was said in the room; DOP logs what was done with a credential. Reading them side-by-side is the honest picture.
 - **Admin surfaces don't bleed.** Who's allowed in the room is the hub admin's call. Who's allowed to use `github.write` is the DOP admin's call. Same person often, but the decisions are different and the blast radius of a mistake is smaller when the levers are separate.
 
