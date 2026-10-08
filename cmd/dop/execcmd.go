@@ -138,6 +138,13 @@ func runExec(args []string) int {
 //   - kind=pin, no pubkey → claim required
 //   - kind=pin, has pubkey  → must sign a challenge with the local agent key
 //   - kind=pubkey    → must sign a challenge with the local agent key
+// bindingProven reports whether verifyBinding exercises the agent key
+// for res: pin / pubkey bindings sign a challenge with the bound key;
+// unbound bearers pass through without any proof.
+func bindingProven(res resolveResult) bool {
+	return res.binding != nil && (res.binding.Kind == "pin" || res.binding.Kind == "pubkey")
+}
+
 func verifyBinding(bearer string, res resolveResult) error {
 	if res.binding == nil {
 		return nil
@@ -300,7 +307,12 @@ func runEnv(args []string) int {
 	// already proves possession of the agent key by DECRYPTING EnvWrapped
 	// via ECDH — the agent key uniquely matches the record's bound pubkey
 	// by construction. Skip the redundant challenge/response.
+	// dop-8g7 — the agent-key path proved the key by opening
+	// EnvWrapped; a bearer passes only when verifyBinding signed with
+	// the bound key (see bindingProven).
+	keyProven := bearer == ""
 	if bearer != "" {
+		keyProven = bindingProven(res)
 		if err := verifyBinding(bearer, res); err != nil {
 			audit.Append(paths, audit.Event{
 				Kind:     audit.EventEnvDenied,
@@ -326,11 +338,13 @@ func runEnv(args []string) int {
 	// them into an LLM transcript is exactly the attack this closes.
 	client := admin.NewClient(admin.SockPath(paths))
 	if err := printguard.Guard(printguard.Request{
-		Kind:    printguard.KindEnv,
-		Subject: res.subject,
-		Out:     os.Stdout,
-		Paths:   paths,
-		Client:  client,
+		Kind:      printguard.KindEnv,
+		Subject:   res.subject,
+		Out:       os.Stdout,
+		Paths:     paths,
+		Client:    client,
+		KeyProven: keyProven,
+		LookupID:  res.lookupID,
 	}); err != nil {
 		return 1
 	}

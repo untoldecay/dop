@@ -78,6 +78,16 @@ type Request struct {
 	// May be nil when the caller doesn't have one; Guard then
 	// treats "daemon unreachable" and falls back / refuses.
 	Client *admin.Client
+	// KeyProven is set when the caller has just proven the agent holds
+	// the key bound to this bearer (signed challenge, or opening the
+	// sealed env), checked against the admin-signed record. A claimed
+	// agent is a fixed identity: printing its env needs no human
+	// approval, across restarts and harnesses (dop-8g7). The claim
+	// itself is still admin-approved. Only KindEnv honours it — `dop
+	// use` is portable recall and keeps its approval.
+	KeyProven bool
+	// LookupID goes on the key-proof audit event.
+	LookupID string
 }
 
 // ErrRefused signals the caller MUST NOT print the secret. Caller
@@ -107,6 +117,15 @@ func Guard(req Request) error {
 	isTTY := isTerminal(req.Out)
 
 	if os.Getenv("DOP_FROM_TUI") == "1" {
+		return nil
+	}
+	if req.KeyProven && req.Kind == KindEnv {
+		audit.Append(req.Paths, audit.Event{
+			Kind:     audit.EventPrintApprovalGranted,
+			Subject:  req.Subject,
+			LookupID: req.LookupID,
+			Extra:    map[string]string{"surface": string(req.Kind), "channel": "key_proof"},
+		})
 		return nil
 	}
 	// v1.14.0-rc6i — TrustContext cache. Replaces the rc6 shell-trust
