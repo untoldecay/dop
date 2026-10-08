@@ -1488,20 +1488,18 @@ type reissueOption struct {
 }
 
 // reissueOptions lists what a claimed bearer allows: rotate needs a
-// P-256 key (the new bearer is sealed to it); a new claim needs a PIN
-// binding. Empty for anything else.
+// P-256 key (the new bearer is sealed to it); a new claim works for any
+// claimed bearer — a rotated one is pubkey-bound, still claimable anew.
+// Empty for unclaimed / unbound bearers.
 func reissueOptions(c vault.Capability) []reissueOption {
 	if c.Binding == nil || c.Binding.Pubkey == "" {
 		return nil
 	}
 	var o []reissueOption
 	if c.Binding.KeyType == vault.KeyTypeP256 {
-		o = append(o, reissueOption{"rotate", "Keep the agent's key", "new bearer sealed to the agent's key, picked up on its next exec"})
+		o = append(o, reissueOption{"rotate", "Keep the agent's key", "no new claim, picked up on its next exec"})
 	}
-	if c.Binding.Kind == "pin" {
-		o = append(o, reissueOption{"reclaim", "New claim", "new bearer + PIN, the agent claims again and you approve it"})
-	}
-	return o
+	return append(o, reissueOption{"reclaim", "New claim", "new PIN, the agent claims again"})
 }
 
 // updateReissueMode picks how to re-issue a claimed bearer: rotate runs
@@ -1509,6 +1507,9 @@ func reissueOptions(c vault.Capability) []reissueOption {
 // continues to the PIN validity picker with --reclaim.
 func (v *listView) updateReissueMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	opts := reissueOptions(v.capabilities[v.selectedIndex()])
+	if toggleHelp(&v.help, mm) {
+		return v, nil
+	}
 	switch mm.String() {
 	case "esc":
 		v.mode, v.err = listModeAction, ""
@@ -1536,18 +1537,18 @@ func (v *listView) updateReissueMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return v, nil
 }
 
+// viewReissue is a single-choice question (contract 14: wiz.screen +
+// optRows, description on the option's row).
 func (v *listView) viewReissue(width, height int) string {
-	opts := reissueOptions(v.capabilities[v.selectedIndex()])
-	body := []string{"  " + bodySt.Render("how should "+v.doneSubj+" get its new bearer?"), ""}
-	for i, o := range opts {
-		row := "  " + bodySt.Render(o.label)
-		if i == v.reissueCursor {
-			row = focusSt.Render("› " + o.label)
-		}
-		body = append(body, row, "    "+mutedSt.Render(o.desc))
+	var opts [][2]string
+	for _, o := range reissueOptions(v.capabilities[v.selectedIndex()]) {
+		opts = append(opts, [2]string{o.label, o.desc})
 	}
-	foot := footer(width, hint("enter", "re-issue"), keyBack)
-	return frame(width, height, "Re-issue "+v.doneSubj, nil, "", body, status{err: v.err}.String(), foot)
+	w := wiz{width: width, height: height, help: v.help}
+	km := keyMap{short: []key.Binding{hint("enter", "next"), keyBack},
+		full: [][]key.Binding{{hint("enter", "next"), keyBack}, {keyMove}}}
+	return w.screen("Re-issue "+v.doneSubj, "", "How should "+v.doneSubj+" get its new bearer?",
+		optRows(opts, v.reissueCursor), "", v.err, "", km)
 }
 
 func (v *listView) updateRepinMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {

@@ -58,4 +58,15 @@ echo "=== [4] the agent claims again; the new bearer works"
 DOP_TOKEN="$NEW" "$DOP" claim --skip-approval "$NPIN" >/dev/null 2>&1 || fail "re-claim failed"
 DOP_TOKEN="$NEW" "$DOP" exec -- sh -c '[ "$NOTION_TOKEN" = ntn_reclaim_value ]' </dev/null >/dev/null 2>&1 || fail "new bearer can't exec"
 pass "re-claimed; exec works"
+echo "=== [5] rotated P-256 bearer (pubkey-bound) can still --reclaim"
+out=$("$DOP" token issue --grants notion.read --name p256-agent 2>&1)
+B2=$(echo "$out" | grep -E '^tok_1' | head -1)
+P2=$(echo "$out" | grep -E '^[A-Z]{2}-[A-Z]{2}-[A-Z]{2}$' | head -1)
+DOP_TOKEN="$B2" DOP_ALLOW_FILE_KEYS=1 "$DOP" claim --skip-approval --key-type p256 "$P2" >/dev/null 2>&1 || fail "p256 claim failed"
+"$DOP" token rotate p256-agent >/dev/null 2>&1 || fail "rotate failed"
+"$DOP" token show p256-agent 2>&1 | grep -q "binding.kind: pubkey" || fail "rotated record should be pubkey-bound"
+out=$("$DOP" token repin --subject p256-agent --reclaim 2>&1)
+echo "$out" | grep -qE '^[A-Z]{2}-[A-Z]{2}-[A-Z]{2}$' || { echo "$out"; fail "--reclaim refused a rotated bearer"; }
+"$DOP" token show p256-agent 2>&1 | grep -q "binding.kind: pin" || fail "reclaimed bearer should be PIN-bound"
+pass "rotated bearer re-issued for a new claim"
 echo "V1.18.1 reissue-reclaim e2e: PASS"

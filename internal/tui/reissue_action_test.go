@@ -37,7 +37,7 @@ func TestReissueEntry(t *testing.T) {
 	}{
 		{"claimed p256", &vault.Binding{Kind: "pin", Pubkey: "04ab", KeyType: vault.KeyTypeP256}, true, []string{"rotate", "reclaim"}},
 		{"claimed ed25519", &vault.Binding{Kind: "pin", Pubkey: "ab", KeyType: vault.KeyTypeEd25519}, true, []string{"reclaim"}},
-		{"pre-bound p256 (no PIN)", &vault.Binding{Kind: "pubkey", Pubkey: "04ab", KeyType: vault.KeyTypeP256}, true, []string{"rotate"}},
+		{"rotated p256 (pubkey-bound)", &vault.Binding{Kind: "pubkey", Pubkey: "04ab", KeyType: vault.KeyTypeP256}, true, []string{"rotate", "reclaim"}},
 		{"unclaimed pin", &vault.Binding{Kind: "pin"}, true, nil},
 		{"unbound", nil, false, nil},
 	}

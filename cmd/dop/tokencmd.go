@@ -887,7 +887,9 @@ func runTokenRepin(args []string) int {
 	switch {
 	case old.Binding != nil && old.Binding.Pubkey != "" && !*reclaim:
 		return fail("bearer %q is already claimed; use dop token rotate to keep the agent's key, or --reclaim for a new claim", *subject)
-	case old.Binding == nil || old.Binding.Kind != vault.BindingKindPIN:
+	case old.Binding == nil || (old.Binding.Kind != vault.BindingKindPIN && !(*reclaim && old.Binding.Pubkey != "")):
+		// --reclaim takes any claimed bearer: a rotated one is
+		// pubkey-bound but can still start over with a new claim.
 		return fail("bearer %q is not PIN-bound; nothing to repin", *subject)
 	case !old.ExpiresAt.IsZero() && time.Now().After(old.ExpiresAt):
 		return fail("bearer %q expired %s — issue a new one instead", *subject, old.ExpiresAt.Format(time.RFC3339))
