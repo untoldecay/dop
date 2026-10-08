@@ -3,6 +3,8 @@
 # runs `dop init --cache` and consumes the bearer WITHOUT an age key.
 
 set -euo pipefail
+# exec masks injected values in captured output (v1.18); `rev` inside and
+# outside the child lets the test read the real env.
 
 DOP="${DOP_BIN:-$(pwd)/dop}"
 [[ -x "$DOP" ]] || { echo "no dop"; exit 2; }
@@ -70,7 +72,7 @@ fi
 pass "agent session locked (no keys)"
 
 echo "=== [B3] agent exec works with the bearer"
-env_out=$(DOP_TOKEN="$BEARER" HOME="$MACHINE_B" "$DOP" exec --agent-name b1 -- env 2>/dev/null)
+env_out=$(DOP_TOKEN="$BEARER" HOME="$MACHINE_B" "$DOP" exec --agent-name b1 -- sh -c 'env | rev' 2>/dev/null | rev)
 echo "$env_out" | grep -q "NOTION_TOKEN=ntn_secret_ro" || { echo "$env_out"; fail "NOTION_TOKEN not injected"; }
 pass "agent exec works"
 

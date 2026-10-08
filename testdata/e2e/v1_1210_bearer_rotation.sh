@@ -71,11 +71,11 @@ pass "new lookup: ${NEW_LOOKUP:0:12}"
 echo "=== [6] agent exec via --token-file: auto-decrypts BearerWrapped + rewrites file"
 # Use dop exec (not env) with --token-file to trigger the rotation path.
 set +e
-OUT_EXEC=$("$DOP" exec --inherit-env --token-file "$TOKFILE" --agent-name rot-driver -- sh -c 'echo "GOT=$SLACK_TOKEN"' 2>&1)
+OUT_EXEC=$("$DOP" exec --inherit-env --token-file "$TOKFILE" --agent-name rot-driver -- sh -c '[ "$SLACK_TOKEN" = xoxb-value ] && echo GOT=ok' 2>&1)
 EX_EXEC=$?
 set -e
 echo "$OUT_EXEC" | grep -q "wrote rotated bearer to" || fail "exec didn't announce rotation (exit $EX_EXEC): $OUT_EXEC"
-echo "$OUT_EXEC" | grep -q "GOT=xoxb-value" || fail "exec didn't get env after rotation (exit $EX_EXEC): $OUT_EXEC"
+echo "$OUT_EXEC" | grep -q "GOT=ok" || fail "exec didn't get env after rotation (exit $EX_EXEC): $OUT_EXEC"
 pass "auto-rotation ran end-to-end, env delivered"
 
 echo "=== [7] token file now contains the NEW bearer (different from BEARER)"

@@ -2,6 +2,8 @@
 # Batch 1: `dop integration add` + `dop grant add` end-to-end.
 
 set -euo pipefail
+# exec masks injected values in captured output (v1.18); `rev` inside and
+# outside the child lets the test read the real env.
 DOP="${DOP_BIN:-$(pwd)/dop}"
 [[ -x "$DOP" ]] || { echo "no dop"; exit 2; }
 pass() { echo "  ✓ $*"; }
@@ -53,7 +55,7 @@ pass "unknown integration errored"
 echo "=== [7] issue against the fresh integration + grant"
 BEARER=$("$DOP" token issue --no-bind --grants notion.read --name test 2>/dev/null)
 [[ "$BEARER" == tok_1* ]] || fail "no bearer"
-env_out=$(DOP_TOKEN="$BEARER" "$DOP" exec --agent-name t -- env 2>/dev/null)
+env_out=$(DOP_TOKEN="$BEARER" "$DOP" exec --agent-name t -- sh -c 'env | rev' 2>/dev/null | rev)
 echo "$env_out" | grep -q "NOTION_READ_TOKEN=ntn_ro_NEW" || { echo "$env_out"; fail "wrong token value in env"; }
 pass "issue + exec end-to-end"
 

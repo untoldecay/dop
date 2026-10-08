@@ -15,7 +15,8 @@ Every DOP feature as of **v1.13.0**, in one scannable table. Grouped by surface,
 | Vault & admin | Device additions | Invite a second machine of your own as "same identity" (one admin, N devices) or "separate identity" (two distinct admins). | v1.9 |
 | Credentials | Scoped bearers | Each bearer carries a narrow set of grants; leak scope = that bearer only, not the whole catalog. | v1.0 |
 | Credentials | `dop exec` env injection | Resolves grants to env vars for one child process; env values never land on disk. | v1.0 |
-| Credentials | `dop env` | Prints the resolved env for scripting / debugging; same binding + rate limits as `exec`. Approval-gated, except a claimed agent proving its bound key (no prompt after restarts). | v1.0 · v1.17 |
+| Credentials | `dop env` | Prints the resolved env for scripting / debugging; same binding + rate limits as `exec`. Approval-gated; refused outright for a bound bearer whose output is captured (agents). | v1.0 · v1.18 |
+| Credentials | Masked `exec` output | Injected key values in a captured child's stdout/stderr become `‹NAME›` before reaching the terminal / transcript. | v1.18 |
 | Credentials | Protected credentials | Owner-locked integrations/grants (Shape B). CLI gate + daemon-side revert catches freehand `vault edit`. | v1.13.0-rc12 |
 | Credentials | Protected audit trail | 3 event kinds: `protected_create`, `protected_token_issue`, `protected_bypass_attempt`. | v1.13.0-rc12 |
 | Credentials | Token lifecycle | `set-token` command (CLI + TUI): rotate value, edit scope note. Secret-safe (stdin only, never on argv). | v1.13.0-rc16 |

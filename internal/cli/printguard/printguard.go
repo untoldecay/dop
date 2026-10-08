@@ -13,6 +13,9 @@
 //     to the TUI render path, not to a transcript.
 //   - DOP_APPROVAL_PASSPHRASE — scripted/CI pre-approval. Same auth
 //     strength as the popup (verifies via approval.Verify).
+//   - ClaimApproved (KindClaim only) — the admin approved this claim
+//     seconds ago in the same process; its export line skips a second
+//     prompt.
 //
 // Decision flow:
 //   - Local approval: admin daemon's native dialog (osascript on darwin).
@@ -78,20 +81,12 @@ type Request struct {
 	// May be nil when the caller doesn't have one; Guard then
 	// treats "daemon unreachable" and falls back / refuses.
 	Client *admin.Client
-	// KeyProven is set when the caller has just proven the agent holds
-	// the key bound to this bearer (signed challenge, or opening the
-	// sealed env), checked against the admin-signed record. A claimed
-	// agent is a fixed identity: printing its env needs no human
-	// approval, across restarts and harnesses (dop-8g7). The claim
-	// itself is still admin-approved. Only KindEnv honours it — `dop
-	// use` is portable recall and keeps its approval.
-	KeyProven bool
 	// ClaimApproved is set by `dop claim` once the admin approved this
 	// claim in the same process (QR / phone or popup). Its export line
 	// then needs no second prompt seconds later (dop-8g7). Only KindClaim
 	// honours it; `claim --skip-approval` never sets it.
 	ClaimApproved bool
-	// LookupID goes on the key-proof / claim audit event.
+	// LookupID goes on the claim-approval audit event.
 	LookupID string
 }
 
@@ -126,8 +121,6 @@ func Guard(req Request) error {
 	}
 	channel := ""
 	switch {
-	case req.KeyProven && req.Kind == KindEnv:
-		channel = "key_proof"
 	case req.ClaimApproved && req.Kind == KindClaim:
 		channel = "claim_approval"
 	}

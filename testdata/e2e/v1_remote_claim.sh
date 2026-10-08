@@ -5,6 +5,8 @@
 # Both point at the same bare git repo as the vault remote.
 
 set -euo pipefail
+# exec masks injected values in captured output (v1.18); `rev` inside and
+# outside the child lets the test read the real env.
 
 DOP="${DOP_BIN:-$(pwd)/dop}"
 [[ -x "$DOP" ]] || { echo "no dop"; exit 2; }
@@ -86,7 +88,7 @@ pass "pending files cleaned"
 
 echo "=== [B3] agent pulls → dop exec works"
 HOME="$MACHINE_B" "$DOP" pull >/dev/null 2>&1 || fail "agent pull failed"
-out=$(HOME="$MACHINE_B" DOP_TOKEN="$BEARER" "$DOP" exec --agent-name r -- env 2>&1)
+out=$(HOME="$MACHINE_B" DOP_TOKEN="$BEARER" "$DOP" exec --agent-name r -- sh -c 'env | rev' 2>/dev/null | rev)
 echo "$out" | grep -q "N_TOKEN=ntn_remote" || { echo "$out"; fail "exec after approve broken"; }
 pass "post-approve exec works on agent host"
 

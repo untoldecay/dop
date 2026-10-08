@@ -3,6 +3,8 @@
 # performs an in-place YAML edit.
 
 set -euo pipefail
+# exec masks injected values in captured output (v1.18); `rev` inside and
+# outside the child lets the test read the real env.
 DOP="${DOP_BIN:-$(pwd)/dop}"
 [[ -x "$DOP" ]] || { echo "no dop"; exit 2; }
 pass() { echo "  ✓ $*"; }
@@ -35,7 +37,7 @@ pass "vault edit succeeded"
 echo "=== [3] value was actually changed"
 "$DOP" grant add --id notion.read --integration notion --token read >/dev/null 2>&1
 BEARER=$("$DOP" token issue --no-bind --grants notion.read --name checker 2>/dev/null)
-env_out=$(DOP_TOKEN="$BEARER" "$DOP" exec --agent-name c -- env 2>/dev/null)
+env_out=$(DOP_TOKEN="$BEARER" "$DOP" exec --agent-name c -- sh -c 'env | rev' 2>/dev/null | rev)
 echo "$env_out" | grep -q "NOTION_READ_TOKEN=NEW_VALUE" || fail "value not updated: $env_out"
 pass "edit persisted correctly"
 

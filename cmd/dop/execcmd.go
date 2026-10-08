@@ -12,12 +12,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/term"
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/agentkey"
@@ -127,6 +131,10 @@ func runExec(args []string) int {
 	fmt.Fprintf(os.Stderr, "dop exec: agent=%q subject=%q gen=%d env_keys=%d\n",
 		*agentName, res.subject, res.generation, len(env))
 	if err := execChild(child, env, cleanEnv); err != nil {
+		var ce childExit
+		if errors.As(err, &ce) {
+			return int(ce)
+		}
 		fmt.Fprintf(os.Stderr, "dop exec: %v\n", err)
 		return 1
 	}
@@ -138,6 +146,7 @@ func runExec(args []string) int {
 //   - kind=pin, no pubkey → claim required
 //   - kind=pin, has pubkey  → must sign a challenge with the local agent key
 //   - kind=pubkey    → must sign a challenge with the local agent key
+//
 // bindingProven reports whether verifyBinding exercises the agent key
 // for res: pin / pubkey bindings sign a challenge with the bound key;
 // unbound bearers pass through without any proof.
@@ -307,12 +316,12 @@ func runEnv(args []string) int {
 	// already proves possession of the agent key by DECRYPTING EnvWrapped
 	// via ECDH — the agent key uniquely matches the record's bound pubkey
 	// by construction. Skip the redundant challenge/response.
-	// dop-8g7 — the agent-key path proved the key by opening
-	// EnvWrapped; a bearer passes only when verifyBinding signed with
-	// the bound key (see bindingProven).
-	keyProven := bearer == ""
+	// A claimed / bound bearer: the agent-key path proved the key by
+	// opening EnvWrapped; a bearer is bound when verifyBinding signs
+	// with the bound key (see bindingProven).
+	bound := bearer == ""
 	if bearer != "" {
-		keyProven = bindingProven(res)
+		bound = bindingProven(res)
 		if err := verifyBinding(bearer, res); err != nil {
 			audit.Append(paths, audit.Event{
 				Kind:     audit.EventEnvDenied,
@@ -333,18 +342,38 @@ func runEnv(args []string) int {
 			"env_keys":   fmt.Sprintf("%d", len(env)),
 		},
 	})
+	// A claimed agent never needs to print its keys — `dop exec` hands
+	// them to the command that uses them. Printed into captured output
+	// they land in the harness transcript and at the AI provider (seen
+	// 2026-10-08: an agent's `dop env` output became a literal key in a
+	// logged curl command). Refuse there — no popup, so an approval
+	// prompt can't be clicked through. A person at a real terminal, or
+	// an explicit scripted admin approval (DOP_APPROVAL_PASSPHRASE, CI /
+	// tests — never give it to an agent), still goes through the gate.
+	if bound && !term.IsTerminal(int(os.Stdout.Fd())) && os.Getenv("DOP_APPROVAL_PASSPHRASE") == "" {
+		audit.Append(paths, audit.Event{
+			Kind:     audit.EventEnvDenied,
+			Subject:  res.subject,
+			LookupID: res.lookupID,
+			Extra:    map[string]string{"reason": "bound_bearer_print_refused"},
+		})
+		fmt.Fprintf(os.Stderr,
+			"dop env: refused — %q is bound to an agent key; printing its keys would put them in this\n"+
+				"  transcript (and at the AI provider). Run the command through DOP instead:\n"+
+				"    dop exec -- sh -c 'your-command \"$THE_VAR\"'\n", res.subject)
+		return 1
+	}
 	// v1.14.0-rc4 — Tier 1/2/3 gate before printing. The scoped env
 	// values are often MORE sensitive than the bearer itself; leaking
 	// them into an LLM transcript is exactly the attack this closes.
 	client := admin.NewClient(admin.SockPath(paths))
 	if err := printguard.Guard(printguard.Request{
-		Kind:      printguard.KindEnv,
-		Subject:   res.subject,
-		Out:       os.Stdout,
-		Paths:     paths,
-		Client:    client,
-		KeyProven: keyProven,
-		LookupID:  res.lookupID,
+		Kind:     printguard.KindEnv,
+		Subject:  res.subject,
+		Out:      os.Stdout,
+		Paths:    paths,
+		Client:   client,
+		LookupID: res.lookupID,
 	}); err != nil {
 		return 1
 	}
@@ -968,7 +997,59 @@ func execChild(argv []string, env map[string]string, cleanEnv bool) error {
 	for _, k := range keys {
 		finalEnv = append(finalEnv, k+"="+env[k])
 	}
-	return syscall.Exec(bin, argv, finalEnv)
+	// A real terminal is a person at their own screen: hand over the
+	// process as before (interactive tools keep their tty). Captured
+	// output — an agent harness, a pipe, a log — is what ends up in
+	// transcripts and at the AI provider, so mask the injected values.
+	if term.IsTerminal(int(os.Stdout.Fd())) && term.IsTerminal(int(os.Stderr.Fd())) {
+		return syscall.Exec(bin, argv, finalEnv)
+	}
+	return runRedacted(bin, argv, finalEnv, env)
+}
+
+// childExit carries a redacted child's non-zero exit status back to
+// runExec, which exits with it (same contract as syscall.Exec).
+type childExit int
+
+func (c childExit) Error() string { return fmt.Sprintf("child exited %d", int(c)) }
+
+// runRedacted runs the child with stdout/stderr through redactWriter,
+// forwarding signals and returning its exit status as childExit.
+func runRedacted(bin string, argv, finalEnv []string, env map[string]string) error {
+	vals, labels := redactTargets(env)
+	stdout := newRedactWriter(os.Stdout, vals, labels)
+	stderr := newRedactWriter(os.Stderr, vals, labels)
+	cmd := exec.Command(bin, argv[1:]...)
+	cmd.Args = argv
+	cmd.Env = finalEnv
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	defer signal.Stop(sigs)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() {
+		for sig := range sigs {
+			_ = cmd.Process.Signal(sig)
+		}
+	}()
+	err := cmd.Wait()
+	_ = stdout.Flush()
+	_ = stderr.Flush()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			if code := ee.ExitCode(); code >= 0 {
+				return childExit(code)
+			}
+			return childExit(1)
+		}
+		return err
+	}
+	return nil
 }
 
 // stripEnv returns env minus any KEY=... entries whose KEY is in the
@@ -1009,9 +1090,9 @@ func lookPath(bin string) (string, error) {
 // (which protects agent-held bearers against theft) is the wrong model.
 //
 // The three preconditions:
-//   1. An admin session is active (socket exists + Status succeeds).
-//   2. The vault's capability record carries a PortableWrapped stash.
-//   3. The capability's IssuedBy == current session's AdminPubkey.
+//  1. An admin session is active (socket exists + Status succeeds).
+//  2. The vault's capability record carries a PortableWrapped stash.
+//  3. The capability's IssuedBy == current session's AdminPubkey.
 //
 // Every miss falls through to verifyBinding, so the standard agent-plane
 // path stays untouched. Signature verification, generation/expiry/status
@@ -1064,6 +1145,7 @@ func bearerFingerprint(bearer string) string {
 // path the exec plane now runs. It loads:
 //   - `<lookup_id>.record` (JSON, signed capability.Record)
 //   - `admins.trust` (JSON, plaintext list of admin ed25519 pubkeys)
+//
 // then confirms:
 //   - the record's ed25519 signature is valid over its canonical form
 //   - the record.IssuedBy pubkey is in the trust list
