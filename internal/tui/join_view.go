@@ -326,8 +326,8 @@ func harnessScreen(w wiz, title string, cur int, err string) string {
 	for _, c := range userprefs.HarnessChoices {
 		opts = append(opts, [2]string{userprefs.HarnessLabel(c), ""})
 	}
-	body := append([]string{mutedSt.Render("Which AI harness do you use most?")}, optRows(opts, cur)...)
-	body = append(body, "", mutedSt.Render("It picks the session variable the approval cache reads."))
+	body := append([]string{"  " + mutedSt.Render("Which AI harness do you use most?"), ""}, optRows(opts, cur)...)
+	body = append(body, "", "  "+mutedSt.Render("It picks the session variable the approval cache reads."))
 	return frame(w.width, w.height, "✓ "+title, nil, "", body, status{err: err}.String(),
 		footer(w.width, hint("enter", "save"), keyBack))
 }
@@ -338,7 +338,7 @@ func (v *joinView) View() string {
 	switch v.step {
 	case joinStepRunning:
 		if v.help {
-			body := append([]string{mutedSt.Render("Last output")}, outputTail(&v.linesMu, v.lines, 10)...)
+			body := append([]string{"  " + mutedSt.Render("Last output")}, outputTail(&v.linesMu, v.lines, 10)...)
 			return frame(v.width, v.height, title, nil, "", body, "", footer(v.width, keyClose))
 		}
 		return frame(v.width, v.height, title, nil, "", []string{v.spin.View() + " " + mutedSt.Render("Joining "+url+", waiting for the inviting admin")},
@@ -347,7 +347,7 @@ func (v *joinView) View() string {
 		return harnessScreen(v.wiz, "Joined", v.harnessCursor, v.err)
 	case joinStepReview:
 		if v.help && v.err != "" {
-			body := append([]string{mutedSt.Render("Last output")}, outputTail(&v.linesMu, v.lines, 10)...)
+			body := append([]string{"  " + mutedSt.Render("Last output")}, outputTail(&v.linesMu, v.lines, 10)...)
 			return frame(v.width, v.height, title, nil, "review", body, status{err: v.err}.String(), footer(v.width, keyClose))
 		}
 		rows := [][2]string{{"vault", url}, {"PIN", strings.TrimSpace(v.pinBuf.Value())}}

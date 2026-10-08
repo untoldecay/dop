@@ -479,18 +479,21 @@ A record is a candidate when it is revoked or rotated and it was revoked (`revok
 Give an unclaimed PIN-bound bearer a new PIN, for example when the first one expired before the agent claimed.
 
 ```
-dop token repin --subject <S> [--pin-ttl 1h] [--passphrase-stdin]
+dop token repin --subject <S> [--pin-ttl 1h] [--reclaim] [--passphrase-stdin]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--subject` | "" | Required. |
 | `--pin-ttl` | `1h` | New PIN window. |
+| `--reclaim` | false | Also accept a **claimed** bearer: retire it and issue a fresh PIN-bound one — the agent claims again (and you approve it). Works for any key type, so it's the way out for ed25519 bearers that can't rotate. |
 | `--passphrase-stdin` | false | Read the approval passphrase from stdin (asked only when the bearer holds a protected grant). |
 
 DOP never keeps a bearer it has handed out, so repin re-issues it the way `dop token portable --on` does for an unclaimed bearer: a new bearer with the same subject, grants, expiry and binding policy and a new PIN, the old record revoked in the same save (its bundle and record files removed). A portable copy, when the old bearer had one, is stored again from the new bearer. Prints the bearer and PIN once, like `dop token issue`; hand both to the agent.
 
-Refuses a claimed bearer (use `dop token rotate`), a bearer that is not PIN-bound, and a revoked or expired one.
+Refuses a claimed bearer unless `--reclaim` (otherwise use `dop token rotate` to keep the agent's key), a bearer that is not PIN-bound, and a revoked or expired one.
+
+In the TUI both live behind one **Re-issue** entry on the bearer detail: an unclaimed bearer gets a new PIN; a claimed one offers **Keep the agent's key** (rotate, P-256 only) or **New claim** (`--reclaim`).
 
 ### `dop token portable`
 

@@ -307,7 +307,7 @@ func (v *updateView) View() string {
 	case updateStepChecking:
 		return v.running("Update", "Checking for the latest release")
 	case updateStepConfirm:
-		body := append([]string{bodySt.Render("Install " + v.latest + "?"), ""}, strings.Split(strings.TrimRight(kv(rows...), "\n"), "\n")...)
+		body := append([]string{"  " + bodySt.Render("Install " + v.latest + "?"), ""}, strings.Split(strings.TrimRight(kv(rows...), "\n"), "\n")...)
 		body = updateKeys.overlay(body, v.width, frameRows(v.height), v.help)
 		return frame(v.width, v.height, "Update", nil, "", body, "", updateKeys.footerLine(v.width, v.help))
 	case updateStepInstalling:
