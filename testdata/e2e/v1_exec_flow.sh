@@ -46,8 +46,11 @@ BEARER=$("$DOP" token issue --no-bind --grants notion.read --name research 2>/de
 [[ "$BEARER" == tok_1* ]] || fail "bad bearer"
 
 echo "=== [3] dop exec — env visible in child"
+# The child gets the real value; captured output shows it masked (v1.18).
+DOP_TOKEN="$BEARER" "$DOP" exec --agent-name r1 -- sh -c '[ "$NOTION_TOKEN" = ntn_secret_ro_value ]' </dev/null >/dev/null 2>&1 || fail "NOTION_TOKEN not injected"
 env_out=$(DOP_TOKEN="$BEARER" "$DOP" exec --agent-name r1 -- env 2>/dev/null)
-echo "$env_out" | grep -q "NOTION_TOKEN=ntn_secret_ro_value" || { echo "$env_out"; fail "NOTION_TOKEN not injected"; }
+echo "$env_out" | grep -q "ntn_secret_ro_value" && fail "exec output leaked the key"
+echo "$env_out" | grep -q "NOTION_TOKEN=‹NOTION_TOKEN›" || { echo "$env_out"; fail "NOTION_TOKEN not masked in captured output"; }
 echo "$env_out" | grep -q "NOTION_BASE_URL=https://api.notion.com/v1" || fail "NOTION_BASE_URL not injected"
 pass "env injected correctly"
 

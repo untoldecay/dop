@@ -76,8 +76,7 @@ fi
 pass "double claim rejected"
 
 echo "=== [7] exec after claim → succeeds, env injected"
-env_out=$(DOP_TOKEN="$BEARER" "$DOP" exec --agent-name r1 -- env 2>/dev/null)
-echo "$env_out" | grep -q "NOTION_TOKEN=ntn_secret_ro_value" || fail "env not injected"
+DOP_TOKEN="$BEARER" "$DOP" exec --agent-name r1 -- sh -c '[ "$NOTION_TOKEN" = ntn_secret_ro_value ]' </dev/null >/dev/null 2>&1 || fail "env not injected"
 pass "bound exec works"
 
 echo "=== [8] whoami shows binding"

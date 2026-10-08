@@ -24,9 +24,11 @@ The trust unit is the OS user account. If something runs as your uid, it inherit
 
 **Yes, at the moment they use them — but they never hold them.** When an agent runs `dop exec -- <command>`, DOP decrypts the keys and puts them in the environment of that one command. They have to be in plain text there: that's what lets the command call the Notion or GitHub API. They are never written to disk, never placed in the agent's conversation or files, and they're gone when the command ends. What the agent keeps is a bearer — a pass, not a key — limited to its grants, expiring on its own, revocable at once, and audited on every use.
 
-**The limit: DOP is not a proxy.** An agent that *wants* to see a key can run a command that prints it (`dop exec -- printenv NOTION_TOKEN`). The risk DOP removes is the key pasted into a chat, shared between teammates, or left in an `.env` file forever — not a malicious agent using a key while it has access. `dop env`, which prints keys in plain text, is approval-gated, except for a claimed agent proving its bound key.
+**Printed means sent.** Whatever lands in an agent's terminal goes to its AI provider and stays in the harness history (`~/.claude`, Cursor's sqlite, opencode's db, the hub's log) — out of your reach, so the only remedy is rotating the key. We saw it happen: an agent's `dop env` output became a literal key inside a logged `curl` command. So DOP keeps keys out of captured output: `dop env` is refused for a claimed agent, and `dop exec` replaces any injected key in the command's output with `‹NAME›` before it reaches the terminal.
 
-**To narrow that window:** use reduced-scope keys on the service side (read-only where possible), issue short-lived bearers, prefer `dop exec` over `eval "$(dop env)"` so keys reach one command instead of the agent's shell, and revoke at the first doubt.
+**The limit: DOP is not a proxy.** The command itself holds the real key, so an agent that *wants* it can still smuggle it out (encode it, send it somewhere). The risk DOP removes is the key pasted into a chat, shared between teammates, left in an `.env` file forever, or printed into a transcript by accident — not a malicious agent using a key while it has access.
+
+**To narrow that window:** use reduced-scope keys on the service side (read-only where possible), issue short-lived bearers, have agents reference keys as `$NAME` inside `dop exec -- sh -c '…'` so the model never writes the value, and revoke — and rotate the key — at the first doubt.
 
 ## What DOP deliberately doesn't protect
 

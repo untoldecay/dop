@@ -1,5 +1,5 @@
-// dop-8g7 — a claimed agent that proved its bound key prints its env
-// without approval; every other surface keeps the gate.
+// The print gate: only an admin-approved claim's own export line skips
+// a second prompt; every other surface stays gated.
 
 package printguard
 
@@ -32,39 +32,17 @@ func auditLog(t *testing.T, p *config.Paths) string {
 	return b.String()
 }
 
-func TestKeyProvenEnvSkipsApproval(t *testing.T) {
-	p := guardPaths(t)
-	err := Guard(Request{Kind: KindEnv, Subject: "honey", Out: &bytes.Buffer{}, Paths: p, KeyProven: true, LookupID: "abc123"})
-	if err != nil {
-		t.Fatalf("key-proven env print must not need approval: %v", err)
-	}
-	if log := auditLog(t, p); !strings.Contains(log, "key_proof") || !strings.Contains(log, "print_approval_granted") {
-		t.Fatalf("key-proof grant must be audited, got %q", log)
-	}
-}
-
 // Without a usable approval the gate refuses; a wrong scripted
 // passphrase is the fast, network-free way to reach that refusal.
 func refusesWithoutApproval(t *testing.T, req Request) {
 	t.Helper()
 	t.Setenv("DOP_APPROVAL_PASSPHRASE", "not-the-passphrase")
 	if err := Guard(req); err == nil {
-		t.Fatalf("%s (KeyProven=%v) must still require approval", req.Kind, req.KeyProven)
+		t.Fatalf("%s must still require approval", req.Kind)
 	}
 }
 
-func TestKeyProofDoesNotCoverUse(t *testing.T) {
-	p := guardPaths(t)
-	refusesWithoutApproval(t, Request{Kind: KindUse, Subject: "s", Out: &bytes.Buffer{}, Paths: p, KeyProven: true})
-}
-
-func TestKeyProofDoesNotCoverIssueOrClaim(t *testing.T) {
-	p := guardPaths(t)
-	refusesWithoutApproval(t, Request{Kind: KindTokenIssue, Subject: "s", Out: &bytes.Buffer{}, Paths: p, KeyProven: true})
-	refusesWithoutApproval(t, Request{Kind: KindClaim, Subject: "s", Out: &bytes.Buffer{}, Paths: p, KeyProven: true})
-}
-
-func TestEnvWithoutProofStillGated(t *testing.T) {
+func TestEnvStillGated(t *testing.T) {
 	p := guardPaths(t)
 	refusesWithoutApproval(t, Request{Kind: KindEnv, Subject: "s", Out: &bytes.Buffer{}, Paths: p})
 }

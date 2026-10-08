@@ -3,6 +3,8 @@
 # collision detection in `dop token issue` and `dop doctor`.
 
 set -euo pipefail
+# exec masks injected values in captured output (v1.18); `rev` inside and
+# outside the child lets the test read the real env.
 
 DOP="${DOP_BIN:-$(pwd)/dop}"
 [[ -x "$DOP" ]] || { echo "no dop"; exit 2; }
@@ -64,7 +66,7 @@ pass "project filter works"
 echo "=== [6] token issue --project fray bundles all fray grants"
 BEARER=$("$DOP" token issue --no-bind --project fray --name fray-bot 2>&1 | grep -E '^tok_1' | head -1)
 [[ -n "$BEARER" ]] || fail "issue by project failed"
-env_out=$(DOP_TOKEN="$BEARER" "$DOP" exec --agent-name p -- env 2>/dev/null)
+env_out=$(DOP_TOKEN="$BEARER" "$DOP" exec --agent-name p -- sh -c 'env | rev' 2>/dev/null | rev)
 echo "$env_out" | grep -q "NOTION_FRAY_RO_TOKEN=ntn_fray_ro_value" || fail "fray-ro not injected"
 echo "$env_out" | grep -q "NOTION_FRAY_RW_TOKEN=ntn_fray_rw_value" || fail "fray-rw not injected"
 if echo "$env_out" | grep -q "NOTION_TIMELESS_RO_TOKEN"; then fail "timeless leaked in fray bearer"; fi
@@ -72,7 +74,7 @@ pass "project bundle works, no cross-project leak"
 
 echo "=== [7] token issue --project fray --tags read narrows"
 BEARER2=$("$DOP" token issue --no-bind --project fray --tags read --name fray-reader 2>&1 | grep -E '^tok_1' | head -1)
-env_out=$(DOP_TOKEN="$BEARER2" "$DOP" exec --agent-name r -- env 2>/dev/null)
+env_out=$(DOP_TOKEN="$BEARER2" "$DOP" exec --agent-name r -- sh -c 'env | rev' 2>/dev/null | rev)
 echo "$env_out" | grep -q "NOTION_FRAY_RO_TOKEN=" || fail "fray-ro missing"
 if echo "$env_out" | grep -q "NOTION_FRAY_RW_TOKEN="; then fail "write leaked into read-tag bearer"; fi
 pass "tag filter narrows correctly"

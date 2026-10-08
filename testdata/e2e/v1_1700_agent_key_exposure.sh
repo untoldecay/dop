@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# V1.17 e2e (dop-8g7): a claimed agent is a fixed identity. After the
-# (admin-approved) claim, `dop env` from a brand-new context — new
-# session id, no trust-cache entry, no scripted passphrase — prints
-# without any approval, because the agent proves its bound key.
-# Bearers without that proof (unbound) stay gated.
+# V1.18 e2e: keys must not reach an agent's captured output.
+# A claimed agent's `dop env` is refused when its output is captured
+# (harness transcript / AI provider); `dop exec` masks injected values in
+# captured output while the child still gets the real ones. Unbound
+# bearers stay approval-gated; `dop use` on a claimed bearer points to exec.
 set -euo pipefail
 DOP="${DOP_BIN:-$(pwd)/dop}"
 [[ -x "$DOP" ]] || { echo "V1.17 claimed-env e2e: no dop at $DOP" >&2; exit 2; }
@@ -45,13 +45,31 @@ PIN=$(echo "$issue_out" | grep -E '^[A-Z]{2}-[A-Z]{2}-[A-Z]{2}$' | head -1)
 DOP_TOKEN="$BEARER" DOP_APPROVAL_PASSPHRASE="$PASS-approve" "$DOP" claim --skip-approval "$PIN" >/dev/null 2>&1 || fail "claim failed"
 pass "claimed honey"
 
-echo "=== [3] fresh context, no approval available: dop env prints"
+echo "=== [3] claimed agent, captured output: dop env refused"
 unset DOP_APPROVAL_PASSPHRASE
-out=$(DOP_TOKEN="$BEARER" DOP_SESSION_ID="restart-$RANDOM-$RANDOM" "$DOP" env </dev/null 2>&1) || { echo "$out"; fail "dop env refused a claimed agent"; }
-echo "$out" | grep -q "SECRET_FOR_CLAIMED_AGENT" || { echo "$out"; fail "dop env did not print the env"; }
-pass "claimed agent printed its env without approval"
-grep '"print_approval_granted"' "$LOG" | grep -q '"key_proof"' || fail "no key_proof audit event"
-pass "audited as channel=key_proof"
+set +e
+out=$(DOP_TOKEN="$BEARER" DOP_SESSION_ID="restart-$RANDOM" "$DOP" env </dev/null 2>&1)
+rc=$?
+set -e
+(( rc != 0 )) || { echo "$out"; fail "claimed dop env printed into captured output"; }
+echo "$out" | grep -q "SECRET_FOR_CLAIMED_AGENT" && fail "claimed dop env leaked the secret"
+echo "$out" | grep -q "dop exec" || { echo "$out"; fail "refusal must point to dop exec"; }
+grep -q '"bound_bearer_print_refused"' "$LOG" || fail "no bound_bearer_print_refused audit event"
+pass "refused, pointed to dop exec, audited"
+
+echo "=== [3b] dop exec masks the key in captured output"
+mask=$(DOP_TOKEN="$BEARER" "$DOP" exec -- printenv NOTION_TOKEN </dev/null 2>/dev/null)
+echo "$mask" | grep -q "SECRET_FOR_CLAIMED_AGENT" && fail "exec output leaked the key"
+echo "$mask" | grep -q "‹NOTION_TOKEN›" || { echo "$mask"; fail "exec output not masked"; }
+pass "printenv shows ‹NOTION_TOKEN›"
+DOP_TOKEN="$BEARER" "$DOP" exec -- sh -c '[ "$NOTION_TOKEN" = SECRET_FOR_CLAIMED_AGENT ]' </dev/null >/dev/null 2>&1 || fail "child did not get the real value"
+pass "child still receives the real value"
+set +e
+DOP_TOKEN="$BEARER" "$DOP" exec -- sh -c 'exit 7' </dev/null >/dev/null 2>&1
+rc=$?
+set -e
+(( rc == 7 )) || fail "exit code not propagated (got $rc)"
+pass "child exit code propagated"
 
 echo "=== [4] unbound bearer: still gated"
 nb_out=$(DOP_APPROVAL_PASSPHRASE="$PASS-approve" "$DOP" token issue --no-bind --grants notion.read --name loose 2>&1)
@@ -73,4 +91,4 @@ set -e
 echo "$use_out" | grep -q "dop exec --agent-name honey" || { echo "$use_out"; fail "dop use did not point to dop exec"; }
 pass "dop use → exec hint"
 
-echo "V1.17 claimed-env-no-approval e2e: PASS"
+echo "V1.18 agent-key-exposure e2e: PASS"

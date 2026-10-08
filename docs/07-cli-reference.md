@@ -688,6 +688,8 @@ When the child is `git`, DOP strips `GIT_SSH_COMMAND` / `GIT_EXTERNAL_DIFF` / `G
 
 Bearer-free mode: with no bearer supplied, DOP scans local P-256 agent keys and resolves env via ECDH over the record's `EnvWrapped`. Ambiguous → pass `--agent-name`.
 
+**Masked output.** When the child's output is captured (an agent harness, a pipe, a log), every injected key value is replaced by `‹NAME›` before it reaches the terminal — so `printenv`, `curl -v` or an error dump can't put a key in a transcript. The child itself gets the real values; metadata (`*_KIND`, URLs, CLI hints) stays readable. A real terminal is handed over unchanged (interactive tools keep their tty). This stops accidents, not a child that encodes a key on purpose. Write commands so the shell expands the key, never the model: `dop exec -- sh -c 'curl -H "Authorization: Bearer $NOTION_TOKEN" …'`.
+
 ### `dop whoami`
 
 Fingerprint, subject, generation, expiry, binding.
@@ -704,7 +706,7 @@ Shell-eval-able `export KEY='value'` lines for the current bearer's scoped env. 
 dop env
 ```
 
-It prints raw keys, so it's an approval-gated surface — except for a **claimed agent**: when the agent proves it holds the key bound to the bearer (the same check `exec` does), it prints with no approval, across restarts and harnesses. Audited as `print_approval_granted` with `channel=key_proof`. Unbound (`--no-bind`) or unclaimed bearers still need approval. Prefer `dop exec` anyway: the keys reach only the one command instead of the agent's shell.
+It prints raw keys, so it's an approval-gated surface. For a **claimed or bound bearer** whose output is captured (an agent, a harness, a pipe) it is **refused outright** — printed keys land in the transcript and at the AI provider — and points to `dop exec`. Audited as `env_denied` (`bound_bearer_print_refused`). A person at a real terminal, or an explicit scripted admin approval (`DOP_APPROVAL_PASSPHRASE`, CI / tests — never give it to an agent), still goes through approval. Unbound (`--no-bind`) bearers keep the approval gate.
 
 Auto-pull applies; opt out with `DOP_NO_AUTO_PULL=1`.
 
