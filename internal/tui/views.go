@@ -1043,6 +1043,11 @@ func (v *listView) currentActions() []listAction {
 	if c.Binding != nil && c.Binding.Kind == "pin" && c.Binding.Pubkey == "" {
 		acts = append(acts, listAction{label: "Repin", key: "p", desc: "re-issue with a new PIN, the agent has not claimed it yet"})
 	}
+	// Rotate: claimed P-256 only (the new bearer is sealed to the agent's
+	// key, no new claim). Unclaimed bearers re-issue through Repin.
+	if c.Binding != nil && c.Binding.Pubkey != "" && c.Binding.KeyType == vault.KeyTypeP256 {
+		acts = append(acts, listAction{label: "Rotate bearer", key: "t", desc: "new bearer value, delivered to the agent's key, no new claim"})
+	}
 	if c.PortableWrapped == "" {
 		acts = append(acts, listAction{label: "Portable: make portable", key: "o", desc: "re-issue it so dop use works from your shells"})
 	} else {
@@ -1081,7 +1086,7 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if mm.err != "" {
 			// Errors stay on the detail that caused them, in plain words.
-			v.err = map[string]string{"revoke": "Revoke", "reseal": "Reseal", "add": "Add grant",
+			v.err = map[string]string{"revoke": "Revoke", "reseal": "Reseal", "rotate": "Rotate", "add": "Add grant",
 				"remove": "Remove grant", "prune": "Prune"}[v.pendingAction] + " failed: " + cliErr(mm.err)
 			v.mode = listModeAction
 			if v.pendingAction == "prune" {
@@ -1279,6 +1284,15 @@ func (v *listView) runAction(a listAction) (tea.Model, tea.Cmd) {
 		v.mode = listModeRun
 		v.pendingAction = "reseal"
 		return v, v.doReseal()
+	case "t":
+		// rotate doesn't need confirmation: the agent switches on its
+		// own; the old value only lets that agent pick up the new one.
+		if cmd := v.locked(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")}, &v.err); cmd != nil {
+			return v, cmd
+		}
+		v.mode = listModeRun
+		v.pendingAction = "rotate"
+		return v, v.doTokenCmd("rotate")
 	case "p":
 		v.mode, v.pendingAction, v.repinTTLCursor = listModeRepin, "repin", 0
 		v.portPass.Reset()
@@ -1388,7 +1402,11 @@ func (v *listView) doGrantMutation() tea.Cmd {
 // doReseal spawns `dop token reseal <capID-prefix>` for the selected
 // row. Only meaningful on claimed P-256 bearers; the CLI rejects
 // others with a clear message that the TUI surfaces as a flash.
-func (v *listView) doReseal() tea.Cmd {
+func (v *listView) doReseal() tea.Cmd { return v.doTokenCmd("reseal") }
+
+// doTokenCmd spawns `dop token <verb> <capID-prefix>` (reseal, rotate)
+// for the selected row; the CLI's stderr becomes the flash or error.
+func (v *listView) doTokenCmd(verb string) tea.Cmd {
 	idx := v.selectedIndex()
 	if idx < 0 {
 		return func() tea.Msg { return listActionMsg{err: "no selection"} }
@@ -1396,7 +1414,7 @@ func (v *listView) doReseal() tea.Cmd {
 	target := v.capIDs[idx][:12]
 	return func() tea.Msg {
 		self, _ := os.Executable()
-		cmd := exec.Command(self, "token", "reseal", target)
+		cmd := exec.Command(self, "token", verb, target)
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -2012,7 +2030,7 @@ func (v *listView) viewConfirm(width, height int) string {
 // viewRun is the in-flight screen: one present-tense title, no footer
 // (the subprocess can't be cancelled).
 func (v *listView) viewRun(width, height int) string {
-	verb := map[string]string{"revoke": "Revoking %s…", "reseal": "Resealing the env of %s…",
+	verb := map[string]string{"revoke": "Revoking %s…", "reseal": "Resealing the env of %s…", "rotate": "Rotating %s…",
 		"add": "Adding grants to %s…", "remove": "Removing grants from %s…", "repin": "Re-issuing %s…",
 		"portable-on": "Re-issuing %s…", "portable-off": "Removing portable copy…", "prune": "Pruning…"}[v.pendingAction]
 	if verb == "" {
@@ -2034,6 +2052,8 @@ func (v *listView) viewDone(width, height int) string {
 		title, note = "✓ Bearer revoked", "It fails on its next exec. The vault is synced with the team."
 	case "reseal":
 		title, note = "✓ Env resealed", v.doneNote
+	case "rotate":
+		title, note = "✓ Bearer rotated", "The agent switches to the new bearer on its next exec, no new claim.\nThe old value only lets that agent pick up the new one."
 	case "add", "remove":
 		n := "Grant"
 		if strings.Contains(v.doneNote, ",") {
