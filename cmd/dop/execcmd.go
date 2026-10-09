@@ -346,11 +346,12 @@ func runEnv(args []string) int {
 	// them to the command that uses them. Printed into captured output
 	// they land in the harness transcript and at the AI provider (seen
 	// 2026-10-08: an agent's `dop env` output became a literal key in a
-	// logged curl command). Refuse there — no popup, so an approval
-	// prompt can't be clicked through. A person at a real terminal, or
-	// an explicit scripted admin approval (DOP_APPROVAL_PASSPHRASE, CI /
-	// tests — never give it to an agent), still goes through the gate.
-	if bound && !term.IsTerminal(int(os.Stdout.Fd())) && os.Getenv("DOP_APPROVAL_PASSPHRASE") == "" {
+	// logged curl command). Refuse — no popup, so an approval prompt
+	// can't be clicked through. A terminal proves nothing: agent
+	// harnesses (Cursor, VS Code) run commands in a pty too. Only an
+	// explicit scripted admin approval (DOP_APPROVAL_PASSPHRASE, CI /
+	// tests — never give it to an agent) still goes through the gate.
+	if bound && os.Getenv("DOP_APPROVAL_PASSPHRASE") == "" {
 		audit.Append(paths, audit.Event{
 			Kind:     audit.EventEnvDenied,
 			Subject:  res.subject,
@@ -1013,12 +1014,14 @@ func execChild(argv []string, env map[string]string, cleanEnv bool) error {
 	for _, k := range keys {
 		finalEnv = append(finalEnv, k+"="+env[k])
 	}
-	// A real terminal is a person at their own screen: hand over the
-	// process as before (interactive tools keep their tty). Captured
-	// output — an agent harness, a pipe, a log — is what ends up in
-	// transcripts and at the AI provider, so mask the injected values.
+	// Mask injected keys on every output (dop-v5s). A terminal doesn't
+	// mean a person is reading — agent harnesses run commands in a pty
+	// and send what they see to the model. Terminals: the child gets its
+	// own pty behind the mask (interactive tools keep working). Pipes —
+	// including stdio protocols like MCP — stay plain pipes, stdout and
+	// stderr kept separate, only exact key values replaced.
 	if term.IsTerminal(int(os.Stdout.Fd())) && term.IsTerminal(int(os.Stderr.Fd())) {
-		return syscall.Exec(bin, argv, finalEnv)
+		return runPTYRedacted(bin, argv, finalEnv, env)
 	}
 	return runRedacted(bin, argv, finalEnv, env)
 }

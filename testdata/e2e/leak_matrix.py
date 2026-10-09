@@ -3,7 +3,7 @@
 Each case runs a dop command with stdout/stderr wired like a given harness
 (pipe = Claude Code Bash tool; pty = Cursor / VS Code / node-pty terminals) and
 looks for the fake key value in everything captured."""
-import os, pty, subprocess, sys, select, json
+import os, pty, subprocess, sys, select, json, fcntl, termios
 
 DOP = sys.argv[1]
 SECRET = sys.argv[3]
@@ -21,7 +21,13 @@ def run(argv, out_mode, err_mode, env):
     stdout = slave if out_mode == "pty" else subprocess.PIPE
     stderr = slave if err_mode == "pty" else subprocess.PIPE
     stdin = slave if out_mode == "pty" else subprocess.DEVNULL
-    p = subprocess.Popen(argv, stdin=stdin, stdout=stdout, stderr=stderr, env=env, close_fds=True)
+    def ctty():
+        # Like node-pty: new session, the pty becomes the controlling
+        # terminal (so /dev/tty writes land in what the harness reads).
+        os.setsid()
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+    pre = ctty if out_mode == "pty" else None
+    p = subprocess.Popen(argv, stdin=stdin, stdout=stdout, stderr=stderr, env=env, close_fds=True, preexec_fn=pre)
     if slave is not None:
         os.close(slave)
     captured = b""
@@ -37,6 +43,10 @@ def run(argv, out_mode, err_mode, env):
             if not chunk:
                 break
             captured += chunk
+            # Answer Bubble Tea's startup colour / cursor query the way a
+            # real terminal (xterm.js in Cursor / VS Code) does, at once.
+            if b"\x1b]11;?" in chunk:
+                os.write(master, b"\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\\x1b[1;1R")
     o, e = p.communicate(timeout=20)
     captured += (o or b"") + (e or b"")
     if master is not None:
@@ -74,6 +84,7 @@ W = {"DOP_APPROVAL_PASSPHRASE": "wrong-on-purpose"}
 case("env (bound, gate)",               [DOP, "env"], "pipe", "pipe", extra=W)
 case("env (bound, gate)",               [DOP, "env"], "pty",  "pty",  extra=W)
 case("env (bound, no passphrase)",      [DOP, "env"], "pipe", "pipe")
+case("env (bound, no passphrase)",      [DOP, "env"], "pty",  "pty")  # refused before any approval popup
 
 print(f"{'case':34} {'stdout':6} {'stderr':6} {'rc':>3}  result")
 for n, o, e, rc, res in cases:

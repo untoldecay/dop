@@ -691,7 +691,7 @@ When the child is `git`, DOP strips `GIT_SSH_COMMAND` / `GIT_EXTERNAL_DIFF` / `G
 
 Bearer-free mode: with no bearer supplied, DOP scans local P-256 agent keys and resolves env via ECDH over the record's `EnvWrapped`. Ambiguous → pass `--agent-name`.
 
-**Masked output.** When the child's output is captured (an agent harness, a pipe, a log), every injected key value is replaced by `‹NAME›` before it reaches the terminal — so `printenv`, `curl -v` or an error dump can't put a key in a transcript. The child itself gets the real values; metadata (`*_KIND`, URLs, CLI hints) stays readable. A real terminal is handed over unchanged (interactive tools keep their tty). This stops accidents, not a child that encodes a key on purpose. Write commands so the shell expands the key, never the model: `dop exec -- sh -c 'curl -H "Authorization: Bearer $NOTION_TOKEN" …'`.
+**Masked output.** Every injected key value is replaced by `‹NAME›` before it reaches the screen — so `printenv`, `curl -v` or an error dump can't put a key in an agent transcript. This holds for pipes (Claude Code) **and terminals**: agent harnesses such as Cursor or VS Code run commands in a pseudo-terminal and send what it shows to the model, so a terminal doesn't mean a person is reading. In a terminal, DOP gives the command its own pseudo-terminal and relays it through the mask — interactive tools, colours, window size, `ctrl+c`, `ctrl+z` / `fg` and `/dev/tty` keep working. Pipes stay plain pipes (stdout and stderr separate, bytes untouched apart from exact key values), so stdio protocols like MCP aren't disturbed. The child itself gets the real values; metadata (`*_KIND`, URLs, CLI hints) stays readable. This stops accidents, not a child that transforms or sends a key on purpose. Write commands so the shell expands the key, never the model: `dop exec -- sh -c 'curl -H "Authorization: Bearer $NOTION_TOKEN" …'`.
 
 ### `dop whoami`
 
@@ -709,7 +709,7 @@ Shell-eval-able `export KEY='value'` lines for the current bearer's scoped env. 
 dop env
 ```
 
-It prints raw keys, so it's an approval-gated surface. For a **claimed or bound bearer** whose output is captured (an agent, a harness, a pipe) it is **refused outright** — printed keys land in the transcript and at the AI provider — and points to `dop exec`. Audited as `env_denied` (`bound_bearer_print_refused`). A person at a real terminal, or an explicit scripted admin approval (`DOP_APPROVAL_PASSPHRASE`, CI / tests — never give it to an agent), still goes through approval. Unbound (`--no-bind`) bearers keep the approval gate.
+It prints raw keys, so it's an approval-gated surface. For a **claimed or bound bearer** it is **refused outright**, wherever its output goes — a terminal proves nothing, agent harnesses use them too — and points to `dop exec` (masked). Audited as `env_denied` (`bound_bearer_print_refused`). Only an explicit scripted admin approval (`DOP_APPROVAL_PASSPHRASE`, CI / tests — never give it to an agent) goes through approval. Unbound (`--no-bind`) bearers keep the approval gate.
 
 Auto-pull applies; opt out with `DOP_NO_AUTO_PULL=1`.
 
