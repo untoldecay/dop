@@ -5,6 +5,8 @@
 # clone. dop pull on M2 should merge both — plaintext union.
 
 set -euo pipefail
+# This script reads origin/main; make the bare vault repo use main on any machine.
+export GIT_CONFIG_PARAMETERS="'init.defaultBranch=main'"
 
 DOP="${DOP_BIN:-$(pwd)/dop}"
 [[ -x "$DOP" ]] || { echo "no dop"; exit 2; }

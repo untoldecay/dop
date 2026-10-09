@@ -138,6 +138,14 @@ func runClaim(args []string) int {
 
 	paths, _ := config.Resolve()
 
+	// Same silent pull as exec, but unconditional: a bearer issued on
+	// the admin machine a moment ago isn't in this clone yet, and a
+	// claim is rare enough that exec's 15s freshness window would only
+	// get in the way. Covers both the local and the --remote path
+	// (DOP_NO_AUTO_PULL=1 opts out).
+	autoPullVault(paths)
+	touchPullMarker(paths)
+
 	// --remote path: no daemon required, stage the claim in the vault.
 	if *remote {
 		return runClaimRemote(paths, *tokenFile, pinArg, *keyTypeFlag)
@@ -161,9 +169,9 @@ func runClaim(args []string) int {
 	oldBundleBytes, err := os.ReadFile(bundlePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Fprintln(os.Stderr, "dop claim: this token isn't recognized by this machine's vault yet.")
-			fmt.Fprintln(os.Stderr, "  Common cause: the token was issued on another machine and hasn't been pulled here.")
-			fmt.Fprintln(os.Stderr, "  Try: dop pull, then re-run this claim.")
+			fmt.Fprintln(os.Stderr, "dop claim: this token isn't recognized by this machine's vault (pulled just now).")
+			fmt.Fprintln(os.Stderr, "  Common cause: the admin machine issued it but hasn't pushed yet (dop push there).")
+			fmt.Fprintln(os.Stderr, "  Then re-run this claim.")
 			return 1
 		}
 		fmt.Fprintf(os.Stderr, "dop claim: %v\n", err)
@@ -536,7 +544,7 @@ func runClaimRemote(paths *config.Paths, tokenFile, pinArg, keyType string) int 
 	oldBundleBytes, err := os.ReadFile(bundlePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Fprintln(os.Stderr, "dop claim --remote: unknown bearer (bundle not found — did you `dop pull`?)")
+			fmt.Fprintln(os.Stderr, "dop claim --remote: unknown bearer (bundle not found after pulling the vault — did the admin `dop push` after issuing?)")
 			return 1
 		}
 		fmt.Fprintf(os.Stderr, "dop claim --remote: %v\n", err)

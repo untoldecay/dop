@@ -138,8 +138,8 @@ BEARER2=$(echo "$issue" | grep -E '^tok_1' | head -1)
 PIN2=$(echo "$issue" | grep -E '^[A-Z]{2}-[A-Z]{2}-[A-Z]{2}$' | head -1)
 [[ -n "$BEARER2" && -n "$PIN2" ]] || fail "second issue failed"
 HOME="$MACHINE_A" "$DOP" push >/dev/null 2>&1 || fail "push after second issue failed"
-HOME="$MACHINE_B" "$DOP" pull >/dev/null 2>&1 || fail "agent pull failed"
-HOME="$MACHINE_B" DOP_TOKEN="$BEARER2" "$DOP" claim --remote "$PIN2" >/dev/null 2>&1 || fail "second remote claim failed"
+# No `dop pull` on B: claim must fetch the fresh bundle by itself.
+out=$(HOME="$MACHINE_B" DOP_TOKEN="$BEARER2" "$DOP" claim --remote "$PIN2" 2>&1) || { echo "$out"; fail "second remote claim failed (claim did not auto-pull?)"; }
 HOME="$MACHINE_A" "$DOP" pull >/dev/null 2>&1 || true
 out=$(HOME="$MACHINE_A" "$DOP" approve-remote --subject reject-bot --reject 2>&1)
 echo "$out" | grep -q "rejected reject-bot" || { echo "$out"; fail "reject did not report"; }

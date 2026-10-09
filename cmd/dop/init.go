@@ -269,17 +269,19 @@ func runGit(out io.Writer, dir string, args ...string) error {
 // runPull — plain-English driver over a real 3-way vault merge.
 //
 // Terminology used in the operator-facing output (no git jargon):
-//   "your machine"  — HEAD, the local checkout
-//   "the team"      — origin/main, what the remote holds
-//   "your changes"  — commits ahead of the shared point
-//   "team changes"  — commits behind (that you haven't pulled)
-//   "merged vault"  — the decrypted-then-unioned result
+//
+//	"your machine"  — HEAD, the local checkout
+//	"the team"      — origin/main, what the remote holds
+//	"your changes"  — commits ahead of the shared point
+//	"team changes"  — commits behind (that you haven't pulled)
+//	"merged vault"  — the decrypted-then-unioned result
 //
 // Flags:
-//   --keep-mine    force-take local state (was: --take-ours). Preserved
-//                  as an alias for muscle memory.
-//   --keep-team    force-take remote state (was: --take-theirs).
-//   --no-merge     print diagnosis and stop; do not attempt to merge.
+//
+//	--keep-mine    force-take local state (was: --take-ours). Preserved
+//	               as an alias for muscle memory.
+//	--keep-team    force-take remote state (was: --take-theirs).
+//	--no-merge     print diagnosis and stop; do not attempt to merge.
 func runPull(args []string) int {
 	fs := flag.NewFlagSet("pull", flag.ExitOnError)
 	keepTeam := fs.Bool("keep-team", false, "throw away your changes, use the team's version")
@@ -307,6 +309,7 @@ func runPull(args []string) int {
 
 	paths, _ := config.Resolve()
 
+	team := gitTeamRef(paths.Vault)
 	if *auto {
 		autoPullBeforeLoad(paths)
 		return 0
@@ -323,8 +326,8 @@ func runPull(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop pull: couldn't reach the team's vault (%v). Check your network / git remote.\n", err)
 		return 1
 	}
-	ours, _ := gitRevListCount(paths.Vault, "origin/main..HEAD")
-	theirs, _ := gitRevListCount(paths.Vault, "HEAD..origin/main")
+	ours, _ := gitRevListCount(paths.Vault, team+"..HEAD")
+	theirs, _ := gitRevListCount(paths.Vault, "HEAD.."+team)
 	if ours == 0 && theirs == 0 {
 		fmt.Fprintln(os.Stderr, "dop pull: your machine is already up to date with the team.")
 		return 0
@@ -332,7 +335,7 @@ func runPull(args []string) int {
 	if ours == 0 {
 		// Just behind — this shouldn't happen after --ff-only failed,
 		// but if it does, do the safe thing.
-		if err := runGit(os.Stderr, paths.Vault, "merge", "--ff-only", "origin/main"); err != nil {
+		if err := runGit(os.Stderr, paths.Vault, "merge", "--ff-only", team); err != nil {
 			fmt.Fprintf(os.Stderr, "dop pull: %v\n", err)
 			return 1
 		}
@@ -364,24 +367,26 @@ func runPull(args []string) int {
 // what happened. Used by --no-merge and by the smart-merge path when
 // there's a genuine conflict.
 func printPullDivergedIntro(paths *config.Paths, ours, theirs int) {
+	team := gitTeamRef(paths.Vault)
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Your vault and the team's have both moved on separately since you last synced.")
 	fmt.Fprintf(os.Stderr, "  You made:   %d change(s) here.\n", ours)
 	fmt.Fprintf(os.Stderr, "  Team made:  %d change(s) upstream.\n\n", theirs)
 	fmt.Fprintln(os.Stderr, "Your recent local changes (newest first):")
-	_ = runGit(os.Stderr, paths.Vault, "log", "--oneline", "-n", "10", "origin/main..HEAD")
+	_ = runGit(os.Stderr, paths.Vault, "log", "--oneline", "-n", "10", team+"..HEAD")
 	fmt.Fprintln(os.Stderr, "\nTeam changes you don't have yet:")
-	_ = runGit(os.Stderr, paths.Vault, "log", "--oneline", "-n", "10", "HEAD..origin/main")
+	_ = runGit(os.Stderr, paths.Vault, "log", "--oneline", "-n", "10", "HEAD.."+team)
 	fmt.Fprintln(os.Stderr, "")
 }
 
 // pullKeepTeam replaces your local state with the team's, discarding
 // your local commits. Non-recoverable via `dop` (git reflog remains).
 func pullKeepTeam(paths *config.Paths) int {
+	team := gitTeamRef(paths.Vault)
 	fmt.Fprintln(os.Stderr, "dop pull --keep-team: throwing away your local changes and taking the team's version.")
 	fmt.Fprintln(os.Stderr, "  (Your discarded commits stay in git's reflog for a while if you need to recover them:")
 	fmt.Fprintln(os.Stderr, "     git -C \""+paths.Vault+"\" reflog show HEAD )")
-	if err := runGit(os.Stderr, paths.Vault, "reset", "--hard", "origin/main"); err != nil {
+	if err := runGit(os.Stderr, paths.Vault, "reset", "--hard", team); err != nil {
 		fmt.Fprintf(os.Stderr, "dop pull --keep-team: %v\n", err)
 		return 1
 	}
@@ -404,10 +409,11 @@ func pullKeepMine(paths *config.Paths, ours, theirs int) int {
 // merge) or prints plain-English conflicts and lets the operator
 // choose --keep-mine / --keep-team.
 func pullSmartMerge(paths *config.Paths, ours, theirs int) int {
+	team := gitTeamRef(paths.Vault)
 	fmt.Fprintln(os.Stderr, "dop pull: your changes and the team's both need to land. Merging safely…")
 
 	// Find the common ancestor.
-	base, err := gitMergeBase(paths.Vault, "HEAD", "origin/main")
+	base, err := gitMergeBase(paths.Vault, "HEAD", team)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop pull: couldn't find a shared history point with the team (%v).\n", err)
 		fmt.Fprintln(os.Stderr, "  This usually means the two vaults were created independently. Fix:")
@@ -428,7 +434,7 @@ func pullSmartMerge(paths *config.Paths, ours, theirs int) int {
 		fmt.Fprintf(os.Stderr, "dop pull: couldn't decrypt your local vault: %v\n", err)
 		return 1
 	}
-	remoteV, err := decryptVaultAtRef(client, paths, "origin/main")
+	remoteV, err := decryptVaultAtRef(client, paths, team)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop pull: couldn't decrypt the team's vault: %v\n", err)
 		return 1
@@ -466,7 +472,7 @@ func pullSmartMerge(paths *config.Paths, ours, theirs int) int {
 	// Make a real merge commit so history reflects both sides.
 	// -s ours accepts the other side's commits into history without
 	// changing our tree (we already wrote the merged vault ourselves).
-	if err := runGit(os.Stderr, paths.Vault, "merge", "-s", "ours", "origin/main",
+	if err := runGit(os.Stderr, paths.Vault, "merge", "-s", "ours", team,
 		"--no-ff", "-m", "dop: merged your changes with the team's"); err != nil {
 		fmt.Fprintf(os.Stderr, "dop pull: git couldn't finalize the merge commit: %v\n", err)
 		return 1
@@ -554,6 +560,22 @@ func gitMergeBase(dir, a, b string) (string, error) {
 
 // gitRevListCount returns the number of commits in a rev-list range.
 // Returns 0 on any error so the caller doesn't have to branch on it.
+// gitTeamRef is the remote-tracking ref the vault syncs with: the
+// branch's configured upstream (origin/master on a vault whose bare
+// repo was made with git's default), falling back to origin/main.
+// Every pull/merge path goes through this instead of a literal so a
+// non-main vault doesn't silently read as "up to date".
+func gitTeamRef(dir string) string {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	cmd.Dir = dir
+	if out, err := cmd.Output(); err == nil {
+		if ref := strings.TrimSpace(string(out)); ref != "" {
+			return ref
+		}
+	}
+	return "origin/main"
+}
+
 func gitRevListCount(dir, rng string) (int, error) {
 	cmd := exec.Command("git", "rev-list", "--count", rng)
 	cmd.Dir = dir
