@@ -1311,7 +1311,11 @@ func walkBearers(w *walker) {
 	w.keys("down", "enter")
 	w.dump("bearer-repin", "Bearers · repin PIN validity picker", "key")
 	w.keys("down", "enter")
-	w.dump("bearer-repin-confirm", "Bearers · re-issue with a new PIN?", "key")
+	w.dump("bearer-repin-runs-on", "Bearers · repin · runs on", "key")
+	w.keys("down")
+	w.dump("bearer-repin-runs-on-server", "Bearers · repin · runs on a server")
+	w.keys("enter")
+	w.dump("bearer-repin-confirm", "Bearers · re-issue with a new PIN? (server)", "key")
 	w.keys("enter")
 	w.dump("bearer-repin-running", "Bearers · re-issuing (repin)")
 	w.send("issueResultMsg", issueResultMsg{err: "dop token repin: save vault: vault push rejected (non-fast-forward)"})
@@ -1323,7 +1327,7 @@ func walkBearers(w *walker) {
 	w.dump("bearer-repin-done-esc-armed", "Bearers · repin done · first esc arms leave", "edge")
 	// finance-agent holds a protected grant: the approval passphrase.
 	open()
-	w.keys("down", "down", "enter", "down", "enter", "enter", "enter")
+	w.keys("down", "down", "enter", "down", "enter", "enter", "enter", "enter")
 	w.dump("bearer-repin-pass", "Bearers · repin · passphrase (protected grant)")
 	w.keys("approve-me-please", "enter")
 	w.dump("bearer-repin-pass-running", "Bearers · re-issuing (repin, protected)")
@@ -1400,10 +1404,10 @@ func walkBearers(w *walker) {
 	w.keys("x", "enter")
 	w.send("listActionMsg", listActionMsg{})
 	w.dump("bearer-prune-done", "Bearers · pruned")
-	// default picker choice: repin TTL 1h
+	// default picker choices: repin TTL 1h, runs on this machine
 	act()
 	w.keys("down", "enter")
-	w.line("enter", "enter")
+	w.line("enter", "enter", "enter")
 }
 
 // ── team ──
