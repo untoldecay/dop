@@ -1,5 +1,8 @@
 // v1.7 — inline pending-claim approve panel. Surfaced from the root
 // menu whenever a non-expired pending claim exists (banner + 'a' key).
+// Lists local PIN claims (dop claim) and remote claims staged in the
+// vault repo (dop claim --remote) in one picker; remote rows shell out
+// to `dop approve-remote`.
 //
 // The view keeps the security model: approval still requires the
 // admin passphrase. The TUI only saves the click-then-type dance.
@@ -20,13 +23,46 @@ import (
 
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/pendingclaim"
+	"github.com/fray/dop/internal/remoteclaim"
 )
+
+// pendingRow is one approvable entry: a local PIN claim (sas set) or a
+// remote claim staged in the vault (host set).
+type pendingRow struct {
+	subject, pubkey, keyType string
+	sas, host                string
+	expiresAt                time.Time
+}
+
+func (r pendingRow) remote() bool { return r.host != "" }
+
+// pendingRows merges non-expired local + remote claims, local first.
+func pendingRows(paths *config.Paths) ([]pendingRow, error) {
+	var rows []pendingRow
+	now := time.Now()
+	local, err := pendingclaim.List(paths)
+	for _, r := range local {
+		if !r.Expired(now) {
+			rows = append(rows, pendingRow{subject: r.Subject, pubkey: r.Pubkey, sas: r.SAS, expiresAt: r.ExpiresAt})
+		}
+	}
+	if remote, rerr := remoteclaim.List(paths); rerr == nil {
+		for _, r := range remote {
+			if now.Before(r.ExpiresAt) {
+				rows = append(rows, pendingRow{subject: r.Subject, pubkey: r.Pubkey, keyType: r.EffectiveKeyType(), host: r.Host, expiresAt: r.ExpiresAt})
+			}
+		}
+	} else if err == nil {
+		err = rerr
+	}
+	return rows, err
+}
 
 type pendingView struct {
 	wiz
 	paths *config.Paths
 
-	claims []*pendingclaim.Record
+	claims []pendingRow
 	cursor int
 	pass   textinput.Model
 	step   int // pendingStep*
@@ -50,16 +86,11 @@ type pendingResultMsg struct {
 
 func (m *rootModel) openPendingApprove() (tea.Model, tea.Cmd) {
 	v := &pendingView{paths: m.paths, pass: newFormInput(true)}
-	all, err := pendingclaim.List(m.paths)
+	rows, err := pendingRows(m.paths)
 	if err != nil {
 		v.err = err.Error()
 	}
-	now := time.Now()
-	for _, r := range all {
-		if !r.Expired(now) {
-			v.claims = append(v.claims, r)
-		}
-	}
+	v.claims = rows
 	m.child = v
 	m.screen = screenPending
 	return m, v.Init()
@@ -71,8 +102,17 @@ func (v *pendingView) Flash() string { return v.flash }
 
 // run shells out in a Cmd, never inside Update.
 func (v *pendingView) run(reject bool) tea.Cmd {
-	sas, pass := pendingclaim.NormalizeSAS(v.claims[v.cursor].SAS), v.pass.Value()
+	row, pass := v.claims[v.cursor], v.pass.Value()
 	return func() tea.Msg {
+		if row.remote() {
+			if reject {
+				_, e := runDop("", "approve-remote", "--subject", row.subject, "--reject")
+				return pendingResultMsg{reject: true, err: e}
+			}
+			_, e := runDop(pass, "approve-remote", "--subject", row.subject, "--passphrase-stdin")
+			return pendingResultMsg{err: e}
+		}
+		sas := pendingclaim.NormalizeSAS(row.sas)
 		if reject {
 			return pendingResultMsg{reject: true, err: errStr(runDopReject(sas))}
 		}
@@ -183,28 +223,39 @@ var pendingKeys = keyMap{
 
 func (v *pendingView) View() string {
 	title := "Pending claims"
-	var sel *pendingclaim.Record
+	var sel pendingRow
 	if len(v.claims) > 0 {
 		sel = v.claims[v.cursor]
 	}
+	// Second column: PIN for local claims, host for remote ones.
+	where := func(r pendingRow) string {
+		if r.remote() {
+			return "remote · " + r.host
+		}
+		return "PIN " + r.sas
+	}
 	switch v.step {
 	case pendingStepRun:
-		return v.running(title, "Working on "+sel.Subject)
+		return v.running(title, "Working on "+sel.subject)
 	case pendingStepDone:
-		return v.doneScreen(v.flash, [][2]string{{"bearer", sel.Subject}}, "", "")
+		note := ""
+		if sel.remote() && !strings.Contains(v.flash, "rejected") {
+			note = "Pushed to the vault repo. The agent picks it up on its next dop pull / exec."
+		}
+		return v.doneScreen(v.flash, [][2]string{{"bearer", sel.subject}}, note, "")
 	case pendingStepReject:
-		body := strings.Split(strings.TrimRight(kv([2]string{"bearer", sel.Subject}, [2]string{"pin", sel.SAS}), "\n"), "\n")
-		return frame(v.width, v.height, "Reject "+sel.Subject+"?", nil, "", body, status{err: v.err}.String(), confirmFoot("reject"))
+		body := strings.Split(strings.TrimRight(kv([2]string{"bearer", sel.subject}, [2]string{"from", where(sel)}), "\n"), "\n")
+		return frame(v.width, v.height, "Reject "+sel.subject+"?", nil, "", body, status{err: v.err}.String(), confirmFoot("reject"))
 	case pendingStepPass:
-		return v.screen("Approve "+sel.Subject, "", "Approval passphrase", []string{inputRow(&v.pass)}, "", v.err, "PIN "+sel.SAS, wizKeys("approve"))
+		return v.screen("Approve "+sel.subject, "", "Approval passphrase", []string{inputRow(&v.pass)}, "", v.err, where(sel), wizKeys("approve"))
 	}
 	if len(v.claims) == 0 {
-		return frame(v.width, v.height, title, nil, "", []string{bodySt.Render("  No pending claims. A claim shows here when an agent runs dop claim.")}, status{err: v.err}.String(), footer(v.width, keyBack))
+		return frame(v.width, v.height, title, nil, "", []string{bodySt.Render("  No pending claims. A claim shows here when an agent runs dop claim (or dop claim --remote).")}, status{err: v.err}.String(), footer(v.width, keyBack))
 	}
-	body := []string{"  " + mutedSt.Render(padTrunc("subject", 24)+"  "+padTrunc("pin", 8)+"  expires")}
+	body := []string{"  " + mutedSt.Render(padTrunc("subject", 24)+"  "+padTrunc("from", 22)+"  expires")}
 	for i, r := range v.claims {
-		cells := padTrunc(r.Subject, 24) + "  " + padTrunc(r.SAS, 8)
-		left := "in " + humanDuration(time.Until(r.ExpiresAt))
+		cells := padTrunc(r.subject, 24) + "  " + padTrunc(where(r), 22)
+		left := "in " + humanDuration(time.Until(r.expiresAt))
 		if i == v.cursor {
 			body = append(body, focusSt.Render("› "+cells+"  "+left))
 		} else {
@@ -212,7 +263,11 @@ func (v *pendingView) View() string {
 		}
 	}
 	st := status{err: v.err}
-	st.setHint("key " + midTrunc(sel.Pubkey, 24))
+	hint := "key " + midTrunc(sel.pubkey, 24)
+	if sel.keyType != "" {
+		hint = sel.keyType + " " + hint
+	}
+	st.setHint(hint)
 	body = pendingKeys.overlay(body, v.width, frameRows(v.height), v.help)
 	return frame(v.width, v.height, title, nil, fmt.Sprintf("%d waiting", len(v.claims)), body, st.String(), pendingKeys.footerLine(v.width, v.help))
 }

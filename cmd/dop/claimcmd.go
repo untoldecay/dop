@@ -25,8 +25,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -142,7 +140,7 @@ func runClaim(args []string) int {
 
 	// --remote path: no daemon required, stage the claim in the vault.
 	if *remote {
-		return runClaimRemote(paths, *tokenFile, pinArg)
+		return runClaimRemote(paths, *tokenFile, pinArg, *keyTypeFlag)
 	}
 
 	client, err := requireAdminSession(paths)
@@ -467,13 +465,13 @@ func runClaimStatus(paths *config.Paths, bearer string, asJSON bool) int {
 	}
 	if asJSON {
 		emitJSON(map[string]any{
-			"event":        "status",
-			"state":        state,
-			"sas":          rec.SAS,
-			"subject":      rec.Subject,
-			"lookup_id":    lookupID,
-			"started_at":   rec.StartedAt.Format(time.RFC3339),
-			"expires_at":   rec.ExpiresAt.Format(time.RFC3339),
+			"event":         "status",
+			"state":         state,
+			"sas":           rec.SAS,
+			"subject":       rec.Subject,
+			"lookup_id":     lookupID,
+			"started_at":    rec.StartedAt.Format(time.RFC3339),
+			"expires_at":    rec.ExpiresAt.Format(time.RFC3339),
 			"failure_count": rec.FailureCount,
 		})
 	} else {
@@ -505,18 +503,18 @@ func lookupIDFromBearer(paths *config.Paths, bearer string) (string, error) {
 // via $DOP_TOKEN.
 //
 // Flow:
-//   1. Verify the PIN locally against the on-disk bundle.
-//   2. Read the existing signed record sidecar for the current gen.
-//   3. Generate an ed25519 keypair.
-//   4. Prepare a NEW bundle in memory carrying the pubkey binding.
-//   5. Write the new bundle to `pending-remote-claims/<lookup_id>.bundle`
-//      alongside a signed metadata file.
-//   6. Persist the agent private key at `<Root>/agent-keys/<lookup_id>.key`.
-//   7. Git commit + push (best-effort — user can push manually).
+//  1. Verify the PIN locally against the on-disk bundle.
+//  2. Read the existing signed record sidecar for the current gen.
+//  3. Generate an ed25519 keypair.
+//  4. Prepare a NEW bundle in memory carrying the pubkey binding.
+//  5. Write the new bundle to `pending-remote-claims/<lookup_id>.bundle`
+//     alongside a signed metadata file.
+//  6. Persist the agent private key at `<Root>/agent-keys/<lookup_id>.key`.
+//  7. Git commit + push (best-effort — user can push manually).
 //
 // The admin then runs `dop approve-remote` on their machine to accept
 // the pubkey and finalize the record.
-func runClaimRemote(paths *config.Paths, tokenFile, pinArg string) int {
+func runClaimRemote(paths *config.Paths, tokenFile, pinArg, keyType string) int {
 	bearer, err := readBearer(tokenFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop claim --remote: %v\n", err)
@@ -579,17 +577,24 @@ func runClaimRemote(paths *config.Paths, tokenFile, pinArg string) int {
 		return 1
 	}
 
-	// Generate keypair + build new bundle in memory.
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	// Generate the agent key via the same platform-aware backend as the
+	// local claim (SE P-256 on macOS, file P-256 with
+	// DOP_ALLOW_FILE_KEYS=1, ed25519 fallback; --key-type forces one).
+	// The key is persisted BEFORE staging in the vault: if push fails
+	// the admin can still approve once it lands, and the pubkey only
+	// ever exists here.
+	store, err := agentkey.Create(paths, lookupID, keyType)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop claim --remote: keygen: %v\n", err)
 		return 1
 	}
-	pubHex := hex.EncodeToString(pub)
+	pubHex := hex.EncodeToString(store.PublicKey())
+	keyPath := store.StorageDescription()
 	newGen := existing.Generation + 1
 	newBinding := &capability.EnvelopeBinding{
-		Kind:   vault.BindingKindPIN,
-		Pubkey: pubHex,
+		Kind:    vault.BindingKindPIN,
+		Pubkey:  pubHex,
+		KeyType: store.KeyType(),
 	}
 	var newBundleBuf bytes.Buffer
 	newBundleBytes, err := capability.Write(&newBundleBuf, capability.WriteOpts{
@@ -606,33 +611,18 @@ func runClaimRemote(paths *config.Paths, tokenFile, pinArg string) int {
 		return 1
 	}
 
-	// Persist the private key BEFORE staging in the vault. If push
-	// fails, admin can retry approve — but they need the pubkey, which
-	// only the agent's local key produces.
-	//
-	// v1.11 — remote-claim still uses ed25519 file storage because the
-	// remoteclaim.Request signature format is Ed25519-baked. Migrating
-	// the remote-claim protocol to P-256 is a follow-up (this path is
-	// CI/headless-only and the file backend is the expected mode there).
-	keyPath, err := writeAgentKeyLegacyEd25519(paths, lookupID, priv)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop claim --remote: persist key: %v\n", err)
-		return 1
-	}
-
 	host, _ := os.Hostname()
 	req := remoteclaim.Request{
 		LookupID:      lookupID,
 		CapabilityID:  hex.EncodeToString(hdr.CapabilityID[:]),
 		Subject:       env.Subject,
-		Pubkey:        pubHex,
 		Host:          host,
 		RequestedAt:   time.Now().UTC().Truncate(time.Second),
 		ExpiresAt:     time.Now().Add(remoteclaim.TTL).UTC().Truncate(time.Second),
 		NewGeneration: newGen,
 		NewBundleHash: capability.HashBundle(newBundleBytes),
 	}
-	if err := req.Sign(priv); err != nil {
+	if err := req.Sign(store); err != nil {
 		fmt.Fprintf(os.Stderr, "dop claim --remote: sign request: %v\n", err)
 		return 1
 	}
@@ -1142,29 +1132,9 @@ func displayHost(bind string) string {
 	return "127.0.0.1"
 }
 
-
 // v1.11 — loadAgentKey was removed. Callers now use
 // internal/agentkey.Open which supports both the legacy file-backed
 // ed25519 keys AND the new SE-backed P-256 keys transparently.
-
-// writeAgentKey persists a raw ed25519 private key. Kept ONLY for the
-// remote-claim path (runClaimRemote), which still signs a request
-// out-of-band with the ed25519 key material. New primary claims go
-// through agentkey.Create → the platform-aware backend.
-func writeAgentKeyLegacyEd25519(paths *config.Paths, lookupID string, priv ed25519.PrivateKey) (string, error) {
-	dir := filepath.Join(paths.Root, "agent-keys")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", err
-	}
-	p := filepath.Join(dir, lookupID+".key")
-	if err := os.WriteFile(p, priv, 0o600); err != nil {
-		return "", err
-	}
-	return p, nil
-}
 
 // v1.13.0-rc11 — runClaimStatusNoBearer answers "what's pending on
 // this machine?" without requiring the operator to re-supply the

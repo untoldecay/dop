@@ -568,7 +568,7 @@ dop claim --status [--json]
 | `--skip-approval` | false | Finalize without out-of-band approval. Unsafe for chat handoff. |
 | `--no-tunnel` | false | Serve the approval page on LAN only; bind to `0.0.0.0`. |
 | `--bind` | `127.0.0.1` with tunnel, `0.0.0.0` without | Interface to bind the approval server. |
-| `--remote` | false | No admin daemon here — stage the claim in the vault for `dop approve-remote`. |
+| `--remote` | false | No admin daemon here — stage the claim in the vault for `dop approve-remote`. Needs push on the vault remote. `--key-type` applies. |
 | `--key-type` | "" (auto) | `p256` or `ed25519`. P-256 is required for direct grant edits and bearer rotation. |
 | `--cancel` | false | Delete the in-flight pending claim for `$DOP_TOKEN` and exit. |
 | `--status` | false | Print the pending-claim state and exit. |
@@ -602,17 +602,19 @@ dop reject <SAS>
 
 ### `dop approve-remote`
 
-Admin-side: accept a `dop claim --remote` staged in the vault. Verifies the agent's signature, prompts the passphrase, swaps the bundle, writes an updated signed record, pushes.
+Admin-side: accept a `dop claim --remote` staged in the vault. Verifies the agent's signature, prompts the passphrase, swaps the bundle, writes an updated signed record (with the agent's `key_type`; P-256 bindings get `env_wrapped` sealed on the spot), pushes. The TUI's pending-claims banner lists remote claims next to local ones.
 
 ```
 dop approve-remote --subject <S> [--passphrase-stdin]
+dop approve-remote --subject <S> --reject
 dop approve-remote --list
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--subject` | "" | Required unless `--list`. |
-| `--list` | false | List pending remote claims. |
+| `--list` | false | List pending remote claims (subject, host, key type, pubkey, state). |
+| `--reject` | false | Drop the staged claim for `--subject`, commit, push. No passphrase. |
 | `--passphrase-stdin` | false | Read passphrase from stdin. |
 
 ---

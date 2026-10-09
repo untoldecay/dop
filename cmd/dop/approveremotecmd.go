@@ -27,6 +27,7 @@ func runApproveRemote(args []string) int {
 	fs := flag.NewFlagSet("approve-remote", flag.ExitOnError)
 	subject := fs.String("subject", "", "subject of the remote claim to approve (required unless --list)")
 	list := fs.Bool("list", false, "list pending remote claims and exit")
+	reject := fs.Bool("reject", false, "drop the staged claim for --subject instead of approving it (no passphrase)")
 	pfromStdin := fs.Bool("passphrase-stdin", false, "read approval passphrase from stdin")
 	_ = fs.Parse(args)
 
@@ -68,6 +69,9 @@ func runApproveRemote(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop approve-remote: no pending remote claim for subject %q\n", *subject)
 		return 1
 	}
+	if *reject {
+		return runRejectRemote(paths, match)
+	}
 	if time.Now().After(match.ExpiresAt) {
 		fmt.Fprintf(os.Stderr, "dop approve-remote: this claim expired at %s\n", match.ExpiresAt.Format(time.RFC3339))
 		return 1
@@ -81,7 +85,7 @@ func runApproveRemote(args []string) int {
 	fmt.Fprintln(os.Stderr, "Remote claim:")
 	fmt.Fprintf(os.Stderr, "  subject:      %s\n", match.Subject)
 	fmt.Fprintf(os.Stderr, "  host:         %s\n", match.Host)
-	fmt.Fprintf(os.Stderr, "  pubkey:       %s\n", match.Pubkey)
+	fmt.Fprintf(os.Stderr, "  pubkey:       %s (%s)\n", match.Pubkey, match.EffectiveKeyType())
 	fmt.Fprintf(os.Stderr, "  requested at: %s\n", match.RequestedAt.Format(time.RFC3339))
 	fmt.Fprintf(os.Stderr, "  new gen:      %d\n", match.NewGeneration)
 
@@ -162,9 +166,21 @@ func runApproveRemote(args []string) int {
 	crec.Binding = &vault.Binding{
 		Kind:      vault.BindingKindPIN,
 		Pubkey:    match.Pubkey,
+		KeyType:   match.EffectiveKeyType(),
 		ClaimedAt: claimedAt,
 	}
 	rec := vaultCapability2Record(crec, match.CapabilityID)
+	// P-256 binding: seal EnvWrapped now so direct availability
+	// (add-grant / remove-grant / rotate, bearer-free exec) works from
+	// the first `dop pull` instead of after a manual `dop token reseal`.
+	if match.EffectiveKeyType() == vault.KeyTypeP256 {
+		wrapped, err := sealEnvWrapped(v, &rec)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dop approve-remote: seal env: %v\n", err)
+			return 1
+		}
+		rec.EnvWrapped = wrapped
+	}
 	if err := signRecordViaDaemon(client, &rec); err != nil {
 		fmt.Fprintf(os.Stderr, "dop approve-remote: sign: %v\n", err)
 		return 1
@@ -208,6 +224,33 @@ func runApproveRemote(args []string) int {
 	return 0
 }
 
+// runRejectRemote drops a staged remote claim: pending files removed,
+// committed, pushed. No passphrase — rejecting is safe. The agent's
+// local key becomes an orphan; `dop agent sweep` on that host cleans it.
+func runRejectRemote(paths *config.Paths, match *remoteclaim.Request) int {
+	if err := remoteclaim.Delete(paths, match.LookupID); err != nil {
+		fmt.Fprintf(os.Stderr, "dop approve-remote --reject: %v\n", err)
+		return 1
+	}
+	dir := paths.Vault
+	rel := filepath.Join("pending-remote-claims", match.LookupID)
+	if err := runGit(os.Stderr, dir, "add", "-A", rel+".bundle", rel+".json"); err == nil {
+		if err := runGit(os.Stderr, dir, "commit", "-m", fmt.Sprintf("dop: reject remote claim %s", match.LookupID[:12])); err == nil {
+			if err := runGit(os.Stderr, dir, "push"); err != nil {
+				fmt.Fprintf(os.Stderr, "dop approve-remote --reject: git push failed (%v) — run `dop push` manually\n", err)
+			}
+		}
+	}
+	audit.Append(paths, audit.Event{
+		Kind:     audit.EventClaimDenied,
+		Subject:  match.Subject,
+		LookupID: match.LookupID,
+		Extra:    map[string]string{"reason": "remote_rejected", "host": match.Host},
+	})
+	fmt.Fprintf(os.Stderr, "dop approve-remote: rejected %s (host %s)\n", match.Subject, match.Host)
+	return 0
+}
+
 func runApproveRemoteList(paths *config.Paths) int {
 	all, err := remoteclaim.List(paths)
 	if err != nil {
@@ -219,15 +262,15 @@ func runApproveRemoteList(paths *config.Paths) int {
 		return 0
 	}
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "SUBJECT\tHOST\tPUBKEY\tREQUESTED\tSTATE")
+	fmt.Fprintln(w, "SUBJECT\tHOST\tKEY\tPUBKEY\tREQUESTED\tSTATE")
 	now := time.Now()
 	for _, r := range all {
 		state := "pending"
 		if now.After(r.ExpiresAt) {
 			state = "expired"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s…\t%s\t%s\n",
-			r.Subject, r.Host, shortPub(r.Pubkey),
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s…\t%s\t%s\n",
+			r.Subject, r.Host, r.EffectiveKeyType(), shortPub(r.Pubkey),
 			r.RequestedAt.Format(time.RFC3339), state)
 	}
 	_ = w.Flush()
