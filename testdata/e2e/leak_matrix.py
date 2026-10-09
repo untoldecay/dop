@@ -78,6 +78,10 @@ case("exec bearer-free printenv",       X + ["printenv", "NOTION_TOKEN"], "pipe"
 case("exec write to /dev/tty",         X + ["sh", "-c", 'echo "$NOTION_TOKEN" > /dev/tty'], "pty", "pty")
 case("exec via script(1)",              ["script", "-q", "/dev/null"] + X + ["printenv", "NOTION_TOKEN"], "pipe", "pipe")
 case("exec via expect",                 ["expect", "-c", "spawn " + " ".join(X + ["printenv", "NOTION_TOKEN"]) + "; expect eof"], "pipe", "pipe")
+import shutil
+if shutil.which("sandbox-exec"):  # macOS: a terminal where pty creation is forbidden (Cursor-style sandbox)
+    NOPTY = '(version 1)(allow default)(deny file-read* file-write* (literal "/dev/ptmx"))'
+    case("exec in sandbox without pty",  ["sandbox-exec", "-p", NOPTY] + X + ["printenv", "NOTION_TOKEN"], "pty", "pty")
 case("exec --inherit-env printenv",     [DOP, "exec", "--inherit-env", "--", "printenv", "NOTION_TOKEN"], "pty", "pty")
 # dop env: wrong scripted passphrase so a gate refuses without a desktop popup
 W = {"DOP_APPROVAL_PASSPHRASE": "wrong-on-purpose"}

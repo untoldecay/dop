@@ -30,6 +30,12 @@ import (
 // the child. Signals sent to DOP (TERM, HUP, INT, QUIT) go to the
 // child's process group; SIGWINCH resizes the inner pty. A failed
 // write of masked output kills the child — never unmasked output.
+// errPTYUnavailable means no pseudo-terminal could be opened, before
+// the child started — execChild then runs it on masked pipes instead.
+type errPTYUnavailable struct{ err error }
+
+func (e errPTYUnavailable) Error() string { return "pty unavailable: " + e.err.Error() }
+
 func runPTYRedacted(bin string, argv, finalEnv []string, env map[string]string) error {
 	vals, labels := redactTargets(env)
 	out := newRedactWriter(os.Stdout, vals, labels)
@@ -43,7 +49,9 @@ func runPTYRedacted(bin string, argv, finalEnv []string, env map[string]string) 
 	}
 	ptmx, err := pty.StartWithSize(cmd, size)
 	if err != nil {
-		return err
+		// No pty here (sandboxes such as Cursor's forbid /dev/ptmx).
+		// The child hasn't started: the caller falls back to masked pipes.
+		return errPTYUnavailable{err}
 	}
 	defer ptmx.Close()
 	pid := cmd.Process.Pid

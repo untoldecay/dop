@@ -1021,7 +1021,13 @@ func execChild(argv []string, env map[string]string, cleanEnv bool) error {
 	// including stdio protocols like MCP — stay plain pipes, stdout and
 	// stderr kept separate, only exact key values replaced.
 	if term.IsTerminal(int(os.Stdout.Fd())) && term.IsTerminal(int(os.Stderr.Fd())) {
-		return runPTYRedacted(bin, argv, finalEnv, env)
+		err := runPTYRedacted(bin, argv, finalEnv, env)
+		var nopty errPTYUnavailable
+		if !errors.As(err, &nopty) {
+			return err
+		}
+		// Sandboxed terminal without pty access: still masked, through
+		// pipes (the child just doesn't get a tty).
 	}
 	return runRedacted(bin, argv, finalEnv, env)
 }
