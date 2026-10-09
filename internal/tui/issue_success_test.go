@@ -107,7 +107,7 @@ func TestIssueSuccessPinCopiesHandoff(t *testing.T) {
 	t.Cleanup(func() { clipboardCopy = orig })
 	v := &issueView{}
 	v.Update(issueResultMsg{bearer: "dop_bearer_xyz", pin: "123456"})
-	if len(copies) != 1 || copies[0] != buildHandoffText("dop_bearer_xyz", "123456", false) {
+	if len(copies) != 1 || copies[0] != buildHandoffText("dop_bearer_xyz", "123456", false, false) {
 		t.Fatalf("PIN-bound result should copy the handoff, got %q", copies)
 	}
 }

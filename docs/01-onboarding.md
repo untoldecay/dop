@@ -85,7 +85,7 @@ dop init --cache git@github.com:you/vault.git     # deploy key with write access
 DOP_TOKEN=tok_1aB... DOP_ALLOW_FILE_KEYS=1 dop claim --remote --key-type p256 ZZ-NR-NY
 ```
 
-On Alice's machine the TUI banner shows `1 claim pending, press a to review`; the row reads `remote · <hostname>`. She approves with the approval passphrase, or from the CLI:
+When issuing from the TUI, answer **a server** at the *Runs on* step and the handoff you paste to the agent already carries `--remote` and the P-256 flags. Once the agent runs it, Alice's TUI banner shows `1 claim pending, press a to review`; the row reads `remote · <hostname>`. She approves with the approval passphrase, or from the CLI:
 
 ```bash
 dop approve-remote --list

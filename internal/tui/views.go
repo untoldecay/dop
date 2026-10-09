@@ -236,8 +236,8 @@ func (v *loginView) View() string {
 // ---------- Issue bearer ----------
 
 // issueView — a wizard: subject → grants → expiry (→ custom) →
-// portable (→ approval passphrase), then the review, the issuing
-// spinner and the bearer handoff.
+// portable (→ runs on) (→ approval passphrase), then the review, the
+// issuing spinner and the bearer handoff.
 type issueView struct {
 	wiz
 	client *admin.Client
@@ -250,6 +250,7 @@ type issueView struct {
 	expiryCur  int
 	custom     textinput.Model
 	portCur    int
+	runsCur    int             // runsOnPresets index; only asked when not portable
 	passphrase textinput.Model // approval passphrase, only for protected grants
 
 	issuing bool
@@ -277,6 +278,7 @@ const (
 	issueStepExpiry
 	issueStepCustom
 	issueStepPortable
+	issueStepRunsOn
 	issueStepPass
 	issueStepReview
 )
@@ -325,6 +327,18 @@ var portablePresets = []struct {
 	{"yes", true, "export it again later with dop use <subject>"},
 }
 
+// runsOnPresets drives the "Runs on" step. A server (the Server entry
+// of the fresh-install menu) has no admin, so the agent claims with
+// --remote and the approval lands in this TUI's pending banner.
+var runsOnPresets = []struct {
+	label string
+	value bool // remote
+	hint  string
+}{
+	{"this machine", false, "agent claims here, you approve in this TUI"},
+	{"a server", true, "agent claims with --remote, approve from the pending banner"},
+}
+
 func newIssueView(c *admin.Client, p *config.Paths) *issueView {
 	v := &issueView{client: c, paths: p, prefs: LoadPrefs(p)}
 	v.subject, v.grantsCSV, v.custom, v.passphrase = newFormInput(false), newFormInput(false), newFormInput(false), newFormInput(true)
@@ -341,6 +355,9 @@ func (v *issueView) flow() []int {
 		s = append(s, issueStepCustom)
 	}
 	s = append(s, issueStepPortable)
+	if !v.portable() {
+		s = append(s, issueStepRunsOn)
+	}
 	if v.protectedCount() > 0 {
 		s = append(s, issueStepPass)
 	}
@@ -369,6 +386,7 @@ func (v *issueView) expiryValue() string {
 }
 
 func (v *issueView) portable() bool { return portablePresets[v.portCur].value }
+func (v *issueView) remote() bool   { return !v.portable() && runsOnPresets[v.runsCur].value }
 
 // collidingPrefixes returns prefix → grant-IDs when two or more of sel
 // share the same env prefix.
@@ -439,12 +457,16 @@ func (v *issueView) summaryRows() [][2]string {
 	if v.portable() {
 		portable = "yes"
 	}
-	return [][2]string{
+	rows := [][2]string{
 		{"subject", strings.TrimSpace(v.subject.Value())},
 		{"grants", strings.Join(v.selectedGrants(), ", ")},
 		{"expires", v.expiryValue()},
 		{"portable", portable},
 	}
+	if !v.portable() {
+		rows = append(rows, [2]string{"runs on", runsOnPresets[v.runsCur].label})
+	}
+	return rows
 }
 
 func (v *issueView) Init() tea.Cmd { return nil }
@@ -493,7 +515,8 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Copy once here, not in View (which repaints on every msg).
 		v.copied = clipboardCopy(v.handoff())
 		// allow-file-keys: watch the record for the claim, then reseal.
-		if v.prefs.AllowFileKeys && v.pin != "" {
+		// Not for a server: approve-remote seals at approval time.
+		if v.prefs.AllowFileKeys && v.pin != "" && !v.remote() {
 			return v, v.watchForClaimAndReseal()
 		}
 		return v, nil
@@ -539,6 +562,8 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			stepCursor(&v.expiryCur, len(expiryPresets), map[string]int{"up": -1, "down": 1}[k])
 		case v.step == issueStepPortable && (k == "up" || k == "down"):
 			stepCursor(&v.portCur, len(portablePresets), map[string]int{"up": -1, "down": 1}[k])
+		case v.step == issueStepRunsOn && (k == "up" || k == "down"):
+			stepCursor(&v.runsCur, len(runsOnPresets), map[string]int{"up": -1, "down": 1}[k])
 		case in != nil:
 			edit(in, mm)
 		}
@@ -723,7 +748,7 @@ func looksLikePIN(s string) bool {
 
 // handoff is the clipboard text for the agent (contract 13 shape).
 func (v *issueView) handoff() string {
-	return bearerHandoff(v.bearer, v.pin, v.prefs.AllowFileKeys)
+	return bearerHandoff(v.bearer, v.pin, v.prefs.AllowFileKeys, v.remote())
 }
 
 // bearerKey handles the one-time bearer screen: a stray key must not
@@ -749,7 +774,10 @@ func (v *issueView) View() string {
 			cmd = "run " + strings.TrimSpace(h[len(h)-1])
 		}
 		after := useGuidance(v.prefs.Harness, subject, v.portable(), cmd)
-		if v.prefs.AllowFileKeys && v.pin != "" && !v.portable() {
+		switch {
+		case v.remote():
+			after = append(after, "The claim lands in this TUI's pending banner; approve it there.")
+		case v.prefs.AllowFileKeys && v.pin != "" && !v.portable():
 			after = append(after, displayOr(v.resealFlash, "Auto-reseal runs once the agent claims."))
 		}
 		return onceScreen(v.width, v.height, "✓ Bearer issued", subject, v.bearer, v.pin, after, v.leaveArmed, v.copied)
@@ -794,6 +822,12 @@ func (v *issueView) View() string {
 			o = append(o, [2]string{p.label, p.hint})
 		}
 		prompt, input = "Portable", optRows(o, v.portCur)
+	case issueStepRunsOn:
+		var o [][2]string
+		for _, p := range runsOnPresets {
+			o = append(o, [2]string{p.label, p.hint})
+		}
+		prompt, input = "Runs on", optRows(o, v.runsCur)
 	case issueStepPass:
 		prompt, input, helper = "Approval passphrase", []string{inputRow(&v.passphrase)}, "The selection includes protected grants."
 	}
@@ -1641,7 +1675,7 @@ func (v *listView) portNeedsPass() bool {
 }
 
 func (v *listView) portHandoff() string {
-	return bearerHandoff(v.portNew, v.portPin, LoadPrefs(v.paths).AllowFileKeys)
+	return bearerHandoff(v.portNew, v.portPin, LoadPrefs(v.paths).AllowFileKeys, false)
 }
 
 // doPortable shells out to dop token portable (or repin); the passphrase
