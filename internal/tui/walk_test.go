@@ -442,8 +442,8 @@ func TestWalkScreens(t *testing.T) {
 func walkSetup(w *walker) {
 	w.flow = "setup"
 	w.reset()
-	w.dump("menu-fresh", "Menu · fresh install · cursor on Setup admin", "key")
-	for _, r := range []string{"Attach vault", "Join existing vault", "Doctor", "Uninstall", "Quit"} {
+	w.dump("menu-fresh", "Menu · fresh install · cursor on New setup", "key")
+	for _, r := range []string{"Join", "Server", "Doctor", "Uninstall", "Quit"} {
 		w.keys("down")
 		w.dump("menu-fresh-"+strings.ToLower(strings.Fields(r)[0]), "Menu · fresh install · cursor on "+r)
 	}
@@ -491,26 +491,28 @@ func walkSetup(w *walker) {
 	w.send("setupInitDone", setupInitDone{err: "admin key already exists at ~/Library/Application Support/dop/keys/admin.age.enc"})
 	w.dump("setup-admin-init-failed", "Setup admin · init failed (review + error)", "edge")
 
-	// Attach vault (agent install): single step
+	// Server (agents only): single step, then a done screen
 	w.reset()
-	w.keys("down", "enter")
-	w.dump("attach-agent-empty", "Attach vault · agent install · empty")
+	w.keys("down", "down", "enter")
+	w.dump("attach-agent-empty", "Server · agents only · empty")
 	w.keys("enter")
-	w.dump("attach-agent-required", "Attach vault · URL required", "edge")
+	w.dump("attach-agent-required", "Server · URL required", "edge")
 	w.keys("git@github.com:acme/dop-vault.git")
-	w.dump("attach-agent-typed", "Attach vault · URL typed")
+	w.dump("attach-agent-typed", "Server · URL typed")
 	w.keys("enter")
-	w.dump("attach-agent-cloning", "Attach vault · cloning")
+	w.dump("attach-agent-cloning", "Server · cloning")
 	w.send("attachResultMsg", attachResultMsg{err: "git clone: repository 'acme/dop-vault' not found"})
-	w.dump("attach-agent-error", "Attach vault · clone failed", "edge")
+	w.dump("attach-agent-error", "Server · clone failed", "edge")
 	w.reset()
-	w.keys("down", "enter", "git@github.com:acme/dop-vault.git", "enter")
+	w.keys("down", "down", "enter", "git@github.com:acme/dop-vault.git", "enter")
 	w.send("attachResultMsg", attachResultMsg{})
-	w.dump("attach-agent-done", "Attach vault · done → menu flash")
+	w.dump("attach-agent-done", "Server · done → next steps", "key")
+	w.keys("enter")
+	w.dump("attach-agent-menu", "Server · back to menu · flash")
 
 	// Join existing vault
 	w.reset()
-	w.keys("down", "down", "enter")
+	w.keys("down", "enter")
 	w.dump("join-url-empty", "Join vault · 1 of 5 · URL empty")
 	w.keys("enter")
 	w.dump("join-url-required", "Join vault · URL required", "edge")
@@ -534,7 +536,7 @@ func walkSetup(w *walker) {
 	w.dump("join-done", "Join vault · done → menu flash")
 
 	w.reset()
-	w.keys("down", "down", "enter", "git@github.com:acme/dop-vault.git", "enter", "AB-CD-EF", "enter", "enter")
+	w.keys("down", "enter", "git@github.com:acme/dop-vault.git", "enter", "AB-CD-EF", "enter", "enter")
 	w.dump("join-new-admin", "Join vault · separate identity · new admin passphrase")
 	w.keys("hunter2", "enter")
 	w.dump("join-new-admin-short", "Join vault · new admin passphrase too short", "edge")

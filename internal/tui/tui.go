@@ -20,7 +20,6 @@ import (
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
-	"github.com/fray/dop/internal/pendingclaim"
 	"github.com/fray/dop/internal/version"
 )
 
@@ -209,16 +208,10 @@ func (m *rootModel) refreshState() {
 	} else {
 		m.session = sessionLocked
 	}
-	// v1.7 — pending-claim banner. Only counts non-expired entries.
-	m.pendingCount = 0
-	if all, err := pendingclaim.List(paths); err == nil {
-		now := time.Now()
-		for _, r := range all {
-			if !r.Expired(now) {
-				m.pendingCount++
-			}
-		}
-	}
+	// v1.7 — pending-claim banner. Only counts non-expired entries
+	// (local PIN claims + remote claims staged in the vault repo).
+	rows, _ := pendingRows(paths)
+	m.pendingCount = len(rows)
 }
 
 func (m *rootModel) rebuildMenu() {
@@ -237,9 +230,11 @@ func (m *rootModel) rebuildMenu() {
 	case m.install == installNoKey:
 		// Setup mode: no section headers (per TUI_GUIDELINES.md).
 		m.menu = []menuItem{
-			{label: "Setup admin", hint: "generate + wrap admin keys", key: "S", fn: (*rootModel).openSetupAdmin},
-			{label: "Attach vault", hint: "join an existing vault as agent", key: "a", fn: (*rootModel).openAttachAgent},
-			{label: "Join existing vault", hint: "become an admin device via invite PIN", key: "j", fn: (*rootModel).openJoin},
+			// One question: what is this machine? Admin (new vault),
+			// admin (invited), or a box that only runs agents.
+			{label: "New setup", hint: "fresh vault, new admin · not for remote servers", key: "n", fn: (*rootModel).openSetupAdmin},
+			{label: "Join", hint: "as invited admin or second device · needs an invite", key: "j", fn: (*rootModel).openJoin},
+			{label: "Server", hint: "runs agents only, no admin key here · needs the vault URL", key: "s", fn: (*rootModel).openAttachAgent},
 			{label: "Doctor", hint: "health check", key: "d", fn: (*rootModel).openDoctor},
 			{label: "Uninstall", hint: "wipe DOP from this machine", fn: (*rootModel).openReset},
 			{label: "Quit", hint: "exit", key: "q", fn: (*rootModel).quit},

@@ -216,7 +216,7 @@ func (v *setupAdminView) login(pass string) tea.Cmd {
 }
 
 func (v *setupAdminView) View() string {
-	const title = "Setup admin"
+	const title = "New setup"
 	switch v.step {
 	case setupStepRunning:
 		return v.running(title, "Generating admin keys")
@@ -239,13 +239,16 @@ func (v *setupAdminView) View() string {
 // ---------- Attach vault ----------
 
 // attachVaultView: one question (vault URL/path), then dop init --vault
-// (admin install) or dop init --cache (agent install).
+// (admin install) or dop init --cache ("Server": a box that only runs
+// agents). The server path ends on a done screen that says what comes
+// next, since nothing else in the menu will.
 type attachVaultView struct {
 	wiz
 	paths          *config.Paths
 	adminIsPresent bool
 	url            textinput.Model
 	running        bool
+	finished       bool // server path: show the done screen until a key
 	err            string
 	done           bool
 	flash          string
@@ -273,10 +276,19 @@ func (v *attachVaultView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.err = "Attach failed: " + firstLine(mm.err)
 			return v, nil
 		}
+		if !v.adminIsPresent {
+			v.finished = true
+			return v, nil
+		}
 		v.flash = "vault attached"
 		v.done = true
 	case tea.KeyMsg:
 		if v.running {
+			return v, nil
+		}
+		if v.finished {
+			v.flash = "vault attached"
+			v.done = true
 			return v, nil
 		}
 		if mm.String() != "enter" {
@@ -319,16 +331,26 @@ func (v *attachVaultView) attach(u string) tea.Cmd {
 }
 
 func (v *attachVaultView) View() string {
-	const title = "Attach vault"
-	if v.running {
-		return v.wiz.running(title, "Cloning "+strings.TrimSpace(v.url.Value()))
-	}
-	kind := "admin install"
+	title, kind := "Attach vault", "admin install"
 	if !v.adminIsPresent {
-		kind = "agent install"
+		title, kind = "Server", "agents only · no admin key is created on this machine"
+	}
+	u := strings.TrimSpace(v.url.Value())
+	if v.running {
+		return v.wiz.running(title, "Cloning "+u)
+	}
+	if v.finished {
+		return v.doneScreen("This machine now hosts agents", [][2]string{
+			{"vault", u},
+			{"next", "issue a bearer on your admin machine, paste the handoff here"},
+			{"approve", "pending banner on your admin machine"},
+		}, "", "")
 	}
 	km := wizKeys("attach")
 	km.notes = []string{"An https or ssh git URL, or a local path (a bare repo is created there)."}
+	if !v.adminIsPresent {
+		km.notes = append(km.notes, "Agents claim bearers here with dop claim --remote, so the git key needs push access.")
+	}
 	return v.screen(title, kind, "Vault repo URL or local path", []string{inputRow(&v.url)},
 		"A local path that does not exist yet is created.", v.err, "", km)
 }

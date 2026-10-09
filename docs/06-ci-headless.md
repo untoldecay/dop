@@ -77,6 +77,10 @@ dop token issue --grants notion.read \
 
 No PIN, no agent key, no claim. The bearer in `$DOP_TOKEN` is sufficient. This is a PAT with DOP's audit log and scope wrapping on top — anyone who exfiltrates the secret can use it from anywhere until you revoke. Fine for self-hosted hardened runners with narrow scopes and short expiry; prefer Pattern 1 for anything persistent or privileged.
 
+## Pattern 3: remote claim
+
+A long-lived runner that can hold the vault repo (with push) but has no admin claims by itself: pick **Server** in the TUI's first menu or run `dop init --cache <remote>`, then `dop claim --remote <PIN>` stages the claim in the repo and the admin approves from the TUI or `dop approve-remote`. Same key-type rules as a local claim (`--key-type p256` + `DOP_ALLOW_FILE_KEYS=1` on Linux), and approval seals the env for P-256 keys so direct availability works from the first pull. Walkthrough in [01-onboarding.md › Remote server](01-onboarding.md#remote-server).
+
 ## Where the bearer lives
 
 DOP reads the bearer from `$DOP_TOKEN`, then `--token-file <path>`, then `$DOP_TOKEN_FILE`. Where you store it on the way in — GitHub Actions secrets, Vault, Doppler, Nomad variables, Dagger secret mounts — is up to you. The bearer is 36 printable bytes (`tok_1` + 32 hex); any secret store that round-trips strings handles it. Use `--token-file` when your secret manager writes a tmpfs mount; use `$DOP_TOKEN` for env-based delivery.
@@ -94,7 +98,7 @@ dop token issue --grants notion.read --name gha-notion-sync \
 
 Audit log threads revoke → new issue by subject name. Upstream credential rotation (new Notion token in the vault) propagates automatically on the next `dop pull` — no bearer rotation needed.
 
-Transparent in-place grant and bearer rotation (admin edits scopes, agent picks up changes without reissue) is the P-256 / ECDH work from [docs/04-secure-elements.md](04-secure-elements.md). Until that lands, revoke + reissue is the path.
+For P-256-bound bearers (`--key-type p256`), `dop token add-grant` / `remove-grant` / `rotate` propagate in place — the agent picks up changes on its next `dop exec` without a reissue. See [docs/04-secure-elements.md](04-secure-elements.md). Ed25519-bound bearers still need revoke + reissue.
 
 ## Threat callback
 

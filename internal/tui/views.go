@@ -127,7 +127,7 @@ func (v *doctorView) View() string {
 	if admin.KeyFileExists(v.paths) {
 		line("✓", "admin key", "admin install", "")
 	} else {
-		line("!", "admin key", "agent install, no admin key", "Set up an admin key from the menu to manage the vault.")
+		line("!", "admin key", "server install (agents only), no admin key", "Pick New setup from the menu if this machine should manage the vault.")
 	}
 	vp := v.paths.Vault + "/vault.yaml"
 	if _, err := os.Stat(vp); err == nil {
