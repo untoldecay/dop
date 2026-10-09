@@ -890,12 +890,14 @@ type listView struct {
 	viewerPubkey string
 
 	// v1.10.0 picker state
-	mode          int    // listMode*
-	cursor        int    // index into visible()
-	actionCursor  int    // index into currentActions()
-	pendingAction string // revoke, reseal, add, remove, repin: the action in flight
-	revoked       bool   // Revoked tab (false → Active)
-	help          bool   // ? expanded help (list + detail)
+	mode          int             // listMode*
+	cursor        int             // index into visible()
+	actionCursor  int             // index into currentActions()
+	pendingAction string          // revoke, reseal, add, remove, repin: the action in flight
+	tab           int             // listTab*: Active, Revoked, Pending (claims awaiting approval)
+	pending       []pendingRow    // Pending tab rows: local PIN claims + remote claims
+	pendPass      textinput.Model // approval passphrase for a pending claim
+	help          bool            // ? expanded help (list + detail)
 	err           string
 	flash         string
 
@@ -959,19 +961,37 @@ var repinTTLPresets = []struct {
 //	listModeRun     subprocess in flight
 //	listModeDone    ✓ outcome, any key back to the list
 const (
+	listTabActive  = 0
+	listTabRevoked = 1
+	listTabPending = 2
+)
+
+const (
 	listModeList      = 0
 	listModeAction    = 1
 	listModeConfirm   = 2
 	listModeRun       = 3
-	listModeGrantPick = 5 // add-grant / remove-grant picker
-	listModeRepin     = 6 // PIN validity picker
-	listModeDone      = 7 // ✓ outcome (revoke, reseal, grants, repin, portable)
-	listModePortable  = 8 // portable copy on/off wizard
-	listModeReissue   = 9 // claimed bearer: rotate (keep key) or new claim
+	listModeGrantPick = 5  // add-grant / remove-grant picker
+	listModeRepin     = 6  // PIN validity picker
+	listModeDone      = 7  // ✓ outcome (revoke, reseal, grants, repin, portable)
+	listModePortable  = 8  // portable copy on/off wizard
+	listModeReissue   = 9  // claimed bearer: rotate (keep key) or new claim
+	listModePendPass  = 10 // Pending tab: approval passphrase for a claim
+	listModePendRejct = 11 // Pending tab: confirm reject
 )
 
 func newListView(c *admin.Client, p *config.Paths) *listView {
-	return &listView{client: c, paths: p}
+	return &listView{client: c, paths: p, pendPass: newFormInput(true)}
+}
+
+func (v *listView) revoked() bool { return v.tab == listTabRevoked }
+
+// pendingRowAt is the Pending tab's cursor row (zero value if none).
+func (v *listView) pendingRowAt() pendingRow {
+	if v.tab == listTabPending && v.cursor < len(v.pending) {
+		return v.pending[v.cursor]
+	}
+	return pendingRow{}
 }
 func (v *listView) Init() tea.Cmd { return v.load }
 func (v *listView) Done() bool    { return v.done }
@@ -983,6 +1003,7 @@ type listLoadedMsg struct {
 	viewerPubkey string
 	adminNames   map[string]string
 	grants       map[string]vault.Grant
+	pending      []pendingRow
 	err          string
 }
 type listActionMsg struct {
@@ -1044,19 +1065,31 @@ func (v *listView) load() tea.Msg {
 	for n, a := range vv.Admins {
 		names[a.Ed25519Pubkey] = n
 	}
-	return listLoadedMsg{capabilities: caps, capIDs: ids, viewerPubkey: viewerPubkey, adminNames: names, grants: vv.Grants}
+	pend, _ := pendingRows(v.paths) // best-effort, like the root banner
+	return listLoadedMsg{capabilities: caps, capIDs: ids, viewerPubkey: viewerPubkey, adminNames: names, grants: vv.Grants, pending: pend}
 }
 
 // visible returns the indexes into v.capabilities that should be shown
 // under the current tab (Active, or Revoked = everything not active).
 func (v *listView) visible() []int {
 	out := []int{}
+	if v.tab == listTabPending {
+		return out
+	}
 	for i, c := range v.capabilities {
-		if (c.Status == capability.RecordStatusActive) == !v.revoked {
+		if (c.Status == capability.RecordStatusActive) == !v.revoked() {
 			out = append(out, i)
 		}
 	}
 	return out
+}
+
+// rowCount is what the list cursor ranges over on the current tab.
+func (v *listView) rowCount() int {
+	if v.tab == listTabPending {
+		return len(v.pending)
+	}
+	return len(v.visible())
 }
 
 func (v *listView) selectedIndex() int {
@@ -1118,8 +1151,24 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.viewerPubkey = mm.viewerPubkey
 		v.adminNames = mm.adminNames
 		v.vgrants = mm.grants
+		v.pending = mm.pending
 		v.loadErr = mm.err
-		v.cursor = max(min(v.cursor, len(v.visible())-1), 0)
+		v.cursor = max(min(v.cursor, v.rowCount()-1), 0)
+	case pendingResultMsg:
+		if mm.err != "" {
+			v.err, v.mode = firstLine(mm.err), listModeList
+			if !mm.reject {
+				v.mode = listModePendPass
+				v.pendPass.Reset()
+			}
+			return v, nil
+		}
+		v.mode, v.flash = listModeList, "Claim approved"
+		if mm.reject {
+			v.flash = "Claim rejected"
+		}
+		v.loaded = false
+		return v, v.load
 	case listActionMsg:
 		if mm.err != "" && v.mode == listModeRun && v.pendingAction == "portable-off" {
 			v.portableErr("Portable copy failed: " + cliErr(mm.err))
@@ -1172,6 +1221,8 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateActionMode(mm)
 		case listModeConfirm:
 			return v.updateConfirmMode(mm)
+		case listModePendPass, listModePendRejct:
+			return v.updatePendingMode(mm)
 		case listModeGrantPick:
 			return v.updateGrantPickMode(mm)
 		case listModeRepin:
@@ -1214,9 +1265,26 @@ func cliErr(e string) string {
 func (v *listView) updateListMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	vis := v.visible()
 	v.err = ""
+	if v.tab == listTabPending {
+		switch k := mm.String(); k {
+		case "enter", "a":
+			if len(v.pending) > 0 {
+				v.mode, v.doneSubj = listModePendPass, v.pending[v.cursor].subject
+				v.pendPass.Reset()
+			}
+			return v, nil
+		case "r", "d":
+			if len(v.pending) > 0 {
+				v.mode, v.doneSubj = listModePendRejct, v.pending[v.cursor].subject
+			}
+			return v, nil
+		case "x", "s", "p":
+			return v, nil
+		}
+	}
 	switch k := mm.String(); k {
 	case "x":
-		if !v.revoked {
+		if !v.revoked() {
 			break
 		}
 		if v.pruneCount() == 0 {
@@ -1231,12 +1299,13 @@ func (v *listView) updateListMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.cursor--
 		}
 	case "down", "j":
-		if v.cursor < len(vis)-1 {
+		if v.cursor < v.rowCount()-1 {
 			v.cursor++
 		}
-	case "tab", "shift+tab":
-		v.revoked = !v.revoked
-		v.cursor = 0
+	case "tab":
+		v.tab, v.cursor = (v.tab+1)%3, 0
+	case "shift+tab":
+		v.tab, v.cursor = (v.tab+2)%3, 0
 	case "enter":
 		if len(vis) == 0 {
 			return v, nil
@@ -1254,6 +1323,56 @@ func (v *listView) updateListMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return v, nil
+}
+
+// updatePendingMode drives approve (passphrase) / reject (confirm) of
+// the Pending tab's cursor row; the shell-outs are the banner picker's.
+func (v *listView) updatePendingMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := mm.String()
+	if k != "enter" {
+		v.err = ""
+	}
+	switch {
+	case k == "esc" || k == "ctrl+c":
+		v.mode = listModeList
+		v.pendPass.Reset()
+	case v.mode == listModePendRejct && (k == "enter" || k == "y"):
+		if cmd := v.locked(mm, &v.err); cmd != nil {
+			return v, cmd
+		}
+		v.mode, v.pendingAction = listModeRun, "reject-claim"
+		return v, runPendingRow(v.pendingRowAt(), true, "")
+	case v.mode == listModePendRejct && k == "n":
+		v.mode = listModeList
+	case v.mode == listModePendPass && k == "enter":
+		if v.pendPass.Value() == "" {
+			v.err = "Approval passphrase is required"
+			return v, nil
+		}
+		if cmd := v.locked(mm, &v.err); cmd != nil {
+			return v, cmd
+		}
+		v.mode, v.pendingAction = listModeRun, "approve-claim"
+		return v, runPendingRow(v.pendingRowAt(), false, v.pendPass.Value())
+	case v.mode == listModePendPass:
+		edit(&v.pendPass, mm)
+	}
+	return v, nil
+}
+
+// viewPending renders the approve / reject screens of the Pending tab.
+func (v *listView) viewPending(width, height int) string {
+	w := wiz{width: width, height: height, help: v.help}
+	row := v.pendingRowAt()
+	from := "PIN " + row.sas
+	if row.remote() {
+		from = "remote · " + row.host
+	}
+	if v.mode == listModePendRejct {
+		lines := []string{mutedSt.Render("  " + from), mutedSt.Render("  The agent has to claim again if this was a mistake.")}
+		return w.confirmScreen("Reject "+row.subject+"?", lines, "reject", v.err)
+	}
+	return w.screen("Approve "+row.subject, "", "Approval passphrase", []string{inputRow(&v.pendPass)}, "", v.err, from, wizKeys("approve"))
 }
 
 func (v *listView) updateActionMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1850,6 +1969,8 @@ func (v *listView) View() string {
 		return v.viewPortable(width, height)
 	case listModeDone:
 		return v.viewDone(width, height)
+	case listModePendPass, listModePendRejct:
+		return v.viewPending(width, height)
 	}
 
 	vis := v.visible()
@@ -1859,19 +1980,29 @@ func (v *listView) View() string {
 			nAct++
 		}
 	}
-	tabs := []tab{{"Active", nAct, !v.revoked}, {"Revoked", len(v.capabilities) - nAct, v.revoked}}
-	other := "revoked"
-	if v.revoked {
-		other = "active"
-	}
+	tabs := []tab{{"Active", nAct, v.tab == listTabActive}, {"Revoked", len(v.capabilities) - nAct, v.tab == listTabRevoked}, {"Pending", len(v.pending), v.tab == listTabPending}}
+	other := [3]string{"revoked", "pending", "active"}[v.tab]
 	km := bearerListKeys
 	km.short = []key.Binding{keyOpen, hint("tab", other), keyBack}
-	if v.revoked {
+	switch v.tab {
+	case listTabRevoked:
 		km.short = []key.Binding{keyOpen, hint("x", "prune"), hint("tab", other), keyBack}
+	case listTabPending:
+		km.short = []key.Binding{hint("enter", "approve"), hint("r", "reject"), hint("tab", other), keyBack}
 	}
 	st := status{err: v.err, flash: v.flash}
 	var body []string
 	switch {
+	case v.tab == listTabPending && len(v.pending) > 0:
+		body = v.renderPending()
+		row := v.pending[v.cursor]
+		h := "key " + midTrunc(row.pubkey, 24)
+		if row.keyType != "" {
+			h = row.keyType + " " + h
+		}
+		st.setHint(h)
+	case v.tab == listTabPending:
+		body = append(body, bodySt.Render("  No pending claims. An agent's dop claim (local or --remote) shows up here."))
 	case len(vis) > 0:
 		// The table gets the body rows the open help leaves, so 16+
 		// bearers scroll inside it while status and footer stay put.
@@ -1881,26 +2012,49 @@ func (v *listView) View() string {
 		}
 		body = append(body, v.renderTable(vis, width, rows))
 		st.setHint(v.rowHint(vis[v.cursor]))
-	case v.revoked:
+	case v.revoked():
 		body = append(body, bodySt.Render("  No revoked bearers."))
 	case len(v.capabilities) == 0:
 		body = append(body, bodySt.Render("  No bearers yet. Issue one from the menu: Issue."))
 	default:
 		body = append(body, bodySt.Render("  No active bearers. Issue one from the menu: Issue."))
 	}
-	if len(vis) == 0 {
-		km.short = km.short[1:] // nothing to open
+	if v.rowCount() == 0 {
+		km.short = km.short[1:] // nothing to open / approve
+		if v.tab == listTabPending {
+			km.short = km.short[1:] // nor reject
+		}
 	}
 	body = km.overlay(body, width, frameRows(height), v.help)
 	return frame(width, height, "Bearers", tabs, "", body, st.String(), km.footerLine(width, v.help))
 }
 
+// renderPending is the Pending tab body: subject, where the claim came
+// from (PIN or remote host), and how long it stays approvable.
+func (v *listView) renderPending() []string {
+	body := []string{"  " + mutedSt.Render(padTrunc("subject", 24)+"  "+padTrunc("from", 22)+"  expires")}
+	for i, r := range v.pending {
+		from := "PIN " + r.sas
+		if r.remote() {
+			from = "remote · " + r.host
+		}
+		cells := padTrunc(r.subject, 24) + "  " + padTrunc(from, 22)
+		left := "in " + humanDuration(time.Until(r.expiresAt))
+		if i == v.cursor {
+			body = append(body, focusSt.Render("› "+cells+"  "+left))
+		} else {
+			body = append(body, "  "+bodySt.Render(cells)+"  "+mutedSt.Render(left))
+		}
+	}
+	return body
+}
+
 // bearerListKeys is the bearers list's expanded help (short is per tab).
 var bearerListKeys = keyMap{
 	full: [][]key.Binding{
-		{keyMove, hint("enter", "open bearer"), hint("tab", "active / revoked"), keyBack},
+		{keyMove, hint("enter", "open bearer"), hint("tab", "active / revoked / pending"), keyBack},
 		{hint("r", "revoke"), hint("s", "reseal env"), hint("p", "repin (unclaimed only)"), keyQuit},
-		{hint("x", "prune revoked older than 30d (Revoked tab)")},
+		{hint("x", "prune revoked older than 30d (Revoked tab)"), hint("enter / r", "approve / reject a claim (Pending tab)")},
 	},
 	notes: []string{
 		"The status line shows id, generation, binding, portable and owner",
@@ -2009,7 +2163,7 @@ func (v *listView) renderTable(vis []int, width, avail int) string {
 	t := v.tbl
 	t.SetStyles(table.Styles{Header: mutedSt.PaddingRight(2), Cell: lipgloss.NewStyle().PaddingRight(2), Selected: focusSt})
 	exp := "expires"
-	if v.revoked {
+	if v.revoked() {
 		exp = "expired"
 	}
 	t.SetColumns([]table.Column{{Title: "subject", Width: 24}, {Title: exp, Width: 10}, {Title: "grants", Width: max(width-42, 6)}})

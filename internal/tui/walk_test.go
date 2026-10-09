@@ -40,6 +40,7 @@ import (
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/pendingclaim"
+	"github.com/fray/dop/internal/remoteclaim"
 	"github.com/fray/dop/internal/userprefs"
 )
 
@@ -1263,6 +1264,24 @@ func walkBearers(w *walker) {
 	w.keys("?")
 	w.dump("bearer-list-help", "Bearers · expanded help")
 	w.esc()
+	w.esc()
+	// Pending tab: a remote claim staged in the vault repo.
+	must(w.t, remoteclaim.Write(w.paths, remoteclaim.Request{LookupID: "7c1e9f0a2b3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f", Subject: "vps-bot",
+		Pubkey: "04" + strings.Repeat("ab", 64), KeyType: "p256", Host: "hermes-vps", RequestedAt: time.Now(),
+		ExpiresAt: time.Now().Add(20 * time.Hour), NewGeneration: 2}, []byte("bundle")))
+	open()
+	w.keys("tab", "tab")
+	w.dump("bearer-pending", "Bearers · Pending tab (remote claim)", "key")
+	w.keys("enter")
+	w.dump("bearer-pending-pass", "Bearers · Pending · approval passphrase", "key")
+	w.esc()
+	w.keys("r")
+	w.dump("bearer-pending-reject", "Bearers · Pending · reject?", "key")
+	w.keys("enter")
+	w.send("pendingResultMsg", pendingResultMsg{reject: true})
+	must(w.t, remoteclaim.Delete(w.paths, "7c1e9f0a2b3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f"))
+	w.load()
+	w.dump("bearer-pending-rejected", "Bearers · Pending · rejected, flash")
 	w.esc()
 	open()
 	w.keys("enter")

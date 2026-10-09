@@ -102,7 +102,12 @@ func (v *pendingView) Flash() string { return v.flash }
 
 // run shells out in a Cmd, never inside Update.
 func (v *pendingView) run(reject bool) tea.Cmd {
-	row, pass := v.claims[v.cursor], v.pass.Value()
+	return runPendingRow(v.claims[v.cursor], reject, v.pass.Value())
+}
+
+// runPendingRow approves (passphrase on stdin) or rejects one claim,
+// local or remote. Shared by the banner picker and Bearers › Pending.
+func runPendingRow(row pendingRow, reject bool, pass string) tea.Cmd {
 	return func() tea.Msg {
 		if row.remote() {
 			if reject {
@@ -250,7 +255,7 @@ func (v *pendingView) View() string {
 		return v.screen("Approve "+sel.subject, "", "Approval passphrase", []string{inputRow(&v.pass)}, "", v.err, where(sel), wizKeys("approve"))
 	}
 	if len(v.claims) == 0 {
-		return frame(v.width, v.height, title, nil, "", []string{bodySt.Render("  No pending claims. A claim shows here when an agent runs dop claim (or dop claim --remote).")}, status{err: v.err}.String(), footer(v.width, keyBack))
+		return frame(v.width, v.height, title, nil, "", []string{bodySt.Render("  No pending claims. An agent's dop claim (local or --remote) shows up here.")}, status{err: v.err}.String(), footer(v.width, keyBack))
 	}
 	body := []string{"  " + mutedSt.Render(padTrunc("subject", 24)+"  "+padTrunc("from", 22)+"  expires")}
 	for i, r := range v.claims {
