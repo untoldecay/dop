@@ -659,7 +659,9 @@ func runClaimRemote(paths *config.Paths, tokenFile, pinArg, keyType string) int 
 	if pushErr != nil {
 		fmt.Fprintf(os.Stderr, "  ! git push failed (%v) — run `dop push` after resolving\n", pushErr)
 	} else {
-		fmt.Fprintln(os.Stderr, "  pushed to vault repo. After admin approves + pushes, run `dop pull` + retry your exec.")
+		fmt.Fprintln(os.Stderr, "  pushed to vault repo. Once the admin approves, run:")
+		fmt.Fprintf(os.Stderr, "    dop exec --agent-name %s -- <cmd>\n", env.Subject)
+		fmt.Fprintln(os.Stderr, "  No DOP_TOKEN needed from then on — this host's agent key is the proof. Drop the bearer from your env.")
 	}
 	return 0
 }

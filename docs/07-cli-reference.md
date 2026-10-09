@@ -337,7 +337,7 @@ dop grant add --id <ID> --integration <N> --token <T>
 | `--id` | "" | Grant id, e.g. `notion.read` (required). |
 | `--integration` | "" | Integration name (required). |
 | `--token` | "" | Upstream token name (required). |
-| `--env-prefix` | "" | Env var prefix. Default `<INTEGRATION>_<TOKEN>`, sanitized. |
+| `--env-prefix` | "" | Env var prefix. Default `<INTEGRATION>_<TOKEN>`, sanitized; just `<INTEGRATION>` when the token is named like its integration. |
 | `--projects` | "" | Comma-separated project tags (cosmetic grouping). |
 | `--tags` | "" | Comma-separated free-form tags. |
 

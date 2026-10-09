@@ -271,6 +271,11 @@ func (g Grant) EffectivePrefix() string {
 	if g.EnvPrefix != "" {
 		return SanitizeEnvKey(g.EnvPrefix)
 	}
+	// An integration whose token carries the same name (notion / notion)
+	// would otherwise read NOTION_NOTION_TOKEN; collapse to NOTION_TOKEN.
+	if SanitizeEnvKey(g.Integration) == SanitizeEnvKey(g.Token) {
+		return SanitizeEnvKey(g.Integration)
+	}
 	return SanitizeEnvKey(g.Integration + "_" + g.Token)
 }
 

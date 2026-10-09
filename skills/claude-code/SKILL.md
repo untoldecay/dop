@@ -22,6 +22,18 @@ DOP holds service credentials in a per-agent scoped vault. Always invoke the tar
 
 ## Onboarding (first time the user hands you access)
 
+## Which kind of bearer do you have?
+
+Three kinds exist and each has one correct way in. Check with `dop whoami` if unsure.
+
+| You were given | Kind | How to use it |
+|---|---|---|
+| bearer + PIN (`dop claim …` in the handoff) | **claimed** | run the claim once; from then on `dop exec --agent-name <subject> -- <cmd>` with **no `DOP_TOKEN`** — this host's agent key is the proof |
+| a subject name and `/dop-use` or `dop use` | **portable** | `eval "$(dop use <subject>)" && dop exec --agent-name <task> -- <cmd>` in every shell call |
+| a bare bearer, no PIN | **unbound** | `DOP_TOKEN=<bearer> dop exec --agent-name <task> -- <cmd>` |
+
+Never `eval "$(dop env)"`: it puts the raw keys in your shell. `dop env` is refused for claimed bearers anyway. Never write a key's value into a command; reference it by name inside the child, e.g. `dop exec --agent-name x -- sh -c 'curl -H "Authorization: Bearer $NOTION_TOKEN" …'`.
+
 If the user hands you the DOP welcome text (starts with "You have been given scoped credential access via DOP"), it already contains the exact command. Run it verbatim:
 
 ```bash
@@ -55,6 +67,16 @@ then on approval/rejection/timeout, a `{"event":"result","state":"claimed"|"abor
 
 **If you need to abort a pending claim** (agent tool timeout, wrong PIN, user changed their mind), run `DOP_TOKEN=<bearer> dop claim --cancel` from any shell — it deletes the pending-claim file, the blocked `dop claim` process sees it disappear and exits. Also useful: `dop claim --status --json` reports the current state (`pending`, `approved`, `rejected`, `expired`, or `absent`) without spawning a new claim.
 
+### After the claim
+
+The bearer has done its job. Drop it from your environment (`unset DOP_TOKEN`) and stop passing it inline. Every later call is just:
+
+```bash
+dop exec --agent-name <subject> -- <your command>
+```
+
+If the handoff command carried `--remote`, the claim is staged in the vault repo and the operator approves it from their machine. Tell them it is waiting, then try the exec above; it works as soon as they approve. If the claim prints a URL or QR instead, relay it to the operator immediately — that is their approval page.
+
 If the user only gives you a bearer (no PIN), the token was issued with `--no-bind` — skip claim, jump straight to `dop exec`.
 
 If the PIN has expired ("PIN does not match" after clearly correct input), ask the user to run `dop token repin --subject <name>` and hand you a fresh one.
@@ -74,7 +96,7 @@ dop exec --agent-name <specific-task-name> -- <your command>
 | Task | Command |
 |---|---|
 | Discover what your token unlocks | `dop whoami` |
-| Preview env vars the token injects | `dop env` |
+| Preview env var names the token injects | `dop whoami` (`dop env` is refused for claimed bearers) |
 | Run a command with scoped env | `dop exec --agent-name X -- CMD` |
 | Strip inherited env from the child | add `--clean-env` |
 
@@ -83,6 +105,8 @@ dop exec --agent-name <specific-task-name> -- <your command>
 - Request `DOP_TOKEN` or any bearer in chat. It stays in the shell env only.
 - Run `dop token issue` or `dop token revoke` unprompted. Both are admin ops.
 - Fall back to raw upstream env vars (e.g. `NOTION_TOKEN=...`) if `dop exec` fails. Report the error instead.
+- Run `dop use` on a claimed bearer, or `eval "$(dop env)"` on anything. Claimed means `dop exec` alone.
+- Keep passing `DOP_TOKEN=…` after a claim succeeded. The agent key replaces it.
 
 ## Common Failure Modes
 
@@ -91,7 +115,8 @@ dop exec --agent-name <specific-task-name> -- <your command>
 - **`this bearer requires a PIN claim first`** — run `dop claim <PIN>` with the PIN the user gave you before attempting exec.
 - **`this bearer is bound but no agent key is present on this machine`** — the bearer was claimed on a different machine. Ask the user to revoke + re-issue for this host.
 - **`PIN does not match` / `PIN expired`** — ask the user for a fresh PIN via `dop token repin --subject <name>`.
-- **`unknown bearer (bundle not found)`** — `DOP_TOKEN` is set but not in the vault. Ask the user to check they exported the right one.
+- **`unknown bearer (bundle not found)`** — `DOP_TOKEN` is set but not in the vault. `dop claim` pulls the vault first, so the admin most likely has not pushed yet; ask them to `dop push` and retry.
+- **`dop env: refused — … bound to an agent key`** — expected for a claimed bearer. Use `dop exec --agent-name <subject> -- <cmd>` instead.
 - **`no vault path`** — the user hasn't run `dop init --vault ...` on this machine. Point them at the DOP README.
 - **`sops binary not found`** — installer prereq missing. Suggest `brew install sops`.
 
