@@ -569,7 +569,7 @@ dop claim --status [--json]
 | `--no-tunnel` | false | Serve the approval page on LAN only; bind to `0.0.0.0`. |
 | `--bind` | `127.0.0.1` with tunnel, `0.0.0.0` without | Interface to bind the approval server. |
 | `--remote` | false | No admin daemon here — stage the claim in the vault for `dop approve-remote`. Needs push on the vault remote. `--key-type` applies. |
-| `--key-type` | "" (auto) | `p256` or `ed25519`. P-256 is required for direct grant edits and bearer rotation. |
+| `--key-type` | "" (auto) | `p256` or `ed25519`. Auto = Secure Enclave P-256 on a Mac that has one, else a P-256 file. P-256 is required for direct grant edits, bearer rotation and bearer-free exec. |
 | `--cancel` | false | Delete the in-flight pending claim for `$DOP_TOKEN` and exit. |
 | `--status` | false | Print the pending-claim state and exit. |
 | `--json` | false | Emit JSONL events on stdout. |
@@ -621,7 +621,7 @@ dop approve-remote --list
 
 ## Agent keys
 
-Per-bearer key material. On macOS, new keys land in the Secure Enclave when the binary is Developer-ID-signed; else fall back to file-backed P-256 (with `DOP_ALLOW_FILE_KEYS=1`) or legacy ed25519.
+Per-bearer key material. On macOS, new keys land in the Secure Enclave (any build — the key stays in the chip, DOP keeps its handle in `agent-keys/<lookup>.se`); without one (Linux, CI, Macs without the chip) they're P-256 files. `--key-type ed25519` still makes a legacy file key.
 
 ### `dop agent list`
 
@@ -846,5 +846,5 @@ dop credential-helper remove --host <H>
 | `DOP_AUTOPULL_MAX_AGE_SEC` | `15` | Freshness window for every silent auto-pull (exec/env, admin loads, TUI screen entry). |
 | `DOP_NO_AUTO_PULL` | — | `1` disables every auto-pull: login, exec/env, admin loads, TUI screen entry. |
 | `DOP_NO_AUTO_PUSH` | — | `1` disables the auto-push after admin-plane saves. |
-| `DOP_ALLOW_FILE_KEYS` | — | `1` permits file-backed P-256 agent keys (Linux/CI; macOS fallback). |
+| `DOP_ALLOW_FILE_KEYS` | — | `1` silences the "Secure Enclave unavailable" warning when a claim falls back to a P-256 file key. |
 | `DOP_ALLOW_ADMIN_SHRINK` | — | Internal: lets `dop team remove` bypass the admin-shrink save guard. Do not set manually. |

@@ -65,8 +65,11 @@ fi
 pass "wrong PIN rejected"
 
 echo "=== [5] correct claim → succeeds, agent key created"
-DOP_TOKEN="$BEARER" "$DOP" claim --skip-approval "$PIN" 2>&1 | grep -q "bound" || fail "claim should succeed"
-ls "$CFG_ROOT"/agent-keys/*.key >/dev/null 2>&1 || fail "no agent key persisted"
+# Capture first: `claim | grep -q` under pipefail races (grep exits on the
+# match, claim gets SIGPIPE while still writing → the pipeline "fails").
+claim_out=$(DOP_TOKEN="$BEARER" "$DOP" claim --skip-approval "$PIN" 2>&1) || { echo "$claim_out"; fail "claim should succeed"; }
+echo "$claim_out" | grep -q "bound" || { echo "$claim_out"; fail "claim should succeed"; }
+ls "$CFG_ROOT"/agent-keys/*.key "$CFG_ROOT"/agent-keys/*.p256 >/dev/null 2>&1 || ls "$CFG_ROOT"/agent-keys/ | grep -qE '\.(key|p256|se)$' || fail "no agent key persisted"
 pass "claim bound successfully, key present"
 
 echo "=== [6] second claim of same bearer → refused (already claimed)"
@@ -85,7 +88,7 @@ echo "$who" | grep -q "binding:.*pin.*claimed" || { echo "$who"; fail "binding n
 pass "whoami surfaces binding"
 
 echo "=== [9] delete the agent key → exec fails"
-rm -f "$CFG_ROOT"/agent-keys/*.key
+rm -f "$CFG_ROOT"/agent-keys/*.key "$CFG_ROOT"/agent-keys/*.p256 "$CFG_ROOT"/agent-keys/*.se
 if DOP_TOKEN="$BEARER" "$DOP" exec --agent-name k -- true 2>/dev/null; then
     fail "exec should fail without agent key"
 fi

@@ -42,7 +42,7 @@ for i in 1 2 3; do
   OUT=$("$DOP" token issue --grants notion.read --name "orphan-$i" 2>&1)
   BEARER=$(echo "$OUT" | grep -E '^tok_1' | head -1)
   PIN=$(echo "$OUT" | grep -E '^[A-Z]{2}-[A-Z]{2}-[A-Z]{2}$' | head -1)
-  DOP_TOKEN="$BEARER" "$DOP" claim --skip-approval "$PIN" >/dev/null 2>&1
+  DOP_TOKEN="$BEARER" "$DOP" claim --skip-approval --key-type ed25519 "$PIN" >/dev/null 2>&1
 done
 pass "3 tokens claimed"
 
@@ -70,7 +70,7 @@ echo "=== [4] simulate a REMOTE revoke by issuing + claiming + nuking the record
 OUT=$("$DOP" token issue --grants notion.read --name remote-revoke 2>&1)
 B=$(echo "$OUT" | grep -E '^tok_1' | head -1)
 P=$(echo "$OUT" | grep -E '^[A-Z]{2}-[A-Z]{2}-[A-Z]{2}$' | head -1)
-DOP_TOKEN="$B" "$DOP" claim --skip-approval "$P" >/dev/null 2>&1
+DOP_TOKEN="$B" "$DOP" claim --skip-approval --key-type ed25519 "$P" >/dev/null 2>&1
 # Grab the lookup id so we know which record to delete.
 RR_LOOKUP=$("$DOP" token show remote-revoke --json | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['lookup_id'])")
 rm -f "$VAULT_DIR/capabilities/$RR_LOOKUP.record"

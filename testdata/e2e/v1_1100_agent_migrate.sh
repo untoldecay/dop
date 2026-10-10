@@ -41,7 +41,7 @@ EOF
 issue=$("$DOP" token issue --grants notion.read --name testagent 2>&1)
 BEARER=$(echo "$issue" | grep -E '^tok_1' | head -1)
 PIN=$(echo "$issue" | grep -E '^[A-Z]{2}-[A-Z]{2}-[A-Z]{2}$' | head -1)
-DOP_TOKEN="$BEARER" "$DOP" claim --skip-approval "$PIN" >/dev/null 2>&1
+DOP_TOKEN="$BEARER" "$DOP" claim --skip-approval --key-type ed25519 "$PIN" >/dev/null 2>&1
 pass "claim succeeded"
 
 echo "=== [2] dop agent list shows one ed25519 file-backed key"
