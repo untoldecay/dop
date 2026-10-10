@@ -53,8 +53,9 @@ your team can read. No new account, no server to run, nothing sent to us.
 
 **Each agent gets only what it needs.**
 Instead of handing an agent your real key, you give it a pass: "read Notion, post
-to Slack, for 3 days". The agent can use those tools and nothing else. When the
-pass expires, it stops working on its own.
+to Slack, for 3 days". The agent can use those tools and nothing else. The pass
+stops working when it expires, and it only works on the computer it was given to.
+([how](docs/04-secure-elements.md))
 
 **Change your mind any time.**
 Give an agent one more tool, or take one away, without starting over. Or cancel
@@ -63,13 +64,6 @@ its pass entirely — it stops working on its very next try.
 **Approve new agents from your phone.**
 When a new agent asks for access, it shows a QR code. Scan it with your phone,
 type your approval code, done. Nothing to install on the phone.
-
-**An agent's key can't be copied.**
-Each agent gets its own key, made on its own machine, and proves it on every
-call. On a Mac, that key is created inside the computer's security chip and
-never leaves it: copy the agent's files to another computer and they're useless
-there. On Linux servers and CI it's a protected file.
-[How it works on each machine →](docs/04-secure-elements.md)
 
 **Made for small teams.**
 Invite a teammate; they join when they're ready and you let them in. If two of
