@@ -1362,17 +1362,18 @@ func autoPullBeforeLoad(paths *config.Paths) {
 // `dop pull`) — but silently, without the plain-English narrative.
 // Returns nil on success or a short reason string on soft failure.
 func autoPullAndMerge(paths *config.Paths) error {
+	team := gitTeamRef(paths.Vault)
 	if err := runGit(io.Discard, paths.Vault, "fetch", "origin"); err != nil {
 		return fmt.Errorf("fetch: %w", err)
 	}
-	ours, _ := gitRevListCount(paths.Vault, "origin/main..HEAD")
-	theirs, _ := gitRevListCount(paths.Vault, "HEAD..origin/main")
+	ours, _ := gitRevListCount(paths.Vault, team+"..HEAD")
+	theirs, _ := gitRevListCount(paths.Vault, "HEAD.."+team)
 	if ours == 0 && theirs == 0 {
 		return nil // up to date
 	}
 	if ours == 0 {
 		// Just behind — fast-forward.
-		return runGit(io.Discard, paths.Vault, "merge", "--ff-only", "origin/main")
+		return runGit(io.Discard, paths.Vault, "merge", "--ff-only", team)
 	}
 	if theirs == 0 {
 		return nil // ahead only; nothing to pull
@@ -1382,7 +1383,7 @@ func autoPullAndMerge(paths *config.Paths) error {
 	if err != nil {
 		return fmt.Errorf("admin session needed to merge encrypted vaults")
 	}
-	base, err := gitMergeBase(paths.Vault, "HEAD", "origin/main")
+	base, err := gitMergeBase(paths.Vault, "HEAD", team)
 	if err != nil {
 		return fmt.Errorf("no shared ancestor with team")
 	}
@@ -1390,7 +1391,7 @@ func autoPullAndMerge(paths *config.Paths) error {
 	if err != nil {
 		return fmt.Errorf("decrypt local: %w", err)
 	}
-	remoteV, err := decryptVaultAtRef(client, paths, "origin/main")
+	remoteV, err := decryptVaultAtRef(client, paths, team)
 	if err != nil {
 		return fmt.Errorf("decrypt team: %w", err)
 	}
@@ -1405,7 +1406,7 @@ func autoPullAndMerge(paths *config.Paths) error {
 	if err := saveMergedVault(client, paths, result.Merged); err != nil {
 		return fmt.Errorf("save merged: %w", err)
 	}
-	if err := runGit(io.Discard, paths.Vault, "merge", "-s", "ours", "origin/main",
+	if err := runGit(io.Discard, paths.Vault, "merge", "-s", "ours", team,
 		"--no-ff", "-m", "dop: auto-merged local + team vaults"); err != nil {
 		return fmt.Errorf("finalize merge: %w", err)
 	}

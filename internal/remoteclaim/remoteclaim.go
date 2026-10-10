@@ -2,24 +2,24 @@
 // when the agent host has no admin daemon (CI runners, remote servers).
 //
 // Flow:
-//   1. Agent (no daemon) verifies bearer + PIN locally, generates a
-//      new keypair, prepares a new bundle with the pubkey binding, and
-//      stores BOTH the new bundle bytes AND a signed metadata file
-//      under `<Vault>/pending-remote-claims/`. Commits + pushes.
-//   2. Admin (with daemon) pulls, runs `dop approve-remote`, verifies
-//      the agent's signature over the request, prompts for the approval
-//      passphrase, swaps the pending bundle into `capabilities/`,
-//      writes the updated signed record sidecar, saves the vault, and
-//      pushes.
-//   3. Agent pulls; `dop exec` now succeeds.
+//  1. Agent (no daemon) verifies bearer + PIN locally, generates a
+//     new keypair, prepares a new bundle with the pubkey binding, and
+//     stores BOTH the new bundle bytes AND a signed metadata file
+//     under `<Vault>/pending-remote-claims/`. Commits + pushes.
+//  2. Admin (with daemon) pulls, runs `dop approve-remote`, verifies
+//     the agent's signature over the request, prompts for the approval
+//     passphrase, swaps the pending bundle into `capabilities/`,
+//     writes the updated signed record sidecar, saves the vault, and
+//     pushes.
+//  3. Agent pulls; `dop exec` now succeeds.
 //
 // Wire artifacts (all inside the vault repo):
-//   pending-remote-claims/<lookup_id>.bundle   the new bundle bytes
-//   pending-remote-claims/<lookup_id>.json     signed metadata
+//
+//	pending-remote-claims/<lookup_id>.bundle   the new bundle bytes
+//	pending-remote-claims/<lookup_id>.json     signed metadata
 package remoteclaim
 
 import (
-	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,21 +29,24 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fray/dop/internal/agentkey"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/vault"
 )
 
 // Request is the JSON metadata the agent commits.
 type Request struct {
-	LookupID       string    `json:"lookup_id"`
-	CapabilityID   string    `json:"capability_id"`
-	Subject        string    `json:"subject"`
-	Pubkey         string    `json:"pubkey"`     // hex ed25519
-	Host           string    `json:"host"`       // agent's os.Hostname()
-	RequestedAt    time.Time `json:"requested_at"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	NewGeneration  uint64    `json:"new_generation"`
-	NewBundleHash  string    `json:"new_bundle_hash"`
-	Signature      string    `json:"signature"` // hex ed25519 sig by Pubkey over signingPayload()
+	LookupID      string    `json:"lookup_id"`
+	CapabilityID  string    `json:"capability_id"`
+	Subject       string    `json:"subject"`
+	Pubkey        string    `json:"pubkey"`             // hex; 32B ed25519 or 65B uncompressed P-256
+	KeyType       string    `json:"key_type,omitempty"` // vault.KeyType*; "" means ed25519 (pre-parity claims)
+	Host          string    `json:"host"`               // agent's os.Hostname()
+	RequestedAt   time.Time `json:"requested_at"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	NewGeneration uint64    `json:"new_generation"`
+	NewBundleHash string    `json:"new_bundle_hash"`
+	Signature     string    `json:"signature"` // hex sig by Pubkey over signingPayload() (ed25519 raw / ECDSA DER)
 }
 
 // TTL is how long a remote claim sits in the vault before an admin
@@ -70,7 +73,9 @@ func metaPath(paths *config.Paths, lookupID string) string {
 
 // signingPayload returns the deterministic byte sequence the agent
 // signs with its NEW private key, proving it holds the pubkey. Signature
-// covers everything but the Signature field itself.
+// covers everything but the Signature field itself. key_type is
+// omitted when empty so claims staged by pre-parity (ed25519-only)
+// binaries still verify.
 func signingPayload(r Request) ([]byte, error) {
 	r.Signature = ""
 	blob, err := json.Marshal(struct {
@@ -78,6 +83,7 @@ func signingPayload(r Request) ([]byte, error) {
 		CapabilityID  string `json:"capability_id"`
 		Subject       string `json:"subject"`
 		Pubkey        string `json:"pubkey"`
+		KeyType       string `json:"key_type,omitempty"`
 		Host          string `json:"host"`
 		RequestedAt   string `json:"requested_at"`
 		ExpiresAt     string `json:"expires_at"`
@@ -88,6 +94,7 @@ func signingPayload(r Request) ([]byte, error) {
 		CapabilityID:  r.CapabilityID,
 		Subject:       r.Subject,
 		Pubkey:        r.Pubkey,
+		KeyType:       r.KeyType,
 		Host:          r.Host,
 		RequestedAt:   r.RequestedAt.UTC().Format(time.RFC3339Nano),
 		ExpiresAt:     r.ExpiresAt.UTC().Format(time.RFC3339Nano),
@@ -100,15 +107,31 @@ func signingPayload(r Request) ([]byte, error) {
 	return blob, nil
 }
 
-// Sign attaches an ed25519 signature over signingPayload.
-func (r *Request) Sign(priv ed25519.PrivateKey) error {
+// Sign attaches a signature over signingPayload using the agent's
+// freshly generated key store. Pubkey and KeyType are taken from the
+// store so the request can't disagree with the key that signed it.
+func (r *Request) Sign(store agentkey.Store) error {
+	r.Pubkey = hex.EncodeToString(store.PublicKey())
+	r.KeyType = store.KeyType()
 	payload, err := signingPayload(*r)
 	if err != nil {
 		return err
 	}
-	sig := ed25519.Sign(priv, payload)
+	sig, err := store.Sign(payload)
+	if err != nil {
+		return err
+	}
 	r.Signature = hex.EncodeToString(sig)
 	return nil
+}
+
+// EffectiveKeyType returns the binding key type, defaulting to
+// ed25519 for claims staged before key_type existed.
+func (r Request) EffectiveKeyType() string {
+	if r.KeyType == "" {
+		return vault.KeyTypeEd25519
+	}
+	return r.KeyType
 }
 
 // Verify checks the request's signature against its own Pubkey (which
@@ -121,9 +144,6 @@ func (r Request) Verify() error {
 	if err != nil {
 		return fmt.Errorf("remote claim: bad pubkey hex: %w", err)
 	}
-	if len(pubBytes) != ed25519.PublicKeySize {
-		return fmt.Errorf("remote claim: pubkey wrong size %d", len(pubBytes))
-	}
 	sig, err := hex.DecodeString(r.Signature)
 	if err != nil {
 		return fmt.Errorf("remote claim: bad sig hex: %w", err)
@@ -132,8 +152,8 @@ func (r Request) Verify() error {
 	if err != nil {
 		return err
 	}
-	if !ed25519.Verify(pubBytes, payload, sig) {
-		return errors.New("remote claim: signature does not verify")
+	if err := agentkey.Verify(r.EffectiveKeyType(), pubBytes, payload, sig); err != nil {
+		return fmt.Errorf("remote claim: %w", err)
 	}
 	return nil
 }

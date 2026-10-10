@@ -40,6 +40,7 @@ import (
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/pendingclaim"
+	"github.com/fray/dop/internal/remoteclaim"
 	"github.com/fray/dop/internal/userprefs"
 )
 
@@ -442,8 +443,8 @@ func TestWalkScreens(t *testing.T) {
 func walkSetup(w *walker) {
 	w.flow = "setup"
 	w.reset()
-	w.dump("menu-fresh", "Menu · fresh install · cursor on Setup admin", "key")
-	for _, r := range []string{"Attach vault", "Join existing vault", "Doctor", "Uninstall", "Quit"} {
+	w.dump("menu-fresh", "Menu · fresh install · cursor on New setup", "key")
+	for _, r := range []string{"Join", "Server", "Doctor", "Uninstall", "Quit"} {
 		w.keys("down")
 		w.dump("menu-fresh-"+strings.ToLower(strings.Fields(r)[0]), "Menu · fresh install · cursor on "+r)
 	}
@@ -491,26 +492,28 @@ func walkSetup(w *walker) {
 	w.send("setupInitDone", setupInitDone{err: "admin key already exists at ~/Library/Application Support/dop/keys/admin.age.enc"})
 	w.dump("setup-admin-init-failed", "Setup admin · init failed (review + error)", "edge")
 
-	// Attach vault (agent install): single step
+	// Server (agents only): single step, then a done screen
 	w.reset()
-	w.keys("down", "enter")
-	w.dump("attach-agent-empty", "Attach vault · agent install · empty")
+	w.keys("down", "down", "enter")
+	w.dump("attach-agent-empty", "Server · agents only · empty")
 	w.keys("enter")
-	w.dump("attach-agent-required", "Attach vault · URL required", "edge")
+	w.dump("attach-agent-required", "Server · URL required", "edge")
 	w.keys("git@github.com:acme/dop-vault.git")
-	w.dump("attach-agent-typed", "Attach vault · URL typed")
+	w.dump("attach-agent-typed", "Server · URL typed")
 	w.keys("enter")
-	w.dump("attach-agent-cloning", "Attach vault · cloning")
+	w.dump("attach-agent-cloning", "Server · cloning")
 	w.send("attachResultMsg", attachResultMsg{err: "git clone: repository 'acme/dop-vault' not found"})
-	w.dump("attach-agent-error", "Attach vault · clone failed", "edge")
+	w.dump("attach-agent-error", "Server · clone failed", "edge")
 	w.reset()
-	w.keys("down", "enter", "git@github.com:acme/dop-vault.git", "enter")
+	w.keys("down", "down", "enter", "git@github.com:acme/dop-vault.git", "enter")
 	w.send("attachResultMsg", attachResultMsg{})
-	w.dump("attach-agent-done", "Attach vault · done → menu flash")
+	w.dump("attach-agent-done", "Server · done → next steps", "key")
+	w.keys("enter")
+	w.dump("attach-agent-menu", "Server · back to menu · flash")
 
 	// Join existing vault
 	w.reset()
-	w.keys("down", "down", "enter")
+	w.keys("down", "enter")
 	w.dump("join-url-empty", "Join vault · 1 of 5 · URL empty")
 	w.keys("enter")
 	w.dump("join-url-required", "Join vault · URL required", "edge")
@@ -534,7 +537,7 @@ func walkSetup(w *walker) {
 	w.dump("join-done", "Join vault · done → menu flash")
 
 	w.reset()
-	w.keys("down", "down", "enter", "git@github.com:acme/dop-vault.git", "enter", "AB-CD-EF", "enter", "enter")
+	w.keys("down", "enter", "git@github.com:acme/dop-vault.git", "enter", "AB-CD-EF", "enter", "enter")
 	w.dump("join-new-admin", "Join vault · separate identity · new admin passphrase")
 	w.keys("hunter2", "enter")
 	w.dump("join-new-admin-short", "Join vault · new admin passphrase too short", "edge")
@@ -856,11 +859,15 @@ func walkIssue(w *walker) {
 	}
 	toPortable()
 	w.keys("enter")
+	w.dump("issue-runs-on", "Issue · runs on · this machine", "key")
+	w.keys("down")
+	w.dump("issue-runs-on-server", "Issue · runs on · a server")
+	w.keys("enter")
 	w.dump("issue-confirm", "Issue · review", "key")
 	w.keys("esc")
-	w.dump("issue-review-back", "Issue · esc back from the review to portable")
+	w.dump("issue-review-back", "Issue · esc back from the review to runs on")
 	toPortable()
-	w.keys("enter", "enter")
+	w.keys("enter", "enter", "enter")
 	w.dump("issue-issuing", "Issue · issuing (spinner)")
 	w.send("issueResultMsg", issueResultMsg{bearer: "tok_7Hq2xWalkFixtureBearer0c1d2e3f", pin: "AB-CD-EF"})
 	w.dump("issue-done", "Issue · bearer + PIN handoff", "key")
@@ -873,7 +880,11 @@ func walkIssue(w *walker) {
 	w.send("issueResultMsg", issueResultMsg{bearer: "tok_9Kp4zWalkFixturePortable7a8b9c0d"})
 	w.dump("issue-done-portable", "Issue · done, portable (bearer only)")
 	toPortable()
-	w.keys("enter", "enter")
+	w.keys("enter", "down", "enter", "enter")
+	w.send("issueResultMsg", issueResultMsg{bearer: "tok_5Rm8vWalkFixtureServer1e2f3a4b", pin: "GH-IJ-KL"})
+	w.dump("issue-done-server", "Issue · bearer + PIN handoff for a server (--remote)", "key")
+	toPortable()
+	w.keys("enter", "enter", "enter")
 	w.send("issueResultMsg", issueResultMsg{err: "vault push rejected (non-fast-forward)"})
 	w.dump("issue-error", "Issue · issue failed (review + error)", "edge")
 
@@ -1254,6 +1265,24 @@ func walkBearers(w *walker) {
 	w.dump("bearer-list-help", "Bearers · expanded help")
 	w.esc()
 	w.esc()
+	// Pending tab: a remote claim staged in the vault repo.
+	must(w.t, remoteclaim.Write(w.paths, remoteclaim.Request{LookupID: "7c1e9f0a2b3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f", Subject: "vps-bot",
+		Pubkey: "04" + strings.Repeat("ab", 64), KeyType: "p256", Host: "hermes-vps", RequestedAt: time.Now(),
+		ExpiresAt: time.Now().Add(20 * time.Hour), NewGeneration: 2}, []byte("bundle")))
+	open()
+	w.keys("tab", "tab")
+	w.dump("bearer-pending", "Bearers · Pending tab (remote claim)", "key")
+	w.keys("enter")
+	w.dump("bearer-pending-pass", "Bearers · Pending · approval passphrase", "key")
+	w.esc()
+	w.keys("r")
+	w.dump("bearer-pending-reject", "Bearers · Pending · reject?", "key")
+	w.keys("enter")
+	w.send("pendingResultMsg", pendingResultMsg{reject: true})
+	must(w.t, remoteclaim.Delete(w.paths, "7c1e9f0a2b3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f"))
+	w.load()
+	w.dump("bearer-pending-rejected", "Bearers · Pending · rejected, flash")
+	w.esc()
 	open()
 	w.keys("enter")
 	w.dump("bearer-detail", "Bearers · Info tab (PIN-bound, unclaimed)", "key")
@@ -1301,7 +1330,11 @@ func walkBearers(w *walker) {
 	w.keys("down", "enter")
 	w.dump("bearer-repin", "Bearers · repin PIN validity picker", "key")
 	w.keys("down", "enter")
-	w.dump("bearer-repin-confirm", "Bearers · re-issue with a new PIN?", "key")
+	w.dump("bearer-repin-runs-on", "Bearers · repin · runs on", "key")
+	w.keys("down")
+	w.dump("bearer-repin-runs-on-server", "Bearers · repin · runs on a server")
+	w.keys("enter")
+	w.dump("bearer-repin-confirm", "Bearers · re-issue with a new PIN? (server)", "key")
 	w.keys("enter")
 	w.dump("bearer-repin-running", "Bearers · re-issuing (repin)")
 	w.send("issueResultMsg", issueResultMsg{err: "dop token repin: save vault: vault push rejected (non-fast-forward)"})
@@ -1313,7 +1346,7 @@ func walkBearers(w *walker) {
 	w.dump("bearer-repin-done-esc-armed", "Bearers · repin done · first esc arms leave", "edge")
 	// finance-agent holds a protected grant: the approval passphrase.
 	open()
-	w.keys("down", "down", "enter", "down", "enter", "enter", "enter")
+	w.keys("down", "down", "enter", "down", "enter", "enter", "enter", "enter")
 	w.dump("bearer-repin-pass", "Bearers · repin · passphrase (protected grant)")
 	w.keys("approve-me-please", "enter")
 	w.dump("bearer-repin-pass-running", "Bearers · re-issuing (repin, protected)")
@@ -1390,10 +1423,10 @@ func walkBearers(w *walker) {
 	w.keys("x", "enter")
 	w.send("listActionMsg", listActionMsg{})
 	w.dump("bearer-prune-done", "Bearers · pruned")
-	// default picker choice: repin TTL 1h
+	// default picker choices: repin TTL 1h, runs on this machine
 	act()
 	w.keys("down", "enter")
-	w.line("enter", "enter")
+	w.line("enter", "enter", "enter")
 }
 
 // ── team ──

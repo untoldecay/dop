@@ -1,0 +1,80 @@
+#!/usr/bin/expect -f
+# Interactive behaviour of `dop exec` behind its pty proxy, in a real
+# interactive shell with job control. `dop` answers Bubble Tea's startup
+# colour query like a real terminal would (immediately).
+set dop [lindex $argv 0]
+set timeout 10
+proc ok {m} { send_user "\nOK: $m\n" }
+proc ko {m} { send_user "\nFAIL: $m\n"; exit 1 }
+proc run {cmd} {
+  global dop
+  send "$dop exec -- $cmd\r"
+  expect -re "\033\\\]11;\\?" { send "\033\]11;rgb:1e1e/1e1e/1e1e\033\\\\\033\[1;1R" }
+}
+spawn -noecho bash --norc -i
+send "export PS1='P> '\r"; expect "P> "
+send "stty rows 33 cols 77\r"; expect "P> "
+
+run "stty size"
+expect {
+  "33 77" { ok "window size passed to the command" }
+  timeout { ko "size" }
+}
+expect "P> "
+
+run "sh -c 'echo READY3; read x; echo got:\$x'"
+expect "READY3"
+send "hello\r"
+expect {
+  "got:hello" { ok "typed input reaches the command" }
+  timeout { ko "input" }
+}
+expect "P> "
+
+run "sh -c 'trap \"echo INT-caught; exit 3\" INT; echo READY; sleep 10'"
+expect "READY"
+sleep 0.3; send "\003"
+expect {
+  "INT-caught" { ok "ctrl+c interrupts the command" }
+  timeout { ko "ctrl+c" }
+}
+expect "P> "
+send "echo rc=\$?\r"
+expect {
+  "rc=3" { ok "exit code after ctrl+c" }
+  timeout { ko "rc after ctrl+c" }
+}
+expect "P> "
+
+run "sh -c 'echo READY2; sleep 1.5; echo AFTER-RESUME'"
+expect "READY2"
+sleep 0.3; send "\032"
+expect {
+  -re "Stopped|suspended" { ok "ctrl+z suspends (shell regains control)" }
+  timeout { ko "ctrl+z" }
+}
+expect "P> "
+send "fg\r"
+expect {
+  "AFTER-RESUME" { ok "fg resumes the command" }
+  timeout { ko "fg" }
+}
+expect "P> "
+
+run "printenv NOTION_TOKEN"
+expect {
+  -re "ntn_FAKE" { ko "key shown in an interactive terminal" }
+  "‹NOTION_TOKEN›" { ok "key masked in an interactive terminal" }
+  timeout { ko "mask" }
+}
+expect "P> "
+
+send "stty -a | tr ' ' '\\n' | grep -E '^-?(icanon|echo)\$' | tr '\\n' ' '; echo\r"
+expect {
+  -re "\r\nicanon echo" { ok "terminal back to normal after dop exits" }
+  -re "\r\n-icanon|\r\n-echo" { ko "terminal left in raw mode" }
+  timeout { ko "stty" }
+}
+send "exit\r"
+expect eof
+puts "\nINTERACTIVE: PASS"

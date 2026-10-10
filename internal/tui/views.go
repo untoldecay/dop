@@ -127,7 +127,7 @@ func (v *doctorView) View() string {
 	if admin.KeyFileExists(v.paths) {
 		line("✓", "admin key", "admin install", "")
 	} else {
-		line("!", "admin key", "agent install, no admin key", "Set up an admin key from the menu to manage the vault.")
+		line("!", "admin key", "server install (agents only), no admin key", "Pick New setup from the menu if this machine should manage the vault.")
 	}
 	vp := v.paths.Vault + "/vault.yaml"
 	if _, err := os.Stat(vp); err == nil {
@@ -236,8 +236,8 @@ func (v *loginView) View() string {
 // ---------- Issue bearer ----------
 
 // issueView — a wizard: subject → grants → expiry (→ custom) →
-// portable (→ approval passphrase), then the review, the issuing
-// spinner and the bearer handoff.
+// portable (→ runs on) (→ approval passphrase), then the review, the
+// issuing spinner and the bearer handoff.
 type issueView struct {
 	wiz
 	client *admin.Client
@@ -250,6 +250,7 @@ type issueView struct {
 	expiryCur  int
 	custom     textinput.Model
 	portCur    int
+	runsCur    int             // runsOnPresets index; only asked when not portable
 	passphrase textinput.Model // approval passphrase, only for protected grants
 
 	issuing bool
@@ -277,6 +278,7 @@ const (
 	issueStepExpiry
 	issueStepCustom
 	issueStepPortable
+	issueStepRunsOn
 	issueStepPass
 	issueStepReview
 )
@@ -325,6 +327,18 @@ var portablePresets = []struct {
 	{"yes", true, "export it again later with dop use <subject>"},
 }
 
+// runsOnPresets drives the "Runs on" step. A server (the Server entry
+// of the fresh-install menu) has no admin, so the agent claims with
+// --remote and the approval lands in this TUI's pending banner.
+var runsOnPresets = []struct {
+	label string
+	value bool // remote
+	hint  string
+}{
+	{"this machine", false, "agent claims here, you approve in this TUI"},
+	{"a server", true, "agent claims with --remote, approve from the pending banner"},
+}
+
 func newIssueView(c *admin.Client, p *config.Paths) *issueView {
 	v := &issueView{client: c, paths: p, prefs: LoadPrefs(p)}
 	v.subject, v.grantsCSV, v.custom, v.passphrase = newFormInput(false), newFormInput(false), newFormInput(false), newFormInput(true)
@@ -341,6 +355,9 @@ func (v *issueView) flow() []int {
 		s = append(s, issueStepCustom)
 	}
 	s = append(s, issueStepPortable)
+	if !v.portable() {
+		s = append(s, issueStepRunsOn)
+	}
 	if v.protectedCount() > 0 {
 		s = append(s, issueStepPass)
 	}
@@ -369,6 +386,7 @@ func (v *issueView) expiryValue() string {
 }
 
 func (v *issueView) portable() bool { return portablePresets[v.portCur].value }
+func (v *issueView) remote() bool   { return !v.portable() && runsOnPresets[v.runsCur].value }
 
 // collidingPrefixes returns prefix → grant-IDs when two or more of sel
 // share the same env prefix.
@@ -439,12 +457,16 @@ func (v *issueView) summaryRows() [][2]string {
 	if v.portable() {
 		portable = "yes"
 	}
-	return [][2]string{
+	rows := [][2]string{
 		{"subject", strings.TrimSpace(v.subject.Value())},
 		{"grants", strings.Join(v.selectedGrants(), ", ")},
 		{"expires", v.expiryValue()},
 		{"portable", portable},
 	}
+	if !v.portable() {
+		rows = append(rows, [2]string{"runs on", runsOnPresets[v.runsCur].label})
+	}
+	return rows
 }
 
 func (v *issueView) Init() tea.Cmd { return nil }
@@ -493,7 +515,8 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Copy once here, not in View (which repaints on every msg).
 		v.copied = clipboardCopy(v.handoff())
 		// allow-file-keys: watch the record for the claim, then reseal.
-		if v.prefs.AllowFileKeys && v.pin != "" {
+		// Not for a server: approve-remote seals at approval time.
+		if v.prefs.AllowFileKeys && v.pin != "" && !v.remote() {
 			return v, v.watchForClaimAndReseal()
 		}
 		return v, nil
@@ -539,6 +562,8 @@ func (v *issueView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			stepCursor(&v.expiryCur, len(expiryPresets), map[string]int{"up": -1, "down": 1}[k])
 		case v.step == issueStepPortable && (k == "up" || k == "down"):
 			stepCursor(&v.portCur, len(portablePresets), map[string]int{"up": -1, "down": 1}[k])
+		case v.step == issueStepRunsOn && (k == "up" || k == "down"):
+			stepCursor(&v.runsCur, len(runsOnPresets), map[string]int{"up": -1, "down": 1}[k])
 		case in != nil:
 			edit(in, mm)
 		}
@@ -723,7 +748,7 @@ func looksLikePIN(s string) bool {
 
 // handoff is the clipboard text for the agent (contract 13 shape).
 func (v *issueView) handoff() string {
-	return bearerHandoff(v.bearer, v.pin, v.prefs.AllowFileKeys)
+	return bearerHandoff(v.bearer, v.pin, v.prefs.AllowFileKeys, v.remote())
 }
 
 // bearerKey handles the one-time bearer screen: a stray key must not
@@ -749,7 +774,10 @@ func (v *issueView) View() string {
 			cmd = "run " + strings.TrimSpace(h[len(h)-1])
 		}
 		after := useGuidance(v.prefs.Harness, subject, v.portable(), cmd)
-		if v.prefs.AllowFileKeys && v.pin != "" && !v.portable() {
+		switch {
+		case v.remote():
+			after = append(after, "The claim lands in this TUI's pending banner; approve it there.")
+		case v.prefs.AllowFileKeys && v.pin != "" && !v.portable():
 			after = append(after, displayOr(v.resealFlash, "Auto-reseal runs once the agent claims."))
 		}
 		return onceScreen(v.width, v.height, "✓ Bearer issued", subject, v.bearer, v.pin, after, v.leaveArmed, v.copied)
@@ -794,6 +822,12 @@ func (v *issueView) View() string {
 			o = append(o, [2]string{p.label, p.hint})
 		}
 		prompt, input = "Portable", optRows(o, v.portCur)
+	case issueStepRunsOn:
+		var o [][2]string
+		for _, p := range runsOnPresets {
+			o = append(o, [2]string{p.label, p.hint})
+		}
+		prompt, input = "Runs on", optRows(o, v.runsCur)
 	case issueStepPass:
 		prompt, input, helper = "Approval passphrase", []string{inputRow(&v.passphrase)}, "The selection includes protected grants."
 	}
@@ -856,12 +890,14 @@ type listView struct {
 	viewerPubkey string
 
 	// v1.10.0 picker state
-	mode          int    // listMode*
-	cursor        int    // index into visible()
-	actionCursor  int    // index into currentActions()
-	pendingAction string // revoke, reseal, add, remove, repin: the action in flight
-	revoked       bool   // Revoked tab (false → Active)
-	help          bool   // ? expanded help (list + detail)
+	mode          int             // listMode*
+	cursor        int             // index into visible()
+	actionCursor  int             // index into currentActions()
+	pendingAction string          // revoke, reseal, add, remove, repin: the action in flight
+	tab           int             // listTab*: Active, Revoked, Pending (claims awaiting approval)
+	pending       []pendingRow    // Pending tab rows: local PIN claims + remote claims
+	pendPass      textinput.Model // approval passphrase for a pending claim
+	help          bool            // ? expanded help (list + detail)
 	err           string
 	flash         string
 
@@ -874,9 +910,12 @@ type listView struct {
 	grantPickPassBuf   textField
 	grantPickPassPhase bool // true once protected picks required a passphrase screen
 
-	// Repin: PIN validity picker, then the portable wizard below
+	// Repin: PIN validity picker, then "Runs on" (this machine or a
+	// server → --remote in the handoff), then the portable wizard below
 	// (confirm, passphrase for protected grants, new bearer + PIN).
 	repinTTLCursor int
+	repinStep      int // 0 PIN validity, 1 runs on
+	runsCur        int // runsOnPresets index
 	// Re-issue of a claimed bearer: reissueCursor picks among
 	// reissueOptions(); reclaim sends `repin --reclaim` (new claim).
 	reissueCursor int
@@ -922,19 +961,37 @@ var repinTTLPresets = []struct {
 //	listModeRun     subprocess in flight
 //	listModeDone    ✓ outcome, any key back to the list
 const (
+	listTabActive  = 0
+	listTabRevoked = 1
+	listTabPending = 2
+)
+
+const (
 	listModeList      = 0
 	listModeAction    = 1
 	listModeConfirm   = 2
 	listModeRun       = 3
-	listModeGrantPick = 5 // add-grant / remove-grant picker
-	listModeRepin     = 6 // PIN validity picker
-	listModeDone      = 7 // ✓ outcome (revoke, reseal, grants, repin, portable)
-	listModePortable  = 8 // portable copy on/off wizard
-	listModeReissue   = 9 // claimed bearer: rotate (keep key) or new claim
+	listModeGrantPick = 5  // add-grant / remove-grant picker
+	listModeRepin     = 6  // PIN validity picker
+	listModeDone      = 7  // ✓ outcome (revoke, reseal, grants, repin, portable)
+	listModePortable  = 8  // portable copy on/off wizard
+	listModeReissue   = 9  // claimed bearer: rotate (keep key) or new claim
+	listModePendPass  = 10 // Pending tab: approval passphrase for a claim
+	listModePendRejct = 11 // Pending tab: confirm reject
 )
 
 func newListView(c *admin.Client, p *config.Paths) *listView {
-	return &listView{client: c, paths: p}
+	return &listView{client: c, paths: p, pendPass: newFormInput(true)}
+}
+
+func (v *listView) revoked() bool { return v.tab == listTabRevoked }
+
+// pendingRowAt is the Pending tab's cursor row (zero value if none).
+func (v *listView) pendingRowAt() pendingRow {
+	if v.tab == listTabPending && v.cursor < len(v.pending) {
+		return v.pending[v.cursor]
+	}
+	return pendingRow{}
 }
 func (v *listView) Init() tea.Cmd { return v.load }
 func (v *listView) Done() bool    { return v.done }
@@ -946,6 +1003,7 @@ type listLoadedMsg struct {
 	viewerPubkey string
 	adminNames   map[string]string
 	grants       map[string]vault.Grant
+	pending      []pendingRow
 	err          string
 }
 type listActionMsg struct {
@@ -1007,19 +1065,31 @@ func (v *listView) load() tea.Msg {
 	for n, a := range vv.Admins {
 		names[a.Ed25519Pubkey] = n
 	}
-	return listLoadedMsg{capabilities: caps, capIDs: ids, viewerPubkey: viewerPubkey, adminNames: names, grants: vv.Grants}
+	pend, _ := pendingRows(v.paths) // best-effort, like the root banner
+	return listLoadedMsg{capabilities: caps, capIDs: ids, viewerPubkey: viewerPubkey, adminNames: names, grants: vv.Grants, pending: pend}
 }
 
 // visible returns the indexes into v.capabilities that should be shown
 // under the current tab (Active, or Revoked = everything not active).
 func (v *listView) visible() []int {
 	out := []int{}
+	if v.tab == listTabPending {
+		return out
+	}
 	for i, c := range v.capabilities {
-		if (c.Status == capability.RecordStatusActive) == !v.revoked {
+		if (c.Status == capability.RecordStatusActive) == !v.revoked() {
 			out = append(out, i)
 		}
 	}
 	return out
+}
+
+// rowCount is what the list cursor ranges over on the current tab.
+func (v *listView) rowCount() int {
+	if v.tab == listTabPending {
+		return len(v.pending)
+	}
+	return len(v.visible())
 }
 
 func (v *listView) selectedIndex() int {
@@ -1081,8 +1151,24 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.viewerPubkey = mm.viewerPubkey
 		v.adminNames = mm.adminNames
 		v.vgrants = mm.grants
+		v.pending = mm.pending
 		v.loadErr = mm.err
-		v.cursor = max(min(v.cursor, len(v.visible())-1), 0)
+		v.cursor = max(min(v.cursor, v.rowCount()-1), 0)
+	case pendingResultMsg:
+		if mm.err != "" {
+			v.err, v.mode = firstLine(mm.err), listModeList
+			if !mm.reject {
+				v.mode = listModePendPass
+				v.pendPass.Reset()
+			}
+			return v, nil
+		}
+		v.mode, v.flash = listModeList, "Claim approved"
+		if mm.reject {
+			v.flash = "Claim rejected"
+		}
+		v.loaded = false
+		return v, v.load
 	case listActionMsg:
 		if mm.err != "" && v.mode == listModeRun && v.pendingAction == "portable-off" {
 			v.portableErr("Portable copy failed: " + cliErr(mm.err))
@@ -1135,6 +1221,8 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateActionMode(mm)
 		case listModeConfirm:
 			return v.updateConfirmMode(mm)
+		case listModePendPass, listModePendRejct:
+			return v.updatePendingMode(mm)
 		case listModeGrantPick:
 			return v.updateGrantPickMode(mm)
 		case listModeRepin:
@@ -1177,9 +1265,26 @@ func cliErr(e string) string {
 func (v *listView) updateListMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	vis := v.visible()
 	v.err = ""
+	if v.tab == listTabPending {
+		switch k := mm.String(); k {
+		case "enter", "a":
+			if len(v.pending) > 0 {
+				v.mode, v.doneSubj = listModePendPass, v.pending[v.cursor].subject
+				v.pendPass.Reset()
+			}
+			return v, nil
+		case "r", "d":
+			if len(v.pending) > 0 {
+				v.mode, v.doneSubj = listModePendRejct, v.pending[v.cursor].subject
+			}
+			return v, nil
+		case "x", "s", "p":
+			return v, nil
+		}
+	}
 	switch k := mm.String(); k {
 	case "x":
-		if !v.revoked {
+		if !v.revoked() {
 			break
 		}
 		if v.pruneCount() == 0 {
@@ -1194,12 +1299,13 @@ func (v *listView) updateListMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.cursor--
 		}
 	case "down", "j":
-		if v.cursor < len(vis)-1 {
+		if v.cursor < v.rowCount()-1 {
 			v.cursor++
 		}
-	case "tab", "shift+tab":
-		v.revoked = !v.revoked
-		v.cursor = 0
+	case "tab":
+		v.tab, v.cursor = (v.tab+1)%3, 0
+	case "shift+tab":
+		v.tab, v.cursor = (v.tab+2)%3, 0
 	case "enter":
 		if len(vis) == 0 {
 			return v, nil
@@ -1217,6 +1323,56 @@ func (v *listView) updateListMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return v, nil
+}
+
+// updatePendingMode drives approve (passphrase) / reject (confirm) of
+// the Pending tab's cursor row; the shell-outs are the banner picker's.
+func (v *listView) updatePendingMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := mm.String()
+	if k != "enter" {
+		v.err = ""
+	}
+	switch {
+	case k == "esc" || k == "ctrl+c":
+		v.mode = listModeList
+		v.pendPass.Reset()
+	case v.mode == listModePendRejct && (k == "enter" || k == "y"):
+		if cmd := v.locked(mm, &v.err); cmd != nil {
+			return v, cmd
+		}
+		v.mode, v.pendingAction = listModeRun, "reject-claim"
+		return v, runPendingRow(v.pendingRowAt(), true, "")
+	case v.mode == listModePendRejct && k == "n":
+		v.mode = listModeList
+	case v.mode == listModePendPass && k == "enter":
+		if v.pendPass.Value() == "" {
+			v.err = "Approval passphrase is required"
+			return v, nil
+		}
+		if cmd := v.locked(mm, &v.err); cmd != nil {
+			return v, cmd
+		}
+		v.mode, v.pendingAction = listModeRun, "approve-claim"
+		return v, runPendingRow(v.pendingRowAt(), false, v.pendPass.Value())
+	case v.mode == listModePendPass:
+		edit(&v.pendPass, mm)
+	}
+	return v, nil
+}
+
+// viewPending renders the approve / reject screens of the Pending tab.
+func (v *listView) viewPending(width, height int) string {
+	w := wiz{width: width, height: height, help: v.help}
+	row := v.pendingRowAt()
+	from := "PIN " + row.sas
+	if row.remote() {
+		from = "remote · " + row.host
+	}
+	if v.mode == listModePendRejct {
+		lines := []string{mutedSt.Render("  " + from), mutedSt.Render("  The agent has to claim again if this was a mistake.")}
+		return w.confirmScreen("Reject "+row.subject+"?", lines, "reject", v.err)
+	}
+	return w.screen("Approve "+row.subject, "", "Approval passphrase", []string{inputRow(&v.pendPass)}, "", v.err, from, wizKeys("approve"))
 }
 
 func (v *listView) updateActionMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1296,7 +1452,7 @@ func (v *listView) runAction(a listAction) (tea.Model, tea.Cmd) {
 			v.mode, v.reissueCursor, v.err = listModeReissue, 0, ""
 			return v, nil
 		}
-		v.mode, v.pendingAction, v.repinTTLCursor = listModeRepin, "repin", 0
+		v.mode, v.pendingAction, v.repinTTLCursor, v.repinStep, v.runsCur = listModeRepin, "repin", 0, 0, 0
 		v.portPass.Reset()
 	case "o":
 		v.mode, v.portStep, v.pendingAction = listModePortable, 0, "portable-on"
@@ -1530,7 +1686,7 @@ func (v *listView) updateReissueMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return v, v.doTokenCmd("rotate")
 		case "reclaim":
 			v.reclaim = true
-			v.mode, v.pendingAction, v.repinTTLCursor = listModeRepin, "repin", 0
+			v.mode, v.pendingAction, v.repinTTLCursor, v.repinStep, v.runsCur = listModeRepin, "repin", 0, 0, 0
 			v.portPass.Reset()
 		}
 	}
@@ -1552,21 +1708,39 @@ func (v *listView) viewReissue(width, height int) string {
 }
 
 func (v *listView) updateRepinMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	cur, n := &v.repinTTLCursor, len(repinTTLPresets)
+	if v.repinStep == 1 {
+		cur, n = &v.runsCur, len(runsOnPresets)
+	}
 	switch mm.String() {
 	case "esc":
+		if v.repinStep == 1 {
+			v.repinStep = 0
+			return v, nil
+		}
 		if v.reclaim {
 			v.mode, v.pendingAction, v.err = listModeReissue, "", ""
 			return v, nil
 		}
 		v.mode, v.pendingAction, v.err = listModeAction, "", ""
 	case "up", "k":
-		stepCursor(&v.repinTTLCursor, len(repinTTLPresets), -1)
+		stepCursor(cur, n, -1)
 	case "down", "j":
-		stepCursor(&v.repinTTLCursor, len(repinTTLPresets), 1)
+		stepCursor(cur, n, 1)
 	case "enter":
+		if v.repinStep == 0 {
+			v.repinStep = 1
+			return v, nil
+		}
 		v.mode, v.portStep, v.err = listModePortable, 0, ""
 	}
 	return v, nil
+}
+
+// repinRemote: the re-issued bearer's agent runs on a Server install,
+// so the handoff carries --remote.
+func (v *listView) repinRemote() bool {
+	return v.pendingAction == "repin" && runsOnPresets[v.runsCur].value
 }
 
 // updatePortableMode drives the portable wizard; esc steps back, then
@@ -1576,7 +1750,7 @@ func (v *listView) updatePortableMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if k == "esc" {
 		v.err = ""
 		if v.portStep == 0 && v.pendingAction == "repin" {
-			v.mode = listModeRepin // back to the PIN validity picker
+			v.mode, v.repinStep = listModeRepin, 1 // back to the runs-on picker
 		} else if v.portStep == 0 {
 			v.mode, v.pendingAction = listModeAction, ""
 			v.portPass.Reset()
@@ -1641,7 +1815,7 @@ func (v *listView) portNeedsPass() bool {
 }
 
 func (v *listView) portHandoff() string {
-	return bearerHandoff(v.portNew, v.portPin, LoadPrefs(v.paths).AllowFileKeys)
+	return bearerHandoff(v.portNew, v.portPin, LoadPrefs(v.paths).AllowFileKeys, v.repinRemote())
 }
 
 // doPortable shells out to dop token portable (or repin); the passphrase
@@ -1795,6 +1969,8 @@ func (v *listView) View() string {
 		return v.viewPortable(width, height)
 	case listModeDone:
 		return v.viewDone(width, height)
+	case listModePendPass, listModePendRejct:
+		return v.viewPending(width, height)
 	}
 
 	vis := v.visible()
@@ -1804,19 +1980,29 @@ func (v *listView) View() string {
 			nAct++
 		}
 	}
-	tabs := []tab{{"Active", nAct, !v.revoked}, {"Revoked", len(v.capabilities) - nAct, v.revoked}}
-	other := "revoked"
-	if v.revoked {
-		other = "active"
-	}
+	tabs := []tab{{"Active", nAct, v.tab == listTabActive}, {"Revoked", len(v.capabilities) - nAct, v.tab == listTabRevoked}, {"Pending", len(v.pending), v.tab == listTabPending}}
+	other := [3]string{"revoked", "pending", "active"}[v.tab]
 	km := bearerListKeys
 	km.short = []key.Binding{keyOpen, hint("tab", other), keyBack}
-	if v.revoked {
+	switch v.tab {
+	case listTabRevoked:
 		km.short = []key.Binding{keyOpen, hint("x", "prune"), hint("tab", other), keyBack}
+	case listTabPending:
+		km.short = []key.Binding{hint("enter", "approve"), hint("r", "reject"), hint("tab", other), keyBack}
 	}
 	st := status{err: v.err, flash: v.flash}
 	var body []string
 	switch {
+	case v.tab == listTabPending && len(v.pending) > 0:
+		body = v.renderPending()
+		row := v.pending[v.cursor]
+		h := "key " + midTrunc(row.pubkey, 24)
+		if row.keyType != "" {
+			h = row.keyType + " " + h
+		}
+		st.setHint(h)
+	case v.tab == listTabPending:
+		body = append(body, bodySt.Render("  No pending claims. An agent's dop claim (local or --remote) shows up here."))
 	case len(vis) > 0:
 		// The table gets the body rows the open help leaves, so 16+
 		// bearers scroll inside it while status and footer stay put.
@@ -1826,26 +2012,49 @@ func (v *listView) View() string {
 		}
 		body = append(body, v.renderTable(vis, width, rows))
 		st.setHint(v.rowHint(vis[v.cursor]))
-	case v.revoked:
+	case v.revoked():
 		body = append(body, bodySt.Render("  No revoked bearers."))
 	case len(v.capabilities) == 0:
 		body = append(body, bodySt.Render("  No bearers yet. Issue one from the menu: Issue."))
 	default:
 		body = append(body, bodySt.Render("  No active bearers. Issue one from the menu: Issue."))
 	}
-	if len(vis) == 0 {
-		km.short = km.short[1:] // nothing to open
+	if v.rowCount() == 0 {
+		km.short = km.short[1:] // nothing to open / approve
+		if v.tab == listTabPending {
+			km.short = km.short[1:] // nor reject
+		}
 	}
 	body = km.overlay(body, width, frameRows(height), v.help)
 	return frame(width, height, "Bearers", tabs, "", body, st.String(), km.footerLine(width, v.help))
 }
 
+// renderPending is the Pending tab body: subject, where the claim came
+// from (PIN or remote host), and how long it stays approvable.
+func (v *listView) renderPending() []string {
+	body := []string{"  " + mutedSt.Render(padTrunc("subject", 24)+"  "+padTrunc("from", 22)+"  expires")}
+	for i, r := range v.pending {
+		from := "PIN " + r.sas
+		if r.remote() {
+			from = "remote · " + r.host
+		}
+		cells := padTrunc(r.subject, 24) + "  " + padTrunc(from, 22)
+		left := "in " + humanDuration(time.Until(r.expiresAt))
+		if i == v.cursor {
+			body = append(body, focusSt.Render("› "+cells+"  "+left))
+		} else {
+			body = append(body, "  "+bodySt.Render(cells)+"  "+mutedSt.Render(left))
+		}
+	}
+	return body
+}
+
 // bearerListKeys is the bearers list's expanded help (short is per tab).
 var bearerListKeys = keyMap{
 	full: [][]key.Binding{
-		{keyMove, hint("enter", "open bearer"), hint("tab", "active / revoked"), keyBack},
+		{keyMove, hint("enter", "open bearer"), hint("tab", "active / revoked / pending"), keyBack},
 		{hint("r", "revoke"), hint("s", "reseal env"), hint("p", "repin (unclaimed only)"), keyQuit},
-		{hint("x", "prune revoked older than 30d (Revoked tab)")},
+		{hint("x", "prune revoked older than 30d (Revoked tab)"), hint("enter / r", "approve / reject a claim (Pending tab)")},
 	},
 	notes: []string{
 		"The status line shows id, generation, binding, portable and owner",
@@ -1954,7 +2163,7 @@ func (v *listView) renderTable(vis []int, width, avail int) string {
 	t := v.tbl
 	t.SetStyles(table.Styles{Header: mutedSt.PaddingRight(2), Cell: lipgloss.NewStyle().PaddingRight(2), Selected: focusSt})
 	exp := "expires"
-	if v.revoked {
+	if v.revoked() {
 		exp = "expired"
 	}
 	t.SetColumns([]table.Column{{Title: "subject", Width: 24}, {Title: exp, Width: 10}, {Title: "grants", Width: max(width-42, 6)}})
@@ -2152,6 +2361,9 @@ func (v *listView) viewDone(width, height int) string {
 		h := strings.Split(v.portHandoff(), "\n")
 		portable := v.capabilities[v.selectedIndex()].PortableWrapped != "" // still the old record until the reload
 		g := useGuidance(LoadPrefs(v.paths).Harness, v.doneSubj, portable, "run "+strings.TrimSpace(h[len(h)-1]))
+		if v.repinRemote() {
+			g = append(g, "The claim lands in this TUI's pending banner; approve it there.")
+		}
 		return onceScreen(width, height, "✓ Bearer re-issued", v.doneSubj, v.portNew, v.portPin, g, v.portArmed, v.portCopied)
 	case "portable-off":
 		title, note = "✓ Portable copy removed", "dop use no longer works for this bearer."
@@ -2168,6 +2380,19 @@ func (v *listView) viewDone(width, height int) string {
 
 // viewRepin is the PIN validity picker of a repin.
 func (v *listView) viewRepin(width, height int) string {
+	title := "New PIN for " + v.doneSubj
+	if v.reclaim {
+		title = "New claim for " + v.doneSubj
+	}
+	foot := footer(width, hint("enter", "next"), keyBack)
+	if v.repinStep == 1 {
+		var o [][2]string
+		for _, p := range runsOnPresets {
+			o = append(o, [2]string{p.label, p.hint})
+		}
+		body := append([]string{"  " + mutedSt.Render("Runs on"), ""}, optRows(o, v.runsCur)...)
+		return frame(width, height, title, nil, "", body, status{err: v.err}.String(), foot)
+	}
 	body := []string{"  " + mutedSt.Render("New PIN valid for"), ""}
 	for i, p := range repinTTLPresets {
 		row := fmt.Sprintf("%-4s", p.value)
@@ -2183,11 +2408,6 @@ func (v *listView) viewRepin(width, height int) string {
 			row += "  " + mutedSt.Render(p.label)
 		}
 		body = append(body, row)
-	}
-	foot := footer(width, hint("enter", "next"), keyBack)
-	title := "New PIN for " + v.doneSubj
-	if v.reclaim {
-		title = "New claim for " + v.doneSubj
 	}
 	return frame(width, height, title, nil, "", body, status{err: v.err}.String(), foot)
 }
@@ -2209,6 +2429,9 @@ func (v *listView) viewPortable(width, height int) string {
 	if v.pendingAction == "repin" {
 		title, verb = "Re-issue "+v.doneSubj+" with a new PIN?", "re-issue"
 		lines = []string{"the old bearer and PIN stop working", "the agent gets the new bearer and PIN from you"}
+		if v.repinRemote() {
+			lines = append(lines, "on a server: the handoff carries --remote, approve from the pending banner")
+		}
 	}
 	if v.portStep == 0 {
 		for i, l := range lines {

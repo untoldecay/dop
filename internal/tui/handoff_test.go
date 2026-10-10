@@ -35,7 +35,7 @@ var forbiddenPhrases = []string{
 func TestHandoffText_NoForbiddenPhrases(t *testing.T) {
 	for _, tc := range handoffCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildHandoffText(tc.bearer, tc.pin, tc.allowFileKeys)
+			got := buildHandoffText(tc.bearer, tc.pin, tc.allowFileKeys, false)
 			lower := strings.ToLower(got)
 			for _, f := range forbiddenPhrases {
 				if strings.Contains(lower, strings.ToLower(f)) {
@@ -49,7 +49,7 @@ func TestHandoffText_NoForbiddenPhrases(t *testing.T) {
 func TestHandoffText_ExactlyOneClaimCommand(t *testing.T) {
 	for _, tc := range handoffCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildHandoffText(tc.bearer, tc.pin, tc.allowFileKeys)
+			got := buildHandoffText(tc.bearer, tc.pin, tc.allowFileKeys, false)
 			if n := strings.Count(got, "dop claim "); n != 1 {
 				t.Errorf("want exactly 1 `dop claim ` substring, got %d\n--- handoff ---\n%s", n, got)
 			}
@@ -60,7 +60,7 @@ func TestHandoffText_ExactlyOneClaimCommand(t *testing.T) {
 func TestHandoffText_ContainsBearerAndPIN(t *testing.T) {
 	for _, tc := range handoffCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildHandoffText(tc.bearer, tc.pin, tc.allowFileKeys)
+			got := buildHandoffText(tc.bearer, tc.pin, tc.allowFileKeys, false)
 			if !strings.Contains(got, tc.bearer) {
 				t.Errorf("handoff missing bearer %q\n--- handoff ---\n%s", tc.bearer, got)
 			}
@@ -72,7 +72,7 @@ func TestHandoffText_ContainsBearerAndPIN(t *testing.T) {
 }
 
 func TestHandoffText_AllowFileKeysEmbedded(t *testing.T) {
-	got := buildHandoffText("tok_test", "AB-CD-EF", true)
+	got := buildHandoffText("tok_test", "AB-CD-EF", true, false)
 	if !strings.Contains(got, "DOP_ALLOW_FILE_KEYS=1") {
 		t.Errorf("want DOP_ALLOW_FILE_KEYS=1 in command when allowFileKeys=true\n--- handoff ---\n%s", got)
 	}
@@ -83,7 +83,7 @@ func TestHandoffText_AllowFileKeysEmbedded(t *testing.T) {
 
 func TestHandoffText_LinesBoundedAfterCommand(t *testing.T) {
 	// Contract: nothing after the single `dop claim …` line.
-	got := buildHandoffText("tok_test", "AB-CD-EF", false)
+	got := buildHandoffText("tok_test", "AB-CD-EF", false, false)
 	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
 	// Find the claim line.
 	claimIdx := -1
@@ -115,5 +115,17 @@ func handoffCases() []handoffCase {
 	return []handoffCase{
 		{"pin-bind default", "tok_1abcdef0123456789", "AB-CD-EF", false},
 		{"pin-bind allow-file-keys", "tok_1abcdef0123456789", "AB-CD-EF", true},
+	}
+}
+
+func TestHandoffText_RemoteEmbedsFlags(t *testing.T) {
+	got := buildHandoffText("tok_test", "AB-CD-EF", false, true)
+	for _, want := range []string{"dop claim --remote --key-type p256 AB-CD-EF", "DOP_ALLOW_FILE_KEYS=1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("remote handoff missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Count(got, "dop claim") != 1 {
+		t.Fatalf("remote handoff must hold exactly one claim command:\n%s", got)
 	}
 }

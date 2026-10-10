@@ -24,10 +24,17 @@ import (
 // pin: short claim PIN; empty when the token was issued --no-bind.
 // allowFileKeys: when true, embed DOP_ALLOW_FILE_KEYS=1 + --key-type p256
 // in the single command (never on a separate explanatory line).
-func buildHandoffText(bearer, pin string, allowFileKeys bool) string {
-	claimCmd := "DOP_TOKEN=" + bearer + " dop claim " + pin
+// remote: the agent runs on a Server install (no admin there) — the
+// command gets --remote and always asks for P-256 (the server is most
+// likely Linux; on a Mac the Secure Enclave is tried first anyway).
+func buildHandoffText(bearer, pin string, allowFileKeys, remote bool) string {
+	flags := ""
+	if remote {
+		flags, allowFileKeys = "--remote ", true
+	}
+	claimCmd := "DOP_TOKEN=" + bearer + " dop claim " + flags + pin
 	if allowFileKeys {
-		claimCmd = "DOP_TOKEN=" + bearer + " DOP_ALLOW_FILE_KEYS=1 dop claim --key-type p256 " + pin
+		claimCmd = "DOP_TOKEN=" + bearer + " DOP_ALLOW_FILE_KEYS=1 dop claim " + flags + "--key-type p256 " + pin
 	}
 	return "Scoped credential access via DOP — run:\n\n" +
 		"  " + claimCmd
@@ -35,11 +42,11 @@ func buildHandoffText(bearer, pin string, allowFileKeys bool) string {
 
 // bearerHandoff is the clipboard text for a fresh bearer: the agent
 // handoff when it carries a PIN, else the bare bearer.
-func bearerHandoff(bearer, pin string, allowFileKeys bool) string {
+func bearerHandoff(bearer, pin string, allowFileKeys, remote bool) string {
 	if pin == "" {
 		return bearer
 	}
-	return buildHandoffText(bearer, pin, allowFileKeys)
+	return buildHandoffText(bearer, pin, allowFileKeys, remote)
 }
 
 // useGuidance is the next-step block under a fresh bearer (plain text,

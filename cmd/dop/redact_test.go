@@ -56,3 +56,17 @@ func TestRedactPassesUnrelatedOutputIntact(t *testing.T) {
 		t.Fatalf("unrelated output changed")
 	}
 }
+
+func TestRedactDoesNotDelayOrdinaryOutput(t *testing.T) {
+	var out bytes.Buffer
+	vals, labels := redactTargets(redactEnv)
+	w := newRedactWriter(&out, vals, labels)
+	_, _ = w.Write([]byte("Password: "))
+	if out.String() != "Password: " {
+		t.Fatalf("a prompt with no secret prefix must go out at once, got %q", out.String())
+	}
+	_, _ = w.Write([]byte("ntn_ab"))
+	if strings.Contains(out.String(), "ntn_ab") {
+		t.Fatalf("a possible secret start must be held back, got %q", out.String())
+	}
+}

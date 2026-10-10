@@ -83,3 +83,13 @@ func TestGrant_EffectivePrefix_SanitizesExplicitOverride(t *testing.T) {
 		t.Errorf("EffectivePrefix with spaces: got %q, want %q", got, "BOILER_PENSIEVE")
 	}
 }
+
+// A token named like its integration must not double the prefix.
+func TestGrant_EffectivePrefix_CollapsesSharedName(t *testing.T) {
+	if got := (Grant{Integration: "notion_outgrey", Token: "notion_outgrey"}).EffectivePrefix(); got != "NOTION_OUTGREY" {
+		t.Errorf("shared name: got %q, want NOTION_OUTGREY", got)
+	}
+	if got := (Grant{Integration: "notion", Token: "read"}).EffectivePrefix(); got != "NOTION_READ" {
+		t.Errorf("distinct names: got %q, want NOTION_READ", got)
+	}
+}

@@ -46,40 +46,55 @@ func redactTargets(env map[string]string) (vals, labels [][]byte) {
 
 // redactWriter masks injected secret values in a stream before it
 // reaches the terminal — and so an agent harness transcript or the AI
-// provider (dop-8g7 follow-up). It holds back the last longest-value-1
-// bytes so a value split across two writes is still caught; Flush
-// releases them when the child exits.
+// provider. It holds back only an output tail that could be the start
+// of a secret (so a value split across writes is still caught); every
+// other byte goes out at once, so interactive prompts aren't delayed.
+// Flush releases the tail when the child exits.
 //
 // It stops accidental leaks (printenv, curl -v, error dumps), not a
-// child that encodes the value on purpose.
+// child that encodes the value on purpose. A write error stops all
+// further output (fail closed: never fall back to unmasked).
 type redactWriter struct {
 	mu     sync.Mutex
 	out    io.Writer
 	vals   [][]byte
 	labels [][]byte
-	hold   int
 	buf    []byte
+	failed error
 }
 
 func newRedactWriter(out io.Writer, vals, labels [][]byte) *redactWriter {
-	hold := 0
-	for _, v := range vals {
-		if len(v)-1 > hold {
-			hold = len(v) - 1
+	return &redactWriter{out: out, vals: vals, labels: labels}
+}
+
+// pendingPrefix is the length of the longest tail of b that is a proper
+// prefix of some secret — the bytes that must wait for the next write.
+func (w *redactWriter) pendingPrefix(b []byte) int {
+	best := 0
+	for _, v := range w.vals {
+		for k := min(len(b), len(v)-1); k > best; k-- {
+			if bytes.HasSuffix(b, v[:k]) {
+				best = k
+				break
+			}
 		}
 	}
-	return &redactWriter{out: out, vals: vals, labels: labels, hold: hold}
+	return best
 }
 
 func (w *redactWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.failed != nil {
+		return 0, w.failed
+	}
 	w.buf = append(w.buf, p...)
 	for i, v := range w.vals {
 		w.buf = bytes.ReplaceAll(w.buf, v, w.labels[i])
 	}
-	if n := len(w.buf) - w.hold; n > 0 {
+	if n := len(w.buf) - w.pendingPrefix(w.buf); n > 0 {
 		if _, err := w.out.Write(w.buf[:n]); err != nil {
+			w.failed = err
 			return 0, err
 		}
 		w.buf = append(w.buf[:0], w.buf[n:]...)
@@ -91,8 +106,8 @@ func (w *redactWriter) Write(p []byte) (int, error) {
 func (w *redactWriter) Flush() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if len(w.buf) == 0 {
-		return nil
+	if len(w.buf) == 0 || w.failed != nil {
+		return w.failed
 	}
 	_, err := w.out.Write(w.buf)
 	w.buf = w.buf[:0]
