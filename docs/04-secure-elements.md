@@ -14,13 +14,21 @@ Keys don't rotate on a schedule. They rotate when you tell them to — via `dop 
 
 Apple's Secure Enclave stores a P-256 private key that **never leaves the chip**. The agent asks the SE to sign exec challenges; the raw key is unreachable, even to code running as your uid. Copy the DOP folder to another Mac and `dop exec` fails — the key didn't come with you.
 
-**Today, no `dop` build reaches it.** DOP creates its SE key as a permanent keychain item, which macOS only allows to binaries carrying keychain entitlements — and those come only with an Apple provisioning profile. A code signature alone, even Developer ID, isn't enough: key creation fails with `-34018` (`errSecMissingEntitlement`) and the claim falls back to a file key. Verified on 2026-10-10 (bd dop-ccy), fresh vault, PIN bearer, `dop claim` with the default key type:
+**Up to v1.18.2, no `dop` build reached it.** DOP created its SE key as a permanent keychain item, which macOS only allows to binaries carrying keychain entitlements — and those come only with an Apple provisioning profile. A code signature alone, even Developer ID, isn't enough: key creation failed with `-34018` (`errSecMissingEntitlement`) and the claim fell back to a file key. Verified on 2026-10-10 (bd dop-ccy), fresh vault, PIN bearer, `dop claim` with the default key type:
 
 | Build | Signature | Agent key after claim | Extractable | `exec` with bearer | `exec` without bearer | `dop doctor` |
 |---|---|---|---|---|---|---|
 | Official v1.18.2 release | Developer ID + hardened runtime | ed25519 file (SE `-34018`) | yes (0600 file) | works | no (needs P-256) | says "SE access should work" — **wrong** |
 | v1.18.2 signed with an Apple Development cert | Apple Development + hardened runtime | ed25519 file (SE `-34018`) | yes | works | no | "needs a provisioning profile" — right |
 | `go build` from source | ad-hoc | ed25519 file (SE `-34018`) | yes | works | no | "adhoc-signed, SE will fail" — right |
+
+**Since dop-ofn (next release): every build reaches it.** DOP now creates the agent key inside the Secure Enclave *without* a keychain item — the private key stays in the chip, and DOP keeps only its SE-wrapped handle in `agent-keys/<lookup>.se` (0600). That handle is useless on another Mac (the key isn't in it), and needs no entitlement, so signed, Apple Development and plain source builds all get it:
+
+| Build (dop-ofn) | Agent key after claim | Extractable | `exec` with bearer | `exec` without bearer | `dop doctor` |
+|---|---|---|---|---|---|
+| any (verified on an ad-hoc `go build`) | Secure Enclave P-256, `agent-keys/<lookup>.se` | no — the private key never leaves the chip | works | works | `secure-enclave: available` (real probe) · `agent:keys: all hardened` |
+
+Rotation, re-issue, `dop agent migrate`, revoke clean-up and bearer-free `dop exec` all work with handle keys. A handle copied from another machine (or corrupted) fails with "not usable on this Mac". Same-user processes on *this* Mac can still ask the SE to sign — the same-machine trust model is unchanged. Keys created by an older build stay readable.
 
 **Fallback behavior.** On macOS, when the SE can't be used, `dop claim` prints a loud warning box and writes an **ed25519 file key** (0600, readable by any process running as you). It does not refuse. Set `DOP_ALLOW_FILE_KEYS=1` and claim with `--key-type p256` to get a P-256 file key instead — still extractable, but it supports rotation, grant edits and bearer-free `dop exec`. On Linux and in CI, file-backed keys are the only option.
 

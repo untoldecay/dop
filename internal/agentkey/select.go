@@ -30,6 +30,7 @@ func Open(paths *config.Paths, lookupID string) (Store, error) {
 // a key for this lookup.
 func OpenByType(paths *config.Paths, lookupID, expectedType string) (Store, error) {
 	kc := NewKeychainBackend()
+	kc.Root = paths.Root
 	if kc.Available() {
 		if s, err := kc.Load(lookupID); err == nil {
 			if expectedType == "" || s.KeyType() == expectedType {
@@ -78,6 +79,7 @@ func OpenByType(paths *config.Paths, lookupID, expectedType string) (Store, erro
 //   while making the security regression visible on every claim.
 func Create(paths *config.Paths, lookupID, keyType string) (Store, error) {
 	kc := NewKeychainBackend()
+	kc.Root = paths.Root
 
 	// Auto: SE if available, else legacy ed25519.
 	if keyType == "" {
@@ -201,6 +203,7 @@ func warnSEFileFallback() {
 // Delete removes the key from wherever it lives. Idempotent.
 func Delete(paths *config.Paths, lookupID string) error {
 	kc := NewKeychainBackend()
+	kc.Root = paths.Root
 	if kc.Available() {
 		_ = kc.Delete(lookupID)
 	}

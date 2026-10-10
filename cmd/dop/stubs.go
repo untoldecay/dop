@@ -20,6 +20,7 @@ import (
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/admininvite"
+	"github.com/fray/dop/internal/agentkey"
 	"github.com/fray/dop/internal/approval"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
@@ -420,6 +421,7 @@ func runDoctor(args []string) int {
 	// v1.11 — agent-key backend summary + codesign posture.
 	dopCheckAgentKeys(paths, line)
 	dopCheckCodesign(line)
+	dopCheckSecureEnclave(line)
 
 	// --- security ---
 	if *securityMode {
@@ -751,6 +753,19 @@ func hexEncodeBytes(b []byte) string { return hex.EncodeToString(b) }
 // reports whether it's code-signed well enough to talk to the
 // Secure Enclave. Adhoc / linker-signed binaries fail SE keygen
 // with errSecMissingEntitlement (-34018).
+// dopCheckSecureEnclave asks the chip for a throwaway key (dop-4td):
+// a real answer instead of a guess from the certificate type.
+func dopCheckSecureEnclave(line func(status, name, detail string)) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	if err := agentkey.ProbeSecureEnclave(); err != nil {
+		line("!", "secure-enclave", "unavailable ("+err.Error()+") — new agent keys fall back to extractable files")
+		return
+	}
+	line("✓", "secure-enclave", "available — new agent keys are created inside it (non-extractable)")
+}
+
 func dopCheckCodesign(line func(status, name, detail string)) {
 	if runtime.GOOS != "darwin" {
 		return
@@ -766,22 +781,19 @@ func dopCheckCodesign(line func(status, name, detail string)) {
 	_ = cmd.Run()
 	s := out.String()
 	switch {
+	// dop-ofn: agent keys use Secure Enclave handles, which need no
+	// entitlement — the signature no longer decides SE access, only
+	// how macOS treats a downloaded binary (Gatekeeper / notarization).
 	case strings.Contains(s, "not signed"):
-		line("✗", "codesign:self", "binary is unsigned — Secure Enclave keygen will fail; agent keys fall back to legacy file")
+		line("!", "codesign:self", "unsigned — macOS may refuse to run a downloaded copy (Gatekeeper); the Secure Enclave doesn't depend on it")
 	case strings.Contains(s, "adhoc") || strings.Contains(s, "Signature=adhoc"):
-		line("!", "codesign:self", "adhoc-signed (linker default) — Secure Enclave keygen will FAIL. Install an officially-signed release for SE-backed agent keys.")
-	case strings.Contains(s, "TeamIdentifier=not set"):
-		line("!", "codesign:self", "signed but no team identifier — SE access may not work. Reinstall a properly signed release.")
+		line("✓", "codesign:self", "ad-hoc (local build) — fine here; a downloaded copy needs a Developer ID signature to pass Gatekeeper")
 	case strings.Contains(s, "Apple Development:"):
-		// Apple Development cert can hardened-runtime-sign but still
-		// gets errSecMissingEntitlement (-34018) from SE without an
-		// App Store provisioning profile. Distributable SE access
-		// needs Developer ID Application.
-		line("!", "codesign:self", "signed with Apple Development cert — SE keygen still returns -34018 without a provisioning profile. Distributable SE access needs a Developer ID Application cert.")
+		line("✓", "codesign:self", "Apple Development cert — fine on this Mac; distribution needs a Developer ID signature (notarization)")
 	case strings.Contains(s, "Developer ID Application:"):
-		line("✓", "codesign:self", "signed with Developer ID Application + hardened runtime — SE access should work")
+		line("✓", "codesign:self", "Developer ID Application + hardened runtime")
 	default:
-		line("✓", "codesign:self", "signed, SE access should work")
+		line("✓", "codesign:self", "signed")
 	}
 }
 

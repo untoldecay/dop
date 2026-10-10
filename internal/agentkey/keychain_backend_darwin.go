@@ -46,6 +46,9 @@ type KeychainBackend struct {
 	// keys under kSecAttrApplicationTag. Kept configurable so tests
 	// can use a namespace that doesn't collide with a real install.
 	AppTagPrefix string
+	// Root is the DOP root: SE key handles live in <Root>/agent-keys/
+	// as <lookup>.se (dop-ofn). Empty → legacy keychain-item mode.
+	Root string
 }
 
 // NewKeychainBackend returns a KeychainBackend. Actual availability

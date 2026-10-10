@@ -6,8 +6,10 @@
 
 package agentkey
 
+import "errors"
+
 // KeychainBackend on non-darwin is a no-op — SE isn't available.
-type KeychainBackend struct{}
+type KeychainBackend struct{ Root string }
 
 // NewKeychainBackend returns a stub that always reports unavailable.
 func NewKeychainBackend() *KeychainBackend { return &KeychainBackend{} }
@@ -30,3 +32,6 @@ func (b *KeychainBackend) Generate(_, _ string) (Store, error) {
 
 // Delete is a no-op on non-darwin.
 func (b *KeychainBackend) Delete(_ string) error { return nil }
+
+// ProbeSecureEnclave: no Secure Enclave off macOS.
+func ProbeSecureEnclave() error { return errors.New("no Secure Enclave on this platform") }
