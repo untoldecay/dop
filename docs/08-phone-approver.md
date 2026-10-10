@@ -50,58 +50,65 @@ fake wake-ups; it cannot approve anything.
 ## Components
 
 ```
-agent host / admin Mac              relay (Cloud Run)              iPhone
-──────────────────────              ─────────────────              ──────
-request record  ──push──▶ vault repo ◀──pull── app
-  (signed by requester)                                            Face ID
-"pending" ping  ───────▶ relay ──APNs──▶ wakes app                 or passphrase
+agent host / admin Mac              relay (Cloudron)               iPhone
+──────────────────────              ────────────────               ──────
+request record  ──push──▶ vault repo                               (no git here)
+  (signed by requester)
+request, sealed ───────▶ relay ──APNs──▶ wakes app ──fetch──▶ opens it
+to the phone's key       (holds ciphertext                         Face ID
+                          until expiry)                            or passphrase
                                                                    signs decision
-decision record ◀──pull── vault repo ◀──push── app
-  (verified against device pubkey)
+decision record ◀──────── relay ◀──────────────────────────────── posts it
+  (verified against device pubkey;
+   also mirrored to vault repo for audit)
 ```
 
 - **Requester** (dop on the agent host or the admin Mac): writes a signed
-  request record to the vault repo under `pending-approvals/`, pings the
-  relay, then polls the repo for a decision. Keeps serving the web page and
-  the QR as today, so the passphrase path is untouched.
-- **Vault repo**: the bus. Already shared by every machine, already pulled
-  by the phone's deploy key (read) and pushed by it (write, decisions only).
-  Remote claims already travel this way.
-- **Relay**: a small HTTP service on Cloud Run holding an APNs auth key.
-  Accepts `{device_id, kind}` from a requester, forwards a push to Apple.
-  Rate-limited per device. Stores nothing durable. The paid tier is this
-  relay.
-- **App**: native Swift. Lists pending requests, shows what is at stake,
-  approves or rejects with Face ID or the typed passphrase, shows history
-  from the audit log. Pairs by scanning the Device invite QR from the TUI.
+  request record to the vault repo under `pending-approvals/` (audit, and
+  so other Macs see it), seals the same record to the phone's public key
+  and posts the ciphertext to the relay, then polls the relay for a
+  decision. Keeps serving the web page and the QR as today, so the
+  passphrase path is untouched.
+- **Vault repo**: the record of truth for every machine that has git. The
+  phone never touches it.
+- **Relay**: a small HTTP service on Camille's Cloudron (deployed with the
+  Cloudron CLI) holding an APNs auth key. Keeps sealed requests until they
+  expire, forwards a push to Apple, hands the ciphertext to the phone when
+  it asks, carries the signed decision back. It cannot read a request or
+  forge a decision. Rate-limited per device. The paid tier is this relay.
+- **App**: native Swift, no git. Fetches sealed requests from the relay,
+  opens them with its Secure Enclave key, shows what is at stake, approves
+  or rejects with Face ID or the typed passphrase, shows history. Pairs by
+  scanning the Device invite QR from the TUI.
 
 ## Flows
 
 ### Pairing
 
-1. TUI: Add › Device, choose "phone". A QR appears carrying the vault URL, a
-   one-time invite PIN and a read/write deploy credential scoped to the repo.
-2. App scans, creates its Secure Enclave key, pushes `devices/<id>.json`
-   (pubkey, name, created_at) signed with the invite PIN.
+1. TUI: Add › Device, choose "phone". A QR appears carrying the relay URL, a
+   one-time invite PIN and a pairing token for the relay.
+2. App scans, creates its Secure Enclave key, posts `{pubkey, name}` to the
+   relay signed with the invite PIN. The Mac picks it up and stages
+   `devices/<id>.json` in the vault.
 3. Admin approves in List › Team › Pending, exactly like a device today. The
    admin's signature over the device record is what every requester trusts.
 4. App registers its APNs token with the relay under the device id.
 
 ### Approval
 
-1. Requester stages `pending-approvals/<request_id>.json`: kind (claim,
-   remote-claim, print-bearer, print-keys, protected-grant), subject,
-   agent name, host, harness, what-happens-if-yes, expires_at, a nonce, and
-   the requester's signature. Pushes. Pings the relay.
-2. Phone wakes. App pulls, lists the request with a colour and icon per
-   kind (claim: neutral; print keys: red, "keys will be shown in an AI
-   transcript"; protected grant: amber).
+1. Requester builds the request record: kind (claim, remote-claim,
+   print-bearer, print-keys, protected-grant), subject, agent name, host,
+   harness, what-happens-if-yes, expires_at, a nonce, and the requester's
+   signature. Stages it in `pending-approvals/` for the record, seals it to
+   each registered phone's public key, posts the ciphertexts to the relay.
+2. Phone wakes. App fetches, opens the request with its key, lists it with
+   a colour and icon per kind (claim: neutral; print keys: red, "keys will
+   be shown in an AI transcript"; protected grant: amber).
 3. You approve or reject. Face ID, or the passphrase typed on the phone.
-   App writes `pending-approvals/<request_id>.decision.json`: decision,
-   device id, timestamp, signature over (request_id, nonce, decision).
-   Pushes.
-4. Requester sees the decision on its next poll, verifies the device
-   signature against the vault, proceeds. Audit event records the device.
+   App posts the decision to the relay: decision, device id, timestamp,
+   signature over (request_id, nonce, decision).
+4. Requester polls the relay, verifies the device signature against the
+   vault, proceeds, and writes the decision record to the repo for audit.
 
 The web page and `dop approve <SAS>` keep working in parallel. First valid
 answer wins; the others are ignored and logged.
@@ -109,8 +116,9 @@ answer wins; the others are ignored and logged.
 ### Fallbacks
 
 - Phone offline: the web page and the Mac passphrase path are unchanged.
-- Relay down: no wake-up; the app still shows the request on open. The
-  requester never depends on the relay to complete.
+- Relay down: the phone path is down with it; the web page and the Mac
+  passphrase path still complete every request. The relay is never on the
+  critical path of the passphrase flow.
 - Lost phone: `dop team remove-device <id>` on the Mac. Every requester
   rejects its signatures from the next pull.
 
@@ -151,19 +159,20 @@ commands the Mac daemon executes over the same bus.
 - **Paid Apple developer account** for push notifications and TestFlight.
   A free account runs the prototype on your own phone (seven-day
   re-install, a few devices) with Face ID and the Secure Enclave working.
-- **Build under Camille's own team.** The dop Mac binaries must stop being
-  signed with the teammate's Developer ID; the iOS app and the relay's
-  APNs key live under Camille's account.
-- The phone needs push access to the vault repo for decisions. A deploy
-  credential scoped to that one repo, issued at pairing.
+- **Build under Camille's own team.** From the next release the dop Mac
+  binaries are signed with Camille's identity (chauve.camille@gmail.com,
+  8L74UBM58L); Secure Enclave on macOS returns once that account holds a
+  Developer ID. The iOS app and the relay's APNs key live there too.
+- No git on the phone. Requests reach it sealed through the relay; the
+  relay never holds a key that opens them.
 
 ## Milestones
 
 1. **Bus and records.** Requesters stage request records and accept
    decision records; `dop approve --device` on a second Mac as the first
    "device" so the protocol is tested without a phone. e2e.
-2. **Relay.** Cloud Run service, APNs key, ping from requesters, rate
-   limits, no durable state.
+2. **Relay.** Cloudron app (Cloudron CLI), APNs key, sealed-request store
+   with expiry, decision hand-back, rate limits.
 3. **App prototype.** Pairing, list, Face ID approve, free account on one
    phone.
 4. **Per-kind presentation.** dop-dkj resolved on the phone and ported back
@@ -173,10 +182,8 @@ commands the Mac daemon executes over the same bus.
 
 ## Open questions
 
-- Does the phone pull the repo directly (git on iOS is heavy) or does the
-  requester also post the request body to the relay encrypted to the
-  device's public key? The second keeps the relay blind and makes the app
-  simpler, at the cost of the relay carrying ciphertext.
+- Settled 2026-10-10: no git on the phone; the relay carries requests
+  sealed to the device key.
 - Per-vault policy "phone and passphrase both required" for print-keys?
 - Multiple phones per admin, and multiple admins per vault: any registered
   device of any admin may approve, or only the issuing admin's?
