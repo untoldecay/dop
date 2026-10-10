@@ -34,7 +34,7 @@ The trust unit is the OS user account. If something runs as your uid, it inherit
 
 **A same-uid attacker on an admin host.** If malware runs as you while your admin daemon is unlocked, it can ask the daemon to issue bearers, sign records, or decrypt capability env. The daemon socket is 0600; a process running as you can open it. This is the same posture as "same-uid attacker gets your SSH agent" — DOP's countermeasures are an unlocked daemon with a short-lived session and audit entries you can review, not a trust boundary against your own uid.
 
-**A same-uid attacker on an agent host.** The agent's ed25519 private key sits at `~/.config/dop/agent-keys/<lookup>.key` mode 0600. Anything running as you can copy it to another Mac and run `dop exec` from there. Secure Enclave fixes this on signed macOS binaries (see [04-secure-elements.md](04-secure-elements.md)); on Linux and in CI, file-backed keys are the only option.
+**A same-uid attacker on an agent host.** On a Mac with a security chip, the agent's key lives in the Secure Enclave: nothing running as you can copy it away, but it can still ask the chip to sign while it runs on that Mac. On Linux, in CI and on older Macs, the key is a 0600 file (`agent-keys/<id>.p256`) — anything running as you can copy it to another machine and run `dop exec` from there. See [Agent keys](04-secure-elements.md).
 
 **Audit log truncation or tampering.** The log is a plain JSONL file, 0600, no hash chain yet. A same-uid attacker can rewrite history. `dop watch` running on a second host would see live events but can't retroactively prove the on-disk log is intact. If you need SOC2-grade retention, ship the log to a central store you own — DOP won't do it for you.
 
@@ -54,4 +54,4 @@ The guarantees above are pinned by numbered MUST/MUST-NOT design contracts kept 
 
 ## What's next
 
-[Secure elements](04-secure-elements.md) walks through what hardware-backed agent identity actually changes about the "same-uid attacker" paragraphs — and what it still doesn't fix.
+[Agent keys](04-secure-elements.md) walks through where each agent's key lives, machine by machine — and what the Secure Enclave still doesn't fix.

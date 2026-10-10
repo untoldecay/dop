@@ -31,7 +31,8 @@ Every DOP feature as of **v1.13.0**, in one scannable table. Grouped by surface,
 | Integration kinds | Endpoints probe | Opt-in `--probe-endpoints` walks common OpenAPI paths (api) or `tools/list` (mcp), stamps the result in metadata. | v1.13.0-rc15 |
 | Integration kinds | Mutable kind | Flip an integration between api / cli / mcp / other without re-issuing. | v1.13.0-rc13 |
 | Integration kinds | Legacy default | Pre-rc13 integrations with no `kind` field read as `api`. Zero migration. | v1.13.0-rc13 |
-| Agent identity | P-256 Secure Enclave | Hardware-backed, non-extractable on signed macOS builds. | v1.11 |
+| Agent identity | P-256 Secure Enclave | Key created in the Mac's security chip and never leaves it; DOP keeps only a handle that's useless on another Mac. Every build — no special signature. | v1.11 · v1.19 |
+| Agent identity | P-256 file fallback | Linux, CI and Macs without the chip get a P-256 file key, so grant edits, rotation and bearer-free exec work everywhere. | v1.19 |
 | Agent identity | File-backed P-256 fallback | Loud fallback (boxed warning + doctor flag) when SE isn't reachable; opt-in via `DOP_ALLOW_FILE_KEYS=1`. | v1.11 |
 | Agent identity | Legacy ed25519 | Still readable; one-command migration via `dop agent migrate`. | v1.0 |
 | Agent identity | Direct availability | Grant edits + bearer rotation take effect on the agent's next exec without re-claim. ECDH re-wrap over the admin daemon. | v1.12 |
@@ -63,7 +64,7 @@ Every DOP feature as of **v1.13.0**, in one scannable table. Grouped by surface,
 | Observability | `dop doctor` | Binary deps, admin session state, trust file, SE vs file-key counts, codesign posture, recent audit activity. | v1.0 |
 | Observability | `dop doctor --security` | Adds hardening-focused checks on top of the base run. | v1.7 |
 | Observability | Clean non-admin errors | `integration list` on a locked vault → "run `dop admin login`" message, not a raw SOPS parse error. | v1.13.0-rc17 |
-| Observability | Loud SE-fallback warning | Bordered Unicode box when the binary can't reach the Secure Enclave. | v1.13.0-rc17 |
+| Observability | Loud SE-fallback warning | Bordered Unicode box when a Mac claim can't use the Secure Enclave; `dop doctor` asks the chip directly. | v1.13.0-rc17 · v1.19 |
 | Developer / ops | `git-credential-dop` | Git picks up tokens from DOP automatically for clone/push. | v1.0 |
 | Developer / ops | `--skip-approval` | CI test paths can bypass approval; refused outside test contexts. | v1.0 |
 | Developer / ops | `--passphrase-stdin` | Every passphrase prompt accepts stdin alternative; TUI uses this for secret-safe hand-off. | v1.13.0-rc12 |

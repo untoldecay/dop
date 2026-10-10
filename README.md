@@ -64,6 +64,13 @@ its pass entirely — it stops working on its very next try.
 When a new agent asks for access, it shows a QR code. Scan it with your phone,
 type your approval code, done. Nothing to install on the phone.
 
+**An agent's key can't be copied.**
+Each agent gets its own key, made on its own machine, and proves it on every
+call. On a Mac, that key is created inside the computer's security chip and
+never leaves it: copy the agent's files to another computer and they're useless
+there. On Linux servers and CI it's a protected file.
+[How it works on each machine →](docs/04-secure-elements.md)
+
 **Made for small teams.**
 Invite a teammate; they join when they're ready and you let them in. If two of
 you change things at the same time, DOP combines both — it only asks when you
@@ -93,7 +100,7 @@ named slice of it ("read Notion"), a **bearer** is the pass an agent holds.
 - [Getting started](docs/01-onboarding.md) — install, first vault, first agent
 - [Teams](docs/02-teams.md) — sharing, invites, a lost laptop
 - [Agents & tools](docs/03-agentic-hubs.md) — Claude Code, Codex, Cursor, shared rooms
-- [How agent identity works](docs/04-secure-elements.md) · [What DOP protects (and doesn't)](docs/05-threat-model.md)
+- [Agent keys, machine by machine](docs/04-secure-elements.md) · [What DOP protects (and doesn't)](docs/05-threat-model.md)
 - [Servers & CI](docs/06-ci-headless.md) · [Every command](docs/07-cli-reference.md) · [Recipes](docs/RECIPES.md)
 
 Updates: `dop update` (or More › Update in the app) · [Release notes](https://github.com/untoldecay/dop/releases)
