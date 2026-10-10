@@ -145,6 +145,7 @@ Adopted from Benji Taylor's "Family values" and adapted:
 ## Implementation Decisions
 
 - **Two planes.** Decisions (approve, reject) are signed on the phone and verified by the requester; they need no Mac. Management (grants, issue, revoke, integrations, team) are signed commands the admin Mac executes through its daemon; the phone shows "queued for your Mac" when it is offline. The design must make the plane visible without making it a lesson.
+- **Revive from the phone.** When the Mac's admin session has timed out, a management command prompts the phone: "Your Mac's admin session is locked — revive it?" Face ID revives it for one command or for the configured window. Design this as a tray on top of the pending command, never as a dead end. It is the paid-only admin convenience; the TUI stays complete without it.
 - **Identity.** The phone is a paired device with a Secure Enclave key, recorded in the vault and approved like any device. Avatars are labels on identities, never identities.
 - **Agent card.** A small, agent-declared card (name, image or shape spec, traits) stored on the binding at claim or later via exec; shown once to the operator before it is used; operator edits override and are signed by the operator.
 - **Default face.** A deterministic face derived from the agent public key, rendered by the app; the same key gives the same face on every device.
@@ -162,7 +163,7 @@ Adopted from Benji Taylor's "Family values" and adapted:
 ## Out of Scope
 
 - 3D avatars, avatar generation from a photo.
-- Unlocking the Mac admin session from the phone, any handling of the admin passphrase on the phone.
+- Any handling of the admin passphrase on the phone. (Reviving the Mac session with Face ID is in scope; typing the admin passphrase on the phone is not.)
 - Credential values ever displayed on the phone.
 - Traffic monitoring, threat scoring, goal declaration on exec (future work, separate conversation; this design leaves room for a per-agent activity view and a context block).
 - Android.

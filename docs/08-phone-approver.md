@@ -140,6 +140,34 @@ Replay protection: the decision binds request_id and nonce; a request is
 single-use and expires. Decisions for unknown or expired requests are
 dropped.
 
+## Two planes, and reviving the admin session from the phone
+
+Decisions (approve, reject) are signed on the phone and verified by the
+requester. No Mac is needed.
+
+Management (grants, issue, re-issue, revoke, integrations, team) needs the
+admin key, which never leaves the admin machine. The phone signs an
+instruction; the admin machine's daemon executes it and reports back through
+the relay. The phone shows "queued for your Mac" when no admin machine is
+reachable. Any admin machine works, Linux included; only agent keys in the
+Secure Enclave are Mac-specific.
+
+The admin session keeps its idle timeout (Settings › Admin session, "never"
+allowed). When the session is locked and a signed instruction arrives, the
+daemon does not stall: the phone can **revive** the session. The Mac keeps a
+second wrapping of the admin key in its own keychain, unlockable only when a
+valid signed revive from a paired phone arrives, gated by Face ID on the
+phone. The revived session lives for one instruction, or for the configured
+idle window — a per-vault setting. The passphrase typed at the Mac remains the
+other way in. This is the one admin convenience that exists only through the
+app, which makes it a natural paid feature while the TUI stays complete and
+free.
+
+Full admin on the phone (the phone holds its own wrapped admin key and runs
+dop's core, no laptop at all) is a possible later direction. It requires the
+core to stop shelling out to sops and git — tracked as its own issue — and
+reopens "no git on the phone" for that mode only.
+
 ## v1 scope: control and validation
 
 - Pairing through the existing Device invite.
