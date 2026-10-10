@@ -10,13 +10,21 @@ Keys don't rotate on a schedule. They rotate when you tell them to — via `dop 
 
 **Same-uid risk.** A file at mode 0600 is as safe as your user account. Anything running as you can copy the file to another Mac and `dop exec` from there. That's the attack Secure Enclave kills.
 
-## Secure Enclave on macOS (v1.11, still landing)
+## Secure Enclave on macOS — what actually happens today
 
-Apple's Secure Enclave stores a P-256 private key that **never leaves the chip**. The agent asks the SE to sign exec challenges; the raw key is unreachable, even to code running as your uid. Copy `~/.config/dop` to another Mac and `dop exec` fails — the key didn't come with you.
+Apple's Secure Enclave stores a P-256 private key that **never leaves the chip**. The agent asks the SE to sign exec challenges; the raw key is unreachable, even to code running as your uid. Copy the DOP folder to another Mac and `dop exec` fails — the key didn't come with you.
 
-v1.11 shipped the SE backend with a file-based fallback. What's landing is **production hardening**: the SE path requires a Developer ID-codesigned `dop` binary with the right entitlements. The install script's codesigning hook and `dop doctor` SE check went in during v1.11.1, but if you built from source or installed before that hook, you're on the ed25519 file-backed path until you re-install or migrate.
+**Today, no `dop` build reaches it.** DOP creates its SE key as a permanent keychain item, which macOS only allows to binaries carrying keychain entitlements — and those come only with an Apple provisioning profile. A code signature alone, even Developer ID, isn't enough: key creation fails with `-34018` (`errSecMissingEntitlement`) and the claim falls back to a file key. Verified on 2026-10-10 (bd dop-ccy), fresh vault, PIN bearer, `dop claim` with the default key type:
 
-**Fallback behavior.** On macOS without a usable SE (unsigned binary, old hardware, SE unavailable), new claims refuse by default rather than silently writing an extractable key. Set `DOP_ALLOW_FILE_KEYS=1` to opt in — the risk shows up in `dop doctor` so you can't forget it's on. On Linux and in CI, file-backed keys are the only option; the same opt-in applies.
+| Build | Signature | Agent key after claim | Extractable | `exec` with bearer | `exec` without bearer | `dop doctor` |
+|---|---|---|---|---|---|---|
+| Official v1.18.2 release | Developer ID + hardened runtime | ed25519 file (SE `-34018`) | yes (0600 file) | works | no (needs P-256) | says "SE access should work" — **wrong** |
+| v1.18.2 signed with an Apple Development cert | Apple Development + hardened runtime | ed25519 file (SE `-34018`) | yes | works | no | "needs a provisioning profile" — right |
+| `go build` from source | ad-hoc | ed25519 file (SE `-34018`) | yes | works | no | "adhoc-signed, SE will fail" — right |
+
+**Fallback behavior.** On macOS, when the SE can't be used, `dop claim` prints a loud warning box and writes an **ed25519 file key** (0600, readable by any process running as you). It does not refuse. Set `DOP_ALLOW_FILE_KEYS=1` and claim with `--key-type p256` to get a P-256 file key instead — still extractable, but it supports rotation, grant edits and bearer-free `dop exec`. On Linux and in CI, file-backed keys are the only option.
+
+**The way forward (tested).** Apple's CryptoKit can create a Secure Enclave key **without any keychain entitlement**: the key stays in the chip and the program keeps only an encrypted handle that works on that Mac only. A plain, ad-hoc-signed test program created an SE key, reloaded it from its 284-byte handle, signed with it and did ECDH. Switching DOP's macOS backend to that model would give SE-backed agent keys to every build — signed or not — with no Apple Developer account involved.
 
 **Migration.** `dop agent migrate <lookup>` creates a fresh SE-backed P-256 key, re-signs the capability record, and keeps the old file key for 12 hours as an escape hatch before deletion. Admin session + approval passphrase required — this is a real re-enrollment.
 
