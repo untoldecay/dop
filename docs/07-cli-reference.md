@@ -197,7 +197,7 @@ Sidecar records are rewritten on save; orphaned or revoked capabilities are clea
 
 ### `dop vault login` / `dop vault logout`
 
-DOP syncs the vault repo itself — git doesn't need to be installed. For an `https://` vault it logs in with, in order: `DOP_REPO_TOKEN`, a token saved with `dop vault login`, then git's own saved logins (credential helpers such as the macOS keychain) when git happens to be installed, then no login (public or local repos). `ssh://` / `git@` vaults use the SSH agent, then `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`, checked against `~/.ssh/known_hosts`.
+DOP syncs the vault repo itself — git doesn't need to be installed. For an `https://` vault it logs in with, in order: `DOP_REPO_TOKEN`, a token saved with `dop vault login`, then git's own saved logins (credential helpers such as the macOS keychain) when git happens to be installed, then no login (public or local repos). `ssh://` / `git@` vaults use the SSH agent, then `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`. The server is checked against `~/.ssh/known_hosts`; when that file doesn't list it (a fresh machine), GitHub's and GitLab's published host keys are built in. An entry in `known_hosts` that disagrees is always refused.
 
 ```
 dop vault login [--user <name>] [<host>]   # token on stdin, or typed hidden

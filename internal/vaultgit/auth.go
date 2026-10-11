@@ -16,8 +16,6 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	gitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // How dop logs in to the vault repo, first that works wins:
@@ -224,27 +222,9 @@ func sshCandidates(ep *transport.Endpoint) ([]candidate, error) {
 		cs = append(cs, candidate{"ssh key " + name, a})
 	}
 	if len(cs) == 0 {
-		return nil, errors.New("no SSH key found: start ssh-agent with your key loaded, or use an https:// vault URL with a repo token")
+		return nil, fmt.Errorf("no SSH key on this machine for %s: create one (ssh-keygen -t ed25519) and add it to your %s account, or use the https:// vault URL with a repo token", ep.Host, ep.Host)
 	}
 	return cs, nil
-}
-
-func hostKeyCallback() (ssh.HostKeyCallback, error) {
-	home, _ := os.UserHomeDir()
-	files := []string{filepath.Join(home, ".ssh", "known_hosts")}
-	if env := os.Getenv("SSH_KNOWN_HOSTS"); env != "" {
-		files = filepath.SplitList(env)
-	}
-	var existing []string
-	for _, f := range files {
-		if _, err := os.Stat(f); err == nil {
-			existing = append(existing, f)
-		}
-	}
-	if len(existing) == 0 {
-		return nil, errors.New("no ~/.ssh/known_hosts: connect once with `ssh -T git@<host>` to trust the server, or use an https:// vault URL")
-	}
-	return knownhosts.New(existing...)
 }
 
 // isAuthError reports a refusal that the next candidate might fix.
@@ -281,8 +261,16 @@ func withAuth(url string, op func(transport.AuthMethod) error) error {
 		}
 		last = err
 	}
-	if host := Host(url); host != "" && !strings.HasPrefix(url, "git@") && !strings.HasPrefix(url, "ssh://") {
-		return fmt.Errorf("%w — %s refused every login dop tried. Save a repo token: dop vault login %s", last, host, host)
+	host := Host(url)
+	if host == "" {
+		return last
 	}
-	return last
+	if ep, err := transport.NewEndpoint(url); err == nil && ep.Protocol == "ssh" {
+		var tried []string
+		for _, c := range cs {
+			tried = append(tried, c.name)
+		}
+		return fmt.Errorf("%w — %s refused every SSH key dop tried (%s). Add this machine's public key to your %s account, or use the https:// vault URL with a repo token", last, host, strings.Join(tried, ", "), host)
+	}
+	return fmt.Errorf("%w — %s refused every login dop tried. Save a repo token: dop vault login %s", last, host, host)
 }
