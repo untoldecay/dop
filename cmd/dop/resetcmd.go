@@ -39,6 +39,14 @@ func runAdminReset(args []string) int {
 		return 1
 	}
 
+	// Under DOP_HOME only that install's folder goes: the binary and the
+	// Claude skill are shared with the default install (contract 26).
+	separate := config.HomeOverride() != ""
+	if separate && *purge {
+		fmt.Fprintln(os.Stderr, "dop admin reset: DOP_HOME is set — removing only that install; the dop binary is shared, so --purge is ignored.")
+		*purge = false
+	}
+
 	// Enumerate what will be deleted.
 	victims := []string{paths.Root}
 	fmt.Fprintln(os.Stderr, "dop admin reset will DELETE the following:")
@@ -61,7 +69,9 @@ func runAdminReset(args []string) int {
 	fmt.Fprintln(os.Stderr, "  · pending PIN + remote claims + admin invites (local copies)")
 	fmt.Fprintln(os.Stderr, "  · this machine's audit log")
 	fmt.Fprintln(os.Stderr, "  · credential-map.yaml")
-	fmt.Fprintln(os.Stderr, "  · DOP Claude Code skill + /dop-use command (loose files + plugin)")
+	if !separate {
+		fmt.Fprintln(os.Stderr, "  · DOP Claude Code skill + /dop-use command (loose files + plugin)")
+	}
 	fmt.Fprintln(os.Stderr)
 	if *purge {
 		fmt.Fprintln(os.Stderr, "The `dop` binary at "+binaryPath()+" WILL be removed (--purge).")
@@ -97,7 +107,9 @@ func runAdminReset(args []string) int {
 	// rc7e — tear down the Claude Code plugin bundle + loose files
 	// alongside the DOP state wipe. Best-effort; failures log but
 	// don't block the main wipe below.
-	uninstallPlugin()
+	if !separate {
+		uninstallPlugin()
+	}
 
 	// Do the wipe.
 	if err := os.RemoveAll(paths.Root); err != nil {

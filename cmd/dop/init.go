@@ -17,6 +17,7 @@ import (
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/trust"
 	"github.com/fray/dop/internal/vault"
+	"github.com/fray/dop/internal/vaultgit"
 )
 
 func runInit(args []string) int {
@@ -127,9 +128,11 @@ func initAsAgent(paths *config.Paths, source string) int {
 // then clones source into dest. Idempotent: if dest already exists as a
 // git checkout, does nothing.
 func attachRepo(source, dest string, agentInstall bool) int {
-	if _, err := exec.LookPath("git"); err != nil {
-		fmt.Fprintln(os.Stderr, "dop init: git not on $PATH — install git first")
-		return 1
+	if !gitInProcess() {
+		if _, err := exec.LookPath("git"); err != nil {
+			fmt.Fprintln(os.Stderr, "dop init: git not on $PATH — install git first (or unset DOP_GIT_BINARY)")
+			return 1
+		}
 	}
 	if err := ensureDestClear(dest); err != nil {
 		fmt.Fprintf(os.Stderr, "dop init: %v\n", err)
@@ -252,13 +255,7 @@ func asURL(s string) string {
 }
 
 func runGit(out io.Writer, dir string, args ...string) error {
-	cmd := exec.Command("git", args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Stdout = out
-	cmd.Stderr = out
-	if err := cmd.Run(); err != nil {
+	if err := gitRun(out, dir, args); err != nil {
 		return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return nil
@@ -513,9 +510,7 @@ func pullSmartMerge(paths *config.Paths, ours, theirs int) int {
 // decryptVaultAtRef reads vault.yaml at a specific git ref, writes it
 // to a temp file, and asks the daemon to decrypt + parse it.
 func decryptVaultAtRef(client *admin.Client, paths *config.Paths, ref string) (*vault.Vault, error) {
-	cmd := exec.Command("git", "show", ref+":vault.yaml")
-	cmd.Dir = paths.Vault
-	enc, err := cmd.Output()
+	enc, err := gitShow(paths.Vault, ref, "vault.yaml")
 	if err != nil {
 		return nil, fmt.Errorf("read vault.yaml at %s: %w", ref, err)
 	}
@@ -549,6 +544,13 @@ func saveMergedVault(client *admin.Client, paths *config.Paths, v *vault.Vault) 
 
 // gitMergeBase returns the commit hash both refs share as an ancestor.
 func gitMergeBase(dir, a, b string) (string, error) {
+	if gitInProcess() {
+		g, err := vaultgit.Open(dir)
+		if err != nil {
+			return "", err
+		}
+		return g.MergeBase(a, b)
+	}
 	cmd := exec.Command("git", "merge-base", a, b)
 	cmd.Dir = dir
 	out, err := cmd.Output()
@@ -566,6 +568,14 @@ func gitMergeBase(dir, a, b string) (string, error) {
 // Every pull/merge path goes through this instead of a literal so a
 // non-main vault doesn't silently read as "up to date".
 func gitTeamRef(dir string) string {
+	if gitInProcess() {
+		if g, err := vaultgit.Open(dir); err == nil {
+			if up := g.Upstream(); up != "" {
+				return up
+			}
+		}
+		return "origin/main"
+	}
 	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
 	cmd.Dir = dir
 	if out, err := cmd.Output(); err == nil {
@@ -577,6 +587,17 @@ func gitTeamRef(dir string) string {
 }
 
 func gitRevListCount(dir, rng string) (int, error) {
+	if gitInProcess() {
+		from, to, ok := strings.Cut(rng, "..")
+		if !ok {
+			return 0, fmt.Errorf("bad range %q", rng)
+		}
+		g, err := vaultgit.Open(dir)
+		if err != nil {
+			return 0, err
+		}
+		return g.Count(from, to)
+	}
 	cmd := exec.Command("git", "rev-list", "--count", rng)
 	cmd.Dir = dir
 	out, err := cmd.Output()
@@ -620,15 +641,17 @@ func runPush(args []string) int {
 }
 
 func runGitAllowExit(out io.Writer, dir string, allowed []int, args ...string) error {
-	cmd := exec.Command("git", args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Stdout = out
-	cmd.Stderr = out
-	err := cmd.Run()
+	err := gitRun(out, dir, args)
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, vaultgit.ErrNothingToCommit) {
+		// In-process equivalent of `git commit` exiting 1.
+		for _, a := range allowed {
+			if a == 1 {
+				return nil
+			}
+		}
 	}
 	if ee, ok := err.(*exec.ExitError); ok {
 		for _, a := range allowed {

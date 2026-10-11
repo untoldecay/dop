@@ -20,12 +20,16 @@ import (
 // runVault dispatches `dop vault <edit|...>`.
 func runVault(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop vault <edit>")
+		fmt.Fprintln(os.Stderr, "usage: dop vault <edit|login|logout>")
 		return 2
 	}
 	switch args[0] {
 	case "edit":
 		return runVaultEdit(args[1:])
+	case "login":
+		return runVaultLogin(args[1:])
+	case "logout":
+		return runVaultLogout(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop vault: unknown subcommand %q\n", args[0])
 		return 2
