@@ -39,6 +39,9 @@ dop
 Everything happens in that one screen. Press `?` to see what each key does,
 `esc` to go back.
 
+> **AI agent asked to install DOP?** Read [docs/for-agents.md](docs/for-agents.md) first:
+> what to ask your user, what they do on their computer, what you run on yours.
+
 **Before you start: create the vault.** DOP keeps your keys in a private git
 repository that you create yourself — an empty repo on GitHub, GitLab or any git
 host. DOP asks for its URL during setup. Everyone you invite needs read and write
@@ -92,6 +95,7 @@ named slice of it ("read Notion"), a **bearer** is the pass an agent holds.
 
 - [Features](docs/00-features.md) — everything DOP does, in detail
 - [Getting started](docs/01-onboarding.md) — install, first vault, first agent
+- [For AI agents](docs/for-agents.md) — an agent asked to install DOP starts here
 - [Teams](docs/02-teams.md) — sharing, invites, a lost laptop
 - [Agents & tools](docs/03-agentic-hubs.md) — Claude Code, Codex, Cursor, shared rooms
 - [Agent keys, machine by machine](docs/04-secure-elements.md) · [What DOP protects (and doesn't)](docs/05-threat-model.md)
