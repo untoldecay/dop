@@ -195,6 +195,17 @@ dop vault edit [--editor <bin>]
 
 Sidecar records are rewritten on save; orphaned or revoked capabilities are cleaned up.
 
+### `dop vault login` / `dop vault logout`
+
+DOP syncs the vault repo itself — git doesn't need to be installed. For an `https://` vault it logs in with, in order: `DOP_REPO_TOKEN`, a token saved with `dop vault login`, then git's own saved logins (credential helpers such as the macOS keychain) when git happens to be installed, then no login (public or local repos). `ssh://` / `git@` vaults use the SSH agent, then `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`, checked against `~/.ssh/known_hosts`.
+
+```
+dop vault login [--user <name>] [<host>]   # token on stdin, or typed hidden
+dop vault logout <host>
+```
+
+`<host>` defaults to the vault remote's host (e.g. `github.com`). The token is stored in `repo-credentials.json` in the DOP folder, mode 0600. On GitHub, a fine-grained token with *Contents: read and write* on the vault repo is enough.
+
 ### `dop doctor`
 
 Health check across binaries, admin install, vault attach, trust list, agent keys, codesign posture, sidecars, audit log, gen cache, pending claims, prefix collisions.
@@ -847,4 +858,8 @@ dop credential-helper remove --host <H>
 | `DOP_NO_AUTO_PULL` | — | `1` disables every auto-pull: login, exec/env, admin loads, TUI screen entry. |
 | `DOP_NO_AUTO_PUSH` | — | `1` disables the auto-push after admin-plane saves. |
 | `DOP_ALLOW_FILE_KEYS` | — | `1` silences the "Secure Enclave unavailable" warning when a claim falls back to a P-256 file key. |
+| `DOP_REPO_TOKEN` | — | Token for an `https://` vault repo; tried before the one saved with `dop vault login`. |
+| `DOP_NO_GIT_CREDENTIAL` | — | `1` never asks git's credential helpers for a login, even when git is installed. |
+| `DOP_GIT_BINARY` | — | `1` uses the installed `git` for vault sync instead of the built-in one (transition fallback). |
+| `DOP_SOPS_BINARY` | — | `1` uses the installed `sops` to encrypt/decrypt the vault instead of the built-in one (transition fallback). |
 | `DOP_ALLOW_ADMIN_SHRINK` | — | Internal: lets `dop team remove` bypass the admin-shrink save guard. Do not set manually. |

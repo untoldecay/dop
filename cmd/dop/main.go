@@ -67,6 +67,8 @@ usage:
   dop team list                                  list admins (admin-required)
   dop team remove --name W [--force]             remove admin (with rotation checklist)
   dop vault edit                                 open decrypted vault in $EDITOR
+  dop vault login [host]                         save a token for the vault repo (https; token on stdin)
+  dop vault logout <host>                        forget that token
 
   # Agent keys (v1.11)
   dop agent list                                 show agent-key backend + type for each bearer

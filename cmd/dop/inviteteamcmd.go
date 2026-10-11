@@ -26,6 +26,7 @@ import (
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/vault"
+	"github.com/fray/dop/internal/vaultgit"
 )
 
 // vaultOriginURL returns the git origin URL of the vault repo, or ""
@@ -33,6 +34,12 @@ import (
 // fails for some other reason. Callers should treat "" as "fall back
 // to the old 'same one you cloned from' hint".
 func vaultOriginURL(vaultDir string) string {
+	if gitInProcess() {
+		if g, err := vaultgit.Open(vaultDir); err == nil {
+			return g.RemoteURL()
+		}
+		return ""
+	}
 	cmd := exec.Command("git", "-C", vaultDir, "remote", "get-url", "origin")
 	out, err := cmd.Output()
 	if err != nil {

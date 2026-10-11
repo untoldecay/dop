@@ -359,10 +359,18 @@ func runDoctor(args []string) int {
 	} else {
 		line("✓", "binary:sops", "on $PATH (DOP_SOPS_BINARY=1)")
 	}
-	if _, err := exec.LookPath("git"); err != nil {
-		line("✗", "binary:git", "not on $PATH")
+	// Vault git is built in too (dop-bki); git itself only matters with
+	// DOP_GIT_BINARY=1, or as a source of saved logins (credential helpers).
+	if os.Getenv("DOP_GIT_BINARY") == "1" {
+		if _, err := exec.LookPath("git"); err != nil {
+			line("✗", "binary:git", "DOP_GIT_BINARY=1 but git is not on $PATH — install git, or unset DOP_GIT_BINARY")
+		} else {
+			line("✓", "binary:git", "on $PATH (DOP_GIT_BINARY=1)")
+		}
+	} else if _, err := exec.LookPath("git"); err != nil {
+		line("✓", "binary:git", "not needed — vault sync is built in (https vaults: `dop vault login <host>` once)")
 	} else {
-		line("✓", "binary:git", "on $PATH")
+		line("✓", "binary:git", "not needed — vault sync is built in (git's saved logins are used when present)")
 	}
 	adminOK := admin.KeyFileExists(paths)
 	if adminOK {
