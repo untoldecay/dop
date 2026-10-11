@@ -93,9 +93,7 @@ func (v *resetView) launch() tea.Cmd {
 		if err != nil {
 			return resetDone{rc: 1, err: err.Error()}
 		}
-		// rc6n — TUI Uninstall → full purge (state + binary). CLI
-		// `dop admin reset` without --purge keeps the binary.
-		cmd := exec.Command(self, "admin", "uninstall", "--force", "--purge")
+		cmd := exec.Command(self, uninstallArgs()...)
 		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -108,6 +106,18 @@ func (v *resetView) launch() tea.Cmd {
 	}
 }
 
+// uninstallArgs is the CLI call behind the Uninstall screen: a full
+// purge (state + binary). Under DOP_HOME only that folder goes — the
+// binary is shared with the default install, so no --purge (contract 26).
+// (Was `admin uninstall`, a subcommand that never existed: the screen
+// failed on every machine from 2026-10-06 to v1.20.0-rc3.)
+func uninstallArgs() []string {
+	if config.HomeOverride() != "" {
+		return []string{"uninstall", "--force"}
+	}
+	return []string{"uninstall", "--force", "--purge"}
+}
+
 func (v *resetView) View() string {
 	switch v.step {
 	case 1:
@@ -116,7 +126,11 @@ func (v *resetView) View() string {
 		return v.doneScreen("dop uninstalled", nil, "Re-install with the one-liner from github.com/untoldecay/dop to come back.", "")
 	}
 	binPath, _ := os.Executable()
-	body := strings.Split(strings.TrimRight(kv([2]string{"removes", midTrunc(v.paths.Root, 66)}, [2]string{"binary", midTrunc(displayOr(binPath, "the dop binary"), 66)}), "\n"), "\n")
+	binRow := [2]string{"binary", midTrunc(displayOr(binPath, "the dop binary"), 66)}
+	if config.HomeOverride() != "" {
+		binRow = [2]string{"keeps", "the dop binary and the Claude skill (shared with your default install)"}
+	}
+	body := strings.Split(strings.TrimRight(kv([2]string{"removes", midTrunc(v.paths.Root, 66)}, binRow), "\n"), "\n")
 	body = append(body, "", mutedSt.Render("  Admin keys, approval hash, vault clone (the remote stays), agent keys,"),
 		mutedSt.Render("  caches, pending files, audit log and credential map go away."), "",
 		"  "+mutedSt.Render("Type UNINSTALL to confirm"), inputRow(&v.confBuf))
