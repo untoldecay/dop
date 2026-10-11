@@ -122,7 +122,9 @@ func (v *doctorView) View() string {
 			line("✓", bin, "", "")
 		}
 	}
-	check("sops", "Install sops: brew install sops")
+	if os.Getenv("DOP_SOPS_BINARY") == "1" { // vault encryption is built in otherwise (dop-bki)
+		check("sops", "Install sops: brew install sops")
+	}
 	check("git", "Install git")
 	if admin.KeyFileExists(v.paths) {
 		line("✓", "admin key", "admin install", "")

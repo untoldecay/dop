@@ -118,7 +118,7 @@ dop exec --agent-name <specific-task-name> -- <your command>
 - **`unknown bearer (bundle not found)`** — `DOP_TOKEN` is set but not in the vault. `dop claim` pulls the vault first, so the admin most likely has not pushed yet; ask them to `dop push` and retry.
 - **`dop env: refused — … bound to an agent key`** — expected for a claimed bearer. Use `dop exec --agent-name <subject> -- <cmd>` instead.
 - **`no vault path`** — the user hasn't run `dop init --vault ...` on this machine. Point them at the DOP README.
-- **`sops binary not found`** — installer prereq missing. Suggest `brew install sops`.
+- **`sops binary not found`** — this dop is older than v1.19 (newer builds encrypt the vault themselves). Suggest `dop update`, or `brew install sops`.
 
 ## Audit Trail
 

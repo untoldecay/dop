@@ -31,7 +31,7 @@ long as it runs. ([Do agents see the keys? →](docs/05-threat-model.md#do-agent
 ## Try it
 
 ```bash
-brew install git sops cloudflared
+brew install git cloudflared
 curl -fsSL https://raw.githubusercontent.com/untoldecay/dop/main/scripts/install.sh | bash
 dop
 ```

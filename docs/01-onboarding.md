@@ -6,7 +6,7 @@ From "nothing installed" to "my first agent is paired and running a scoped comma
 
 ```bash
 # Deps. On Linux use your package manager.
-brew install sops cloudflared
+brew install cloudflared
 
 # dop itself
 curl -fsSL https://raw.githubusercontent.com/untoldecay/dop/main/scripts/install.sh | bash

@@ -350,10 +350,14 @@ func runDoctor(args []string) int {
 	}
 
 	// --- basic ---
-	if _, err := exec.LookPath("sops"); err != nil {
-		line("✗", "binary:sops", "not on $PATH — brew install sops")
+	// Vault encryption is built in (dop-bki); sops is only needed when
+	// DOP_SOPS_BINARY=1 forces the old path.
+	if os.Getenv("DOP_SOPS_BINARY") != "1" {
+		line("✓", "binary:sops", "not needed — vault encryption is built in")
+	} else if _, err := exec.LookPath("sops"); err != nil {
+		line("✗", "binary:sops", "DOP_SOPS_BINARY=1 but sops is not on $PATH — brew install sops, or unset DOP_SOPS_BINARY")
 	} else {
-		line("✓", "binary:sops", "on $PATH")
+		line("✓", "binary:sops", "on $PATH (DOP_SOPS_BINARY=1)")
 	}
 	if _, err := exec.LookPath("git"); err != nil {
 		line("✗", "binary:git", "not on $PATH")

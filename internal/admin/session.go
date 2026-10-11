@@ -10,7 +10,6 @@
 package admin
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -22,12 +21,13 @@ import (
 	"math"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/fray/dop/internal/approval"
+	"github.com/fray/dop/internal/sopsfile"
 	"github.com/fray/dop/internal/approvalprompt"
 	"github.com/fray/dop/internal/config"
 )
@@ -327,30 +327,27 @@ func (s *Session) opDecryptVault(payload []byte) Response {
 		s.mu.Unlock()
 		return Response{Error: "decrypt_vault: session locked"}
 	}
-	// Set SOPS_AGE_KEY (in-process env) so the sops subprocess uses our
-	// key without it touching the filesystem. Restore after.
-	prev, hadPrev := os.LookupEnv("SOPS_AGE_KEY")
-	os.Setenv("SOPS_AGE_KEY", s.keys.Age.String())
+	id := s.keys.Age
 	s.mu.Unlock()
 
-	cmd := exec.Command("sops", "--decrypt", "--input-type", "yaml", "--output-type", "yaml", req.VaultPath)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-
-	// Restore env immediately.
-	if hadPrev {
-		os.Setenv("SOPS_AGE_KEY", prev)
+	var plain []byte
+	var err error
+	if useSopsBinary() {
+		plain, err = sopsBinaryDecrypt(req.VaultPath, id)
 	} else {
-		os.Unsetenv("SOPS_AGE_KEY")
+		var raw []byte
+		if raw, err = os.ReadFile(req.VaultPath); err == nil {
+			plain, err = sopsfile.Decrypt(raw, id)
+		}
+		if err != nil {
+			err = fmt.Errorf("sops decrypt: %w", err)
+		}
 	}
-
 	if err != nil {
-		return Response{Error: fmt.Sprintf("sops decrypt: %s (%v)", stderr.String(), err)}
+		return Response{Error: err.Error()}
 	}
 	s.bumpActivity()
-	body, _ := json.Marshal(DecryptVaultResp{PlaintextB64: base64.StdEncoding.EncodeToString(stdout.Bytes())})
+	body, _ := json.Marshal(DecryptVaultResp{PlaintextB64: base64.StdEncoding.EncodeToString(plain)})
 	return okResp(body)
 }
 
@@ -366,30 +363,18 @@ func (s *Session) opEncryptVault(payload []byte) Response {
 	if req.AgeRecipient == "" {
 		return Response{Error: "encrypt_vault: recipient required"}
 	}
-	// Stage plaintext to a tempfile next to the vault so sops picks up
-	// the right .sops.yaml (if any) — but we pass --age explicitly, so
-	// this is robust to path-based config quirks.
-	dir := filepath.Dir(req.VaultPath)
-	tmp, err := os.CreateTemp(dir, ".dop-encrypt-*.yaml")
-	if err != nil {
-		return Response{Error: err.Error()}
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if _, err := tmp.Write(plaintext); err != nil {
-		tmp.Close()
-		return Response{Error: err.Error()}
-	}
-	tmp.Close()
-
-	cmd := exec.Command("sops", "--encrypt",
-		"--age", req.AgeRecipient,
-		"--input-type", "yaml", "--output-type", "yaml",
-		"--output", req.VaultPath, tmpPath)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return Response{Error: fmt.Sprintf("sops encrypt: %s (%v)", stderr.String(), err)}
+	if useSopsBinary() {
+		if err := sopsBinaryEncrypt(req.VaultPath, plaintext, req.AgeRecipient); err != nil {
+			return Response{Error: err.Error()}
+		}
+	} else {
+		enc, err := sopsfile.Encrypt(plaintext, strings.Split(req.AgeRecipient, ","))
+		if err != nil {
+			return Response{Error: "sops encrypt: " + err.Error()}
+		}
+		if err := writeFileAtomic(req.VaultPath, enc, 0o644); err != nil {
+			return Response{Error: "sops encrypt: " + err.Error()}
+		}
 	}
 	s.bumpActivity()
 	return okResp(nil)

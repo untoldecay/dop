@@ -11,7 +11,6 @@
 #   DOP_REPO          default: untoldecay/dop
 #
 # Runtime dependencies NOT bundled (installer will refuse without them):
-#   - sops (brew install sops  |  apt install age sops  |  releases)
 #   - git
 
 set -euo pipefail
@@ -69,8 +68,8 @@ main() {
     log "resolving install location..."
     require_dep curl "install via https://curl.se or your package manager"
     require_dep tar  "part of base install on every unix"
-    # sops + git are runtime deps for dop itself; warn if missing but don't block install
-    for dep in sops git; do
+    # git is a runtime dep for dop itself; warn if missing but don't block install
+    for dep in git; do
         if ! command -v "$dep" >/dev/null 2>&1; then
             log "warning: $dep not on \$PATH — dop will fail at runtime without it"
         fi
