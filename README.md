@@ -53,8 +53,9 @@ your team can read. No new account, no server to run, nothing sent to us.
 
 **Each agent gets only what it needs.**
 Instead of handing an agent your real key, you give it a pass: "read Notion, post
-to Slack, for 3 days". The agent can use those tools and nothing else. When the
-pass expires, it stops working on its own.
+to Slack, for 3 days". The agent can use those tools and nothing else. The pass
+stops working when it expires, and it only works on the computer it was given to.
+([how](docs/04-secure-elements.md))
 
 **Change your mind any time.**
 Give an agent one more tool, or take one away, without starting over. Or cancel
@@ -93,7 +94,7 @@ named slice of it ("read Notion"), a **bearer** is the pass an agent holds.
 - [Getting started](docs/01-onboarding.md) — install, first vault, first agent
 - [Teams](docs/02-teams.md) — sharing, invites, a lost laptop
 - [Agents & tools](docs/03-agentic-hubs.md) — Claude Code, Codex, Cursor, shared rooms
-- [How agent identity works](docs/04-secure-elements.md) · [What DOP protects (and doesn't)](docs/05-threat-model.md)
+- [Agent keys, machine by machine](docs/04-secure-elements.md) · [What DOP protects (and doesn't)](docs/05-threat-model.md)
 - [Servers & CI](docs/06-ci-headless.md) · [Every command](docs/07-cli-reference.md) · [Recipes](docs/RECIPES.md)
 
 Updates: `dop update` (or More › Update in the app) · [Release notes](https://github.com/untoldecay/dop/releases)

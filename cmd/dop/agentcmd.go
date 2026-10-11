@@ -396,7 +396,13 @@ func collectAgentKeys(paths *config.Paths) ([]AgentKeyEntry, error) {
 			continue
 		}
 		var lookupID, keyType string
+		backend, extractable := "file", true
 		switch {
+		case strings.HasSuffix(name, ".se"):
+			// dop-ofn: Secure Enclave key, persisted as its SE-wrapped handle.
+			lookupID = strings.TrimSuffix(name, ".se")
+			keyType = vault.KeyTypeP256
+			backend, extractable = "keychain-darwin", false
 		case strings.HasSuffix(name, ".key"):
 			lookupID = strings.TrimSuffix(name, ".key")
 			keyType = vault.KeyTypeEd25519
@@ -413,8 +419,8 @@ func collectAgentKeys(paths *config.Paths) ([]AgentKeyEntry, error) {
 		ent := AgentKeyEntry{
 			LookupID:    lookupID,
 			KeyType:     keyType,
-			Backend:     "file",
-			Extractable: true,
+			Backend:     backend,
+			Extractable: extractable,
 			Path:        filepath.Join(dir, name),
 		}
 		// The grace marker sits alongside the LEGACY ed25519 key file

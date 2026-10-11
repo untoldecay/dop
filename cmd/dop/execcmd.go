@@ -756,10 +756,17 @@ func resolveViaAgentKey(agentName string) (map[string]string, resolveResult, err
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if !strings.HasSuffix(name, ".p256") {
+		// P-256 keys only (ed25519 can't open EnvWrapped): file-backed
+		// .p256 or Secure Enclave handle .se (dop-ofn).
+		var lookupID string
+		switch {
+		case strings.HasSuffix(name, ".p256"):
+			lookupID = strings.TrimSuffix(name, ".p256")
+		case strings.HasSuffix(name, ".se"):
+			lookupID = strings.TrimSuffix(name, ".se")
+		default:
 			continue
 		}
-		lookupID := strings.TrimSuffix(name, ".p256")
 		// Load + verify the record. Skip silently on any error — a
 		// stale/revoked record just means this key isn't viable right now.
 		recPath := filepath.Join(paths.Vault, "capabilities", lookupID+".record")

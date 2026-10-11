@@ -111,8 +111,8 @@ echo "=== [11] add-grant on ed25519 bearer refuses cleanly"
 OUT2=$("$DOP" token issue --grants notion.read --name legacy-ed 2>&1)
 BEARER_ED=$(echo "$OUT2" | grep -E '^tok_1' | head -1)
 PIN_ED=$(echo "$OUT2" | grep -E '^[A-Z]{2}-[A-Z]{2}-[A-Z]{2}$' | head -1)
-# claim WITHOUT --key-type → uses auto → falls back to ed25519 (SE stubbed)
-DOP_TOKEN="$BEARER_ED" "$DOP" claim --skip-approval "$PIN_ED" >/dev/null 2>&1 || true
+# legacy ed25519 on purpose (auto now falls back to a P-256 file — dop-7b7)
+DOP_TOKEN="$BEARER_ED" "$DOP" claim --skip-approval --key-type ed25519 "$PIN_ED" >/dev/null 2>&1 || true
 if OUT3=$("$DOP" token add-grant legacy-ed slack.bot 2>&1); then
   fail "add-grant should have refused ed25519: $OUT3"
 fi

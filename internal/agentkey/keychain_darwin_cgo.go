@@ -36,6 +36,7 @@ package agentkey
 #include <Security/Security.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <stdlib.h>
+#include <string.h>
 
 // Small helpers so the Go side doesn't have to fight CoreFoundation
 // object references directly.
@@ -392,11 +393,156 @@ OSStatus dop_se_delete(const char *tag_utf8, size_t tag_len) {
     if (status == errSecItemNotFound) return errSecSuccess;
     return status;
 }
+
+// ---------------------------------------------------------------------------
+// Handle-based Secure Enclave keys (dop-ofn). A permanent SE keychain item
+// needs keychain entitlements (provisioning profile) — no dop build has
+// them, so key creation failed with -34018 everywhere. A NON-permanent SE
+// key needs no entitlement: the private key is still generated and kept
+// inside the Secure Enclave; we persist only its token object handle
+// ("toid" attribute) — an SE-wrapped blob that only this Mac's SE can use —
+// and rebuild the key from it with SecKeyCreateWithData. Same model as
+// CryptoKit's SecureEnclave.P256 dataRepresentation.
+
+static SecKeyRef dop_seh_load(const unsigned char *h, size_t hlen, OSStatus *st) {
+    CFDataRef toid = CFDataCreate(NULL, h, (CFIndex)hlen);
+    if (!toid) { *st = errSecAllocate; return NULL; }
+    CFMutableDictionaryRef a = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(a, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom);
+    CFDictionarySetValue(a, kSecAttrKeyClass, kSecAttrKeyClassPrivate);
+    CFDictionarySetValue(a, kSecAttrTokenID, kSecAttrTokenIDSecureEnclave);
+    CFDictionarySetValue(a, CFSTR("toid"), toid);
+    CFErrorRef err = NULL;
+    SecKeyRef k = SecKeyCreateWithData(toid, a, &err);
+    CFRelease(a);
+    CFRelease(toid);
+    if (!k) {
+        *st = err ? (OSStatus)CFErrorGetCode(err) : errSecParam;
+        if (err) CFRelease(err);
+        return NULL;
+    }
+    *st = errSecSuccess;
+    return k;
+}
+
+static OSStatus dop_copy_out(CFDataRef d, unsigned char **out, size_t *out_len) {
+    CFIndex n = CFDataGetLength(d);
+    unsigned char *buf = (unsigned char *)malloc((size_t)n);
+    if (!buf) return errSecAllocate;
+    memcpy(buf, CFDataGetBytePtr(d), (size_t)n);
+    *out = buf;
+    *out_len = (size_t)n;
+    return errSecSuccess;
+}
+
+// dop_seh_generate creates a non-permanent SE P-256 key. Returns its
+// handle and its uncompressed public key (both malloc'd).
+OSStatus dop_seh_generate(unsigned char **out_handle, size_t *out_handle_len,
+                          unsigned char **out_pub, size_t *out_pub_len) {
+    CFErrorRef err = NULL;
+    SecAccessControlRef ac = SecAccessControlCreateWithFlags(kCFAllocatorDefault,
+        kSecAttrAccessibleWhenUnlockedThisDeviceOnly, kSecAccessControlPrivateKeyUsage, &err);
+    if (!ac) { if (err) CFRelease(err); return errSecAuthFailed; }
+    CFMutableDictionaryRef priv = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(priv, kSecAttrIsPermanent, kCFBooleanFalse);
+    CFDictionarySetValue(priv, kSecAttrAccessControl, ac);
+    CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    int bits = 256;
+    CFNumberRef bitsRef = CFNumberCreate(NULL, kCFNumberIntType, &bits);
+    CFDictionarySetValue(attrs, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom);
+    CFDictionarySetValue(attrs, kSecAttrKeySizeInBits, bitsRef);
+    CFDictionarySetValue(attrs, kSecAttrTokenID, kSecAttrTokenIDSecureEnclave);
+    CFDictionarySetValue(attrs, kSecPrivateKeyAttrs, priv);
+    SecKeyRef key = SecKeyCreateRandomKey(attrs, &err);
+    CFRelease(bitsRef); CFRelease(attrs); CFRelease(priv); CFRelease(ac);
+    if (!key) {
+        OSStatus st = err ? (OSStatus)CFErrorGetCode(err) : errSecKeyIsSensitive;
+        if (err) CFRelease(err);
+        return st;
+    }
+    OSStatus st = errSecSuccess;
+    CFDictionaryRef ka = SecKeyCopyAttributes(key);
+    CFDataRef toid = ka ? (CFDataRef)CFDictionaryGetValue(ka, CFSTR("toid")) : NULL;
+    SecKeyRef pub = SecKeyCopyPublicKey(key);
+    CFDataRef pubData = pub ? SecKeyCopyExternalRepresentation(pub, NULL) : NULL;
+    if (!toid || !pubData) {
+        st = errSecParam;
+    } else if ((st = dop_copy_out(toid, out_handle, out_handle_len)) == errSecSuccess) {
+        st = dop_copy_out(pubData, out_pub, out_pub_len);
+        if (st != errSecSuccess) { free(*out_handle); *out_handle = NULL; }
+    }
+    if (pubData) CFRelease(pubData);
+    if (pub) CFRelease(pub);
+    if (ka) CFRelease(ka);
+    CFRelease(key);
+    return st;
+}
+
+// dop_seh_public rebuilds the key from its handle and returns its
+// uncompressed public key — errors mean the handle isn't usable here
+// (another Mac, another user, SE reset).
+OSStatus dop_seh_public(const unsigned char *h, size_t hlen, unsigned char **out_pub, size_t *out_pub_len) {
+    OSStatus st;
+    SecKeyRef k = dop_seh_load(h, hlen, &st);
+    if (!k) return st;
+    SecKeyRef pub = SecKeyCopyPublicKey(k);
+    CFDataRef d = pub ? SecKeyCopyExternalRepresentation(pub, NULL) : NULL;
+    st = d ? dop_copy_out(d, out_pub, out_pub_len) : errSecParam;
+    if (d) CFRelease(d);
+    if (pub) CFRelease(pub);
+    CFRelease(k);
+    return st;
+}
+
+OSStatus dop_seh_sign(const unsigned char *h, size_t hlen, const unsigned char *msg, size_t msg_len,
+                      unsigned char **out_sig, size_t *out_sig_len) {
+    OSStatus st;
+    SecKeyRef k = dop_seh_load(h, hlen, &st);
+    if (!k) return st;
+    CFDataRef m = CFDataCreate(NULL, msg, (CFIndex)msg_len);
+    CFErrorRef err = NULL;
+    CFDataRef sig = SecKeyCreateSignature(k, kSecKeyAlgorithmECDSASignatureMessageX962SHA256, m, &err);
+    if (sig) { st = dop_copy_out(sig, out_sig, out_sig_len); CFRelease(sig); }
+    else { st = err ? (OSStatus)CFErrorGetCode(err) : errSecParam; if (err) CFRelease(err); }
+    CFRelease(m);
+    CFRelease(k);
+    return st;
+}
+
+OSStatus dop_seh_ecdh(const unsigned char *h, size_t hlen, const unsigned char *peer, size_t peer_len,
+                      unsigned char **out_secret, size_t *out_secret_len) {
+    OSStatus st;
+    SecKeyRef k = dop_seh_load(h, hlen, &st);
+    if (!k) return st;
+    CFDataRef pd = CFDataCreate(NULL, peer, (CFIndex)peer_len);
+    CFMutableDictionaryRef pa = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(pa, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom);
+    CFDictionarySetValue(pa, kSecAttrKeyClass, kSecAttrKeyClassPublic);
+    CFErrorRef err = NULL;
+    SecKeyRef peerKey = SecKeyCreateWithData(pd, pa, &err);
+    CFRelease(pa); CFRelease(pd);
+    if (!peerKey) {
+        st = err ? (OSStatus)CFErrorGetCode(err) : errSecParam;
+        if (err) CFRelease(err);
+        CFRelease(k);
+        return st;
+    }
+    CFMutableDictionaryRef params = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDataRef shared = SecKeyCopyKeyExchangeResult(k, kSecKeyAlgorithmECDHKeyExchangeStandard, peerKey, params, &err);
+    if (shared) { st = dop_copy_out(shared, out_secret, out_secret_len); CFRelease(shared); }
+    else { st = err ? (OSStatus)CFErrorGetCode(err) : errSecParam; if (err) CFRelease(err); }
+    CFRelease(params); CFRelease(peerKey); CFRelease(k);
+    return st;
+}
 */
 import "C"
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"github.com/fray/dop/internal/vault"
@@ -488,6 +634,132 @@ func (s *seStore) Sign(challenge []byte) ([]byte, error) {
 	return sig, nil
 }
 
+// seHandleMagic prefixes a .se handle file (format version 1).
+const seHandleMagic = "dop-se-v1\n"
+
+// seHandleStore is a Secure Enclave key persisted as its SE-wrapped
+// handle in <Root>/agent-keys/<lookup>.se (0600). The private key never
+// leaves the SE; the handle only works with this Mac's SE, so copying
+// the file elsewhere yields nothing usable. Anyone running as the same
+// user here can still ask the SE to sign with it — same-machine trust
+// is unchanged (threat model).
+type seHandleStore struct {
+	lookupID string
+	path     string
+	handle   []byte
+	pubkey   []byte
+}
+
+func (s *seHandleStore) LookupID() string  { return s.lookupID }
+func (s *seHandleStore) KeyType() string   { return vault.KeyTypeP256 }
+func (s *seHandleStore) PublicKey() []byte { return append([]byte(nil), s.pubkey...) }
+func (s *seHandleStore) Extractable() bool { return false }
+func (s *seHandleStore) StorageDescription() string {
+	return "macOS Secure Enclave (p256, handle " + s.path + ", non-extractable)"
+}
+
+func (s *seHandleStore) Sign(challenge []byte) ([]byte, error) {
+	var out *C.uchar
+	var n C.size_t
+	var msg *C.uchar
+	if len(challenge) > 0 {
+		msg = (*C.uchar)(unsafe.Pointer(&challenge[0]))
+	}
+	st := C.dop_seh_sign((*C.uchar)(unsafe.Pointer(&s.handle[0])), C.size_t(len(s.handle)), msg, C.size_t(len(challenge)), &out, &n)
+	if st != 0 {
+		return nil, fmt.Errorf("SE sign failed: OSStatus %d", int(st))
+	}
+	defer C.free(unsafe.Pointer(out))
+	return C.GoBytes(unsafe.Pointer(out), C.int(n)), nil
+}
+
+func (s *seHandleStore) SharedSecret(peerPub []byte) ([]byte, error) {
+	if len(peerPub) != 65 || peerPub[0] != 0x04 {
+		return nil, fmt.Errorf("SE ecdh: peer pubkey must be uncompressed X9.62 (65B starting with 0x04), got %dB", len(peerPub))
+	}
+	var out *C.uchar
+	var n C.size_t
+	st := C.dop_seh_ecdh((*C.uchar)(unsafe.Pointer(&s.handle[0])), C.size_t(len(s.handle)),
+		(*C.uchar)(unsafe.Pointer(&peerPub[0])), C.size_t(len(peerPub)), &out, &n)
+	if st != 0 {
+		return nil, fmt.Errorf("SE ecdh failed: OSStatus %d", int(st))
+	}
+	defer C.free(unsafe.Pointer(out))
+	return C.GoBytes(unsafe.Pointer(out), C.int(n)), nil
+}
+
+// MigrateLookupID renames the handle file (bearer rotation). The SE key
+// itself is untouched.
+func (s *seHandleStore) MigrateLookupID(newLookupID string) error {
+	newPath := filepath.Join(filepath.Dir(s.path), newLookupID+".se")
+	if err := os.Rename(s.path, newPath); err != nil {
+		return fmt.Errorf("SE handle rename: %w", err)
+	}
+	s.path, s.lookupID = newPath, newLookupID
+	return nil
+}
+
+func seHandlePath(root, lookupID string) string {
+	return filepath.Join(root, "agent-keys", lookupID+".se")
+}
+
+// loadSEHandle reads <lookup>.se and checks the SE can still use it.
+func loadSEHandle(root, lookupID string) (Store, error) {
+	path := seHandlePath(root, lookupID)
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(string(raw), seHandleMagic) || len(raw) == len(seHandleMagic) {
+		return nil, fmt.Errorf("SE handle %s: unknown format", path)
+	}
+	h := raw[len(seHandleMagic):]
+	var out *C.uchar
+	var n C.size_t
+	if st := C.dop_seh_public((*C.uchar)(unsafe.Pointer(&h[0])), C.size_t(len(h)), &out, &n); st != 0 {
+		return nil, fmt.Errorf("SE handle %s not usable on this Mac (OSStatus %d) — was it copied from another machine?", path, int(st))
+	}
+	defer C.free(unsafe.Pointer(out))
+	return &seHandleStore{lookupID: lookupID, path: path, handle: h, pubkey: C.GoBytes(unsafe.Pointer(out), C.int(n))}, nil
+}
+
+// generateSEHandle creates a non-permanent SE key and writes its handle.
+func generateSEHandle(root, lookupID string) (Store, error) {
+	var h, pub *C.uchar
+	var hn, pn C.size_t
+	if st := C.dop_seh_generate(&h, &hn, &pub, &pn); st != 0 {
+		return nil, fmt.Errorf("SE generate failed: OSStatus %d", int(st))
+	}
+	defer C.free(unsafe.Pointer(h))
+	defer C.free(unsafe.Pointer(pub))
+	handle := C.GoBytes(unsafe.Pointer(h), C.int(hn))
+	path := seHandlePath(root, lookupID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(path, append([]byte(seHandleMagic), handle...), 0o600); err != nil {
+		return nil, err
+	}
+	return &seHandleStore{lookupID: lookupID, path: path, handle: handle, pubkey: C.GoBytes(unsafe.Pointer(pub), C.int(pn))}, nil
+}
+
+// ProbeSecureEnclave creates a throwaway SE key (never stored — it
+// vanishes with the process) to check the chip really answers. Used by
+// `dop doctor` instead of guessing from the code signature (dop-4td).
+func ProbeSecureEnclave() error {
+	var h, pub *C.uchar
+	var hn, pn C.size_t
+	if st := C.dop_seh_generate(&h, &hn, &pub, &pn); st != 0 {
+		return fmt.Errorf("OSStatus %d", int(st))
+	}
+	C.free(unsafe.Pointer(h))
+	C.free(unsafe.Pointer(pub))
+	return nil
+}
+
 // keychainAvailable is set by init() below when the SE bridge probes
 // its dependencies. Used by Available().
 var keychainAvailable = true
@@ -496,6 +768,13 @@ var keychainAvailable = true
 // keychain_backend_darwin.go. Wired via the seOverride package var
 // (see below).
 func realKeychainLoad(b *KeychainBackend, lookupID string) (Store, error) {
+	// Handle file first (every key created since dop-ofn); then the
+	// pre-dop-ofn permanent keychain item, if one exists.
+	if b.Root != "" {
+		if s, err := loadSEHandle(b.Root, lookupID); err != ErrNotFound {
+			return s, err
+		}
+	}
 	tag := b.AppTagPrefix + lookupID
 	tagC := C.CString(tag)
 	defer C.free(unsafe.Pointer(tagC))
@@ -519,6 +798,9 @@ func realKeychainGenerate(b *KeychainBackend, lookupID, keyType string) (Store, 
 	if keyType != "" && keyType != vault.KeyTypeP256 {
 		return nil, fmt.Errorf("keychain-darwin: only p256 supported, got %q", keyType)
 	}
+	if b.Root != "" {
+		return generateSEHandle(b.Root, lookupID)
+	}
 	tag := b.AppTagPrefix + lookupID
 	tagC := C.CString(tag)
 	defer C.free(unsafe.Pointer(tagC))
@@ -535,6 +817,11 @@ func realKeychainGenerate(b *KeychainBackend, lookupID, keyType string) (Store, 
 }
 
 func realKeychainDelete(b *KeychainBackend, lookupID string) error {
+	if b.Root != "" {
+		if err := os.Remove(seHandlePath(b.Root, lookupID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
 	tag := b.AppTagPrefix + lookupID
 	tagC := C.CString(tag)
 	defer C.free(unsafe.Pointer(tagC))

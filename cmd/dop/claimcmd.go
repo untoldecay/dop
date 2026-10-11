@@ -586,8 +586,8 @@ func runClaimRemote(paths *config.Paths, tokenFile, pinArg, keyType string) int 
 	}
 
 	// Generate the agent key via the same platform-aware backend as the
-	// local claim (SE P-256 on macOS, file P-256 with
-	// DOP_ALLOW_FILE_KEYS=1, ed25519 fallback; --key-type forces one).
+	// local claim (Secure Enclave P-256 on a Mac that has one, else a
+	// P-256 file; --key-type ed25519 forces the legacy key).
 	// The key is persisted BEFORE staging in the vault: if push fails
 	// the admin can still approve once it lands, and the pubkey only
 	// ever exists here.

@@ -139,16 +139,11 @@ func TestFileBackend_P256_SharedSecret_Symmetric(t *testing.T) {
 	}
 }
 
-func TestFileBackend_P256_RequiresOptIn(t *testing.T) {
+// dop-7b7: a P-256 file key is the fallback when there's no Secure
+// Enclave — no opt-in needed (Create announces it on macOS).
+func TestFileBackend_P256_NoOptInNeeded(t *testing.T) {
 	b := tmpBackend(t)
-	// Without the env var — refuse.
 	os.Unsetenv("DOP_ALLOW_FILE_KEYS")
-	_, err := b.Generate("lookup-b", vault.KeyTypeP256)
-	if err == nil {
-		t.Fatal("expected error without DOP_ALLOW_FILE_KEYS")
-	}
-	// With the env var — allow.
-	t.Setenv("DOP_ALLOW_FILE_KEYS", "1")
 	s, err := b.Generate("lookup-b", vault.KeyTypeP256)
 	if err != nil {
 		t.Fatalf("generate p256: %v", err)

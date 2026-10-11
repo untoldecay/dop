@@ -152,16 +152,8 @@ func (b *FileBackend) Generate(lookupID, keyType string) (Store, error) {
 	case vault.KeyTypeEd25519:
 		return b.generateEd25519(lookupID)
 	case vault.KeyTypeP256:
-		// Gate on the explicit opt-in for file-backed P-256. Callers
-		// on macOS should use the keychain backend; callers on
-		// Linux/CI need to acknowledge that this is exportable.
-		if os.Getenv("DOP_ALLOW_FILE_KEYS") != "1" {
-			return nil, errors.New(
-				"file-backed P-256 keys require DOP_ALLOW_FILE_KEYS=1.\n" +
-					"  On macOS, use the Secure Enclave backend (the default).\n" +
-					"  On Linux/CI, set the env var explicitly to acknowledge that\n" +
-					"  the key file will be extractable to any process on this uid.")
-		}
+		// No opt-in gate here (dop-7b7): Create decides — Secure
+		// Enclave first, P-256 file as the announced fallback.
 		return b.generateP256(lookupID)
 	default:
 		return nil, fmt.Errorf("file backend: unsupported key type %q", keyType)

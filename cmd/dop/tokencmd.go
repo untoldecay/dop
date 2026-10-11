@@ -835,6 +835,7 @@ func removeBearerFiles(paths *config.Paths, lookupID, name string) {
 		filepath.Join(paths.Vault, "capabilities", lookupID+".record"),
 		filepath.Join(paths.Root, "agent-keys", lookupID+".key"),
 		filepath.Join(paths.Root, "agent-keys", lookupID+".p256"),
+		filepath.Join(paths.Root, "agent-keys", lookupID+".se"),
 	} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "%s: warning: %v\n", name, err)
