@@ -247,6 +247,7 @@ type attachVaultView struct {
 	paths          *config.Paths
 	adminIsPresent bool
 	url            textinput.Model
+	tok            *repoTokenStep // set when the vault repo refused every login (dop-ob2)
 	running        bool
 	finished       bool // server path: show the done screen until a key
 	err            string
@@ -266,16 +267,32 @@ func (v *attachVaultView) Flash() string { return v.flash }
 type attachResultMsg struct{ err string }
 
 func (v *attachVaultView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if ok, cmd := v.wizMsg(msg, v.url.Value() != ""); ok {
+	typing := v.url.Value() != ""
+	if v.tok != nil {
+		typing = v.tok.in.Value() != ""
+	}
+	if ok, cmd := v.wizMsg(msg, typing); ok {
 		return v, cmd
 	}
 	switch mm := msg.(type) {
 	case attachResultMsg:
 		v.running = false
 		if mm.err != "" {
+			if host := repoTokenHost(mm.err); host != "" {
+				// No login reaches the repo: ask for a token, then retry.
+				if v.tok == nil {
+					v.tok = newRepoTokenStep(host)
+				} else {
+					v.tok.tries++
+					v.tok.in.SetValue("")
+				}
+				v.err = ""
+				return v, nil
+			}
 			v.err = "Attach failed: " + firstLine(mm.err)
 			return v, nil
 		}
+		v.tok = nil
 		if !v.adminIsPresent {
 			v.finished = true
 			return v, nil
@@ -293,6 +310,24 @@ func (v *attachVaultView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if mm.String() != "enter" {
 			v.err = ""
+		}
+		if v.tok != nil {
+			switch mm.String() {
+			case "esc", "shift+tab":
+				v.tok = nil // back to the URL
+			case "ctrl+c":
+				v.done = true
+			case "enter":
+				if v.tok.value() == "" {
+					v.err = "Paste the token, or esc to change the URL"
+					return v, nil
+				}
+				v.running = true
+				return v, tea.Batch(v.spinStart(), v.loginThenAttach(strings.TrimSpace(v.url.Value()), v.tok.host, v.tok.value()))
+			default:
+				edit(&v.tok.in, mm)
+			}
+			return v, nil
 		}
 		switch mm.String() {
 		case "esc", "ctrl+c":
@@ -330,6 +365,17 @@ func (v *attachVaultView) attach(u string) tea.Cmd {
 	}
 }
 
+// loginThenAttach saves the repo token, then retries the attach.
+func (v *attachVaultView) loginThenAttach(u, host, token string) tea.Cmd {
+	attach := v.attach(u)
+	return func() tea.Msg {
+		if err := saveRepoToken(host, token); err != nil {
+			return attachResultMsg{err: "saving the token: " + err.Error()}
+		}
+		return attach()
+	}
+}
+
 func (v *attachVaultView) View() string {
 	title, kind := "Attach vault", "admin install"
 	if !v.adminIsPresent {
@@ -345,6 +391,11 @@ func (v *attachVaultView) View() string {
 			{"next", "issue a bearer on your admin machine, paste the handoff here"},
 			{"approve", "pending banner on your admin machine"},
 		}, "", "")
+	}
+	if v.tok != nil {
+		km := wizKeys("save & retry")
+		km.notes = v.tok.notes()
+		return v.screen(title, kind, v.tok.prompt(), []string{inputRow(&v.tok.in)}, v.tok.helper(), v.err, "", km)
 	}
 	km := wizKeys("attach")
 	km.notes = []string{"An https or ssh git URL, or a local path (a bare repo is created there)."}

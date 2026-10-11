@@ -36,6 +36,7 @@ const (
 	joinStepRunning     = 6
 	joinStepHarness     = 7 // first-start harness picker on a successful join
 	joinStepReview      = 8
+	joinStepToken       = 9 // the vault repo refused every login (dop-ob2)
 )
 
 type joinView struct {
@@ -55,6 +56,7 @@ type joinView struct {
 	newAdmin1     textinput.Model // fresh + separate identity: admin passphrase
 	newApproval   textinput.Model // fresh + separate identity: approval passphrase
 	harnessCursor int             // cursor into userprefs.HarnessChoices
+	tok           *repoTokenStep
 	err           string
 	done          bool
 	flash         string
@@ -98,7 +100,11 @@ func (v *joinView) curBuf() *textinput.Model {
 
 func (v *joinView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	in := v.curBuf()
-	if ok, cmd := v.wizMsg(msg, in != nil && in.Value() != ""); ok {
+	typing := in != nil && in.Value() != ""
+	if v.step == joinStepToken && v.tok != nil {
+		typing = v.tok.in.Value() != ""
+	}
+	if ok, cmd := v.wizMsg(msg, typing); ok {
 		return v, cmd
 	}
 	switch mm := msg.(type) {
@@ -117,8 +123,20 @@ func (v *joinView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		v.linesMu.Lock()
+		host := repoTokenHost(strings.Join(v.lines, "\n"))
 		v.err = "Join failed: " + lastOutput(v.lines, v.finalErr)
 		v.linesMu.Unlock()
+		if host != "" {
+			// No login reaches the repo: ask for a token, then rejoin.
+			if v.tok == nil {
+				v.tok = newRepoTokenStep(host)
+			} else {
+				v.tok.tries++
+				v.tok.in.SetValue("")
+			}
+			v.err, v.step = "", joinStepToken
+			return v, nil
+		}
 		v.step = joinStepReview
 		return v, nil
 	case tea.KeyMsg:
@@ -142,6 +160,27 @@ func (v *joinView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return v, nil
 			}
 			return v.updateHarnessStep(mm)
+		case joinStepToken:
+			switch k {
+			case "enter":
+				if v.tok.value() == "" {
+					v.err = "Paste the token, or esc to go back"
+					return v, nil
+				}
+				if err := saveRepoToken(v.tok.host, v.tok.value()); err != nil {
+					v.err = "Saving the token: " + firstLine(err.Error())
+					return v, nil
+				}
+				v.step, v.lines = joinStepRunning, nil
+				return v, tea.Batch(v.spinStart(), v.launch(), v.waitForLine())
+			case "esc", "shift+tab":
+				v.step = joinStepReview
+			case "ctrl+c":
+				v.done = true
+			default:
+				edit(&v.tok.in, mm)
+			}
+			return v, nil
 		case joinStepReview:
 			switch k {
 			case "enter":
@@ -345,6 +384,10 @@ func (v *joinView) View() string {
 			"", footer(v.width, hint("esc", "cancel"), keyMore))
 	case joinStepHarness:
 		return harnessScreen(v.wiz, "Joined", v.harnessCursor, v.err)
+	case joinStepToken:
+		km := wizKeys("save & retry")
+		km.notes = v.tok.notes()
+		return v.screen(title, "", v.tok.prompt(), []string{inputRow(&v.tok.in)}, v.tok.helper(), v.err, "", km)
 	case joinStepReview:
 		if v.help && v.err != "" {
 			body := append([]string{"  " + mutedSt.Render("Last output")}, outputTail(&v.linesMu, v.lines, 10)...)
