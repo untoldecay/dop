@@ -84,14 +84,18 @@ calm for the routine, loud for the dangerous, and a little alive all the time.
 ## Views
 
 ### V1 — Home: the swarm
-The first screen. Agents as characters drifting in a bounded space; density scales with count (one agent sits centre and breathes; twenty cluster and buzz). Pending requests surface as a badge on the agent and a count at the top. Activity bubbles (stretch) float above an agent briefly when it uses a service. Tap an agent → V3. Tap the inbox count → V2. Bottom bar: Agents, Inbox, Services, Team, More.
+The first screen. Agents as characters drifting in a bounded space; density scales with count (one agent sits centre and breathes; twenty cluster and buzz). An agent with a pending request wears a badge. Activity bubbles (stretch) float above an agent briefly when it uses a service. Tap an agent → V3.
 
-Components: `AgentAvatar` (deterministic face from key, or card image, or edited face), `Swarm` (layout, drift, density rules, reduced-motion fallback), `ActivityBubble`, `InboxBadge`.
+Pending requests sit at the bottom of Home as a **folded stack**, like iOS notifications: 3D perspective, the most dangerous one in front, a count on the front card. Tap the stack and it **unfolds into a list that rises to fill the screen** while the swarm shrinks to a strip; rows carry the risk colour; swipe down folds it again. This list is the inbox. There is no separate Inbox tab. History lives under Manage.
 
-### V2 — Inbox: pending and history
-A stack of request cards, newest on top, dangerous kinds pinned above routine ones. Below the fold, history grouped by day. Each history row: avatar, effect, decision, who decided, how.
+Bottom bar, three items as sketched: **Home, Search, Manage**. A general menu, the TUI's shape (Add, Issue, List, Remove, Vault, More), slides up from Manage.
 
-Components: `RequestCard` (compact), `DecisionRow`, `KindTag`.
+Components: `AgentAvatar` (deterministic face from key, or card image, or edited face), `Swarm` (layout, drift, density rules, reduced-motion fallback), `ActivityBubble`, `RequestStack` (folded / unfolded), `RequestRow`.
+
+### V2 — History
+Decisions grouped by day, reached from Manage. Each row: avatar, effect, decision, who decided, how (phone, Mac, web). Tapping a row shows the request as it was.
+
+Components: `DecisionRow`, `KindTag`.
 
 ### V3 — Agent page
 Header: avatar large, name, host, harness, status. Sections as collapsible cards: Bearer (facts), Grants (each row expands to the integration and credential behind it), Activity, Danger zone (re-issue, revoke). Pending request for this agent, if any, sits at the top as a card and opens V4 with the avatar staying in place.
@@ -99,11 +103,11 @@ Header: avatar large, name, host, harness, status. Sections as collapsible cards
 Components: `AgentHeader`, `BearerFacts`, `GrantRow`, `IntegrationPeek`, `ActivityList`, `DangerZone`.
 
 ### V4 — Request card (full)
-The decision view. Top: the effect sentence, colour and icon by kind. Middle: avatar with name, then where from, then what it touches, then a folded context block (goal, branch, project, generation). Bottom: Approve (Face ID) and Reject. A small "type passphrase instead" affordance. Expiry countdown is visible but quiet.
+The decision view, reached by tapping a pill in the stack or a row in the unfolded list; the character flies from there into the card. Top third: **the character, large**, name under it, then the effect sentence as a verb ("wants to bind a new bearer"). Middle: **the facts as swipeable pages** in one known component, with a page indicator. Page 1 is always the risk: "Routine · a new agent key on hermes-vps" (green), "HIGH RISK · keys will be shown in an AI transcript" (red), "Protected grant · …" (amber). Then from (host, harness), touches (service, grant, env name), expires (countdown), context (goal, branch, project when declared), and for dangerous kinds, the safe alternative (dop exec). Bottom: Approve with Face ID and Reject; a small "type the passphrase instead".
 
-Kinds and their mood: claim (neutral), remote claim (neutral, host emphasised), protected grant (amber), print bearer (red), print keys (red, strongest, "keys will be shown in an AI transcript").
+Risk is never a separate badge. It is the first page, the colour of that component, and for red kinds a tint of the header area, heavier haptics, and a one-second hold before Approve is live. On red kinds Reject is the primary button and Approve the outline one.
 
-Components: `EffectHeadline`, `ContextBlock`, `ApproveButton` (label morphs Approve → Approving → Approved), `RejectButton`, `PassphraseSheet`, `ExpiryRing`.
+Components: `CharacterStage`, `EffectHeadline`, `FactPager` (pages, colour by meaning), `ApproveButton` (label morphs Approve → Approving → Approved), `RejectButton`, `PassphraseSheet`, `ExpiryRing`.
 
 ### V5 — Character editor
 Opened from V3 header. Shape, eyes, brows, colour, accessory; name and traits. Live preview on the same avatar instance that will travel back to the swarm. "Offered by the agent" card shown here for accept / replace when one exists.
@@ -129,11 +133,25 @@ Members, devices (phones included), pending invites with approve / delete. Pair 
 ### V10 — Vault and More
 Status, sync, doctor as a read view with one action each. Settings: notifications per kind, passphrase-on-phone, this device, unpair.
 
+## Visual direction
+
+Taken from the inspiration boards on the Squig canvas (2026-10-12).
+
+**App surface: "Family" lineage.** Off-white paper, near-black type, big rounded cards in flat saturated colours, generous radii (24–28 pt), full-width pill buttons, one blue for primary actions, white trays rising over dimmed content, list rows with a leading icon and a chevron. Bold rounded grotesk at large sizes; numbers and names set big. Nothing outlined where a fill will do. Dark mode flips paper and ink and keeps the saturated colours.
+
+**Characters: soft 3D clay, one colour, simple face.** The agents are physical-feeling blobs in a small family of body shapes — rounded triangle, cloud, heart, disc, pebble — each in one saturated colour (yellow, blue, purple, green, orange, black), with modular parts from a fixed kit: eyes (dot, oval, closed), brows, glasses (round, frame), bow tie, beret, cap. Each character has a spec sheet feel: front, side, measured, the way the inspiration frames them as "No. 001". The default face is derived from the agent's key (shape, colour, eyes, one accessory); the editor swaps parts from the same kit, so every agent stays in the family. Characters can stack and lean on each other in the swarm, like the stacked-blob reference.
+
+**Risk colours, fixed.** Green = routine, amber = protected or expiring, red = high risk. Nothing else in the app uses red. Agent body colours never carry meaning.
+
+**Energy budget.** The maximalist isometric illustration on the board is the ceiling, not the floor: that much colour and depth is for the pairing screen, an empty swarm, and the big moments (first agent, farewell). Day-to-day screens stay calm so the characters and the risk colour do the talking.
+
+**Tokens for the designer agent.** Paper #F7F6F2, ink #111, blue primary, risk green/amber/red, six character colours; radius 28 (cards, trays), 16 (rows), pill buttons 52 pt tall; type scale 34 / 22 / 17 / 13; spacing 8-grid; haptics: light on approve routine, heavy on reject and on red approve.
+
 ## Motion and continuity principles
 
 Adopted from Benji Taylor's "Family values" and adapted:
 
-- **Persistence.** A component that will exist in the next screen stays the same component. The agent avatar is the primary persistent element: swarm → agent page → request card → editor, always the same instance moving, never a cut. Grant rows persist from the agent page into the picker.
+- **Persistence.** A component that will exist in the next screen stays the same component. The agent avatar is the primary persistent element: swarm → stack row → request card → agent page → editor, always the same instance moving, never a cut. The request stack unfolds into the list and the list row grows into the card; nothing is replaced. Grant rows persist from the agent page into the picker.
 - **Fly, don't teleport.** Every transition explains the route from A to B. Tab changes move in the direction of the tab. Trays rise over the current screen so context stays visible; full-screen pushes are reserved for the request card, which deserves the whole stage.
 - **Trays for depth.** Multi-step flows (issue bearer, grant picker, passphrase) are successive trays of different heights so progress is read from the silhouette.
 - **Text morphs for action.** Approve → Approving → Approved shares letters; Reject does the same. The headline of a request never changes wholesale under the finger.
@@ -170,6 +188,6 @@ Adopted from Benji Taylor's "Family values" and adapted:
 
 ## Further Notes
 
-- Motion and micro-interaction references from Camille are to follow and should be folded into the principles section.
+- Camille's wireframes and inspiration boards live on the Squig canvas "Dop" (Orca browser tab); the reworked screens there (request cards v2, folded / unfolded stack, fact pages, agent detail, issue tray, shown-once, revive, character editor) are the starting point for the designer agent.
 - The same per-kind presentation rules should be ported back to the web approval page so both surfaces agree (dop-dkj).
 - Phasing: the swarm, inbox, request card and agent page (read-only) are the prototype; grant add/remove and revoke are the first management commands; issue and the full menu follow.
