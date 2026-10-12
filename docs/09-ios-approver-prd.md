@@ -103,7 +103,7 @@ Header: avatar large, name, host, harness, status. Sections as collapsible cards
 Components: `AgentHeader`, `BearerFacts`, `GrantRow`, `IntegrationPeek`, `ActivityList`, `DangerZone`.
 
 ### V4 — Request card (full)
-The decision view, reached by tapping a pill in the stack or a row in the unfolded list; the character flies from there into the card. Top third: **the character, large**, name under it, then the effect sentence as a verb ("wants to bind a new bearer"). Middle: **the facts as swipeable pages** in one known component, with a page indicator. Page 1 is always the risk: "Routine · a new agent key on hermes-vps" (green), "HIGH RISK · keys will be shown in an AI transcript" (red), "Protected grant · …" (amber). Then from (host, harness), touches (service, grant, env name), expires (countdown), context (goal, branch, project when declared), and for dangerous kinds, the safe alternative (dop exec). Bottom: Approve with Face ID and Reject; a small "type the passphrase instead".
+The decision view, reached by tapping a pill in the stack or a row in the unfolded list; the character flies from there into the card. Top third: **the character, large**, name under it, then the effect sentence as a verb ("wants to bind a new bearer"). Middle: **the facts as swipeable pages** in one known component, with a page indicator. Page 1 is always the risk: "Routine · a new agent key on hermes-vps" (green), "HIGH RISK · keys will be shown in an AI transcript" (red), "Protected grant · …" (amber). Pages advance by swipe; when the request is close to expiry (last minute, or a grant about to lapse) they auto-advance slowly so the countdown page is reached without a gesture, and any touch stops the auto-advance. Then from (host, harness), touches (service, grant, env name), expires (countdown), context (goal, branch, project when declared), and for dangerous kinds, the safe alternative (dop exec). Bottom: Approve with Face ID and Reject; a small "type the passphrase instead".
 
 Risk is never a separate badge. It is the first page, the colour of that component, and for red kinds a tint of the header area, heavier haptics, and a one-second hold before Approve is live. On red kinds Reject is the primary button and Approve the outline one.
 
@@ -135,7 +135,33 @@ Status, sync, doctor as a read view with one action each. Settings: notification
 
 ## Visual direction
 
-Taken from the inspiration boards on the Squig canvas (2026-10-12).
+Taken from the inspiration boards on the Squig canvas (2026-10-12). The images are in [media/ios-inspiration](media/ios-inspiration/); point the designer agent at them.
+
+### Inspiration board
+
+**App surface — Family wallet (Benji Taylor)**
+
+| | | |
+|---|---|---|
+| ![wallets grid + tray](media/ios-inspiration/app-family-wallets-tray.png) | ![card + options tray](media/ios-inspiration/app-family-card-options-tray.png) | ![backup + continue](media/ios-inspiration/app-family-backup-continue.png) |
+| Big rounded cards, one flat colour each; a white tray rising over the dimmed grid; two-line option rows with a coloured leading icon. | A hero card, then a plain list with icons and chevrons; the tray holds the risky actions and colours the dangerous one red. | A coloured content block, a full-width pill button, calm paper around it. |
+| ![token list](media/ios-inspiration/app-family-token-list.png) | ![pending transaction](media/ios-inspiration/app-family-pending-transaction.png) | ![settings + choose chains](media/ios-inspiration/app-family-settings-choose-chains.png) |
+| Dense list that still breathes: round icons, bold name, muted second line, right-aligned numbers. | A large number as the hero, status pill, key/value rows under it — the shape of our request card facts. | Settings rows with a leading icon; a tray with a radio list and one blue Continue. |
+
+**Characters — soft 3D clay, one colour, a parts kit**
+
+| | |
+|---|---|
+| ![triangle with glasses and bow tie](media/ios-inspiration/agents-clay-triangle-glasses-bowtie.png) | ![heart and cloud](media/ios-inspiration/agents-clay-heart-cloud.png) |
+| One body shape, one saturated colour, two accessories, a name field under it. This is the agent page header and the editor's preview. | Different shapes, same family: heart with sunglasses, cloud with a beret. Eyes are two dots; the shape and the accessory carry the personality. |
+| ![spec sheets and parts kit](media/ios-inspiration/agents-spec-sheets-parts-kit.png) | ![stacked blobs](media/ios-inspiration/agents-stacked-blobs.png) |
+| The system itself: measured front / side / back sheets ("No. 001"), and the kit on the wall: shapes, eyes, brows, glasses, bow tie, beret, heart. Our editor is this wall. | Blobs stacking and leaning on each other, each a different colour, same eye language. The swarm when agents cluster. |
+
+**World — the ceiling**
+
+![maximalist isometric illustration](media/ios-inspiration/world-maximalist-isometric.png)
+
+Bold geometry, saturated cyan / red / yellow, playful depth. Reserved for the pairing screen, an empty swarm and the big moments. Never on a decision screen.
 
 **App surface: "Family" lineage.** Off-white paper, near-black type, big rounded cards in flat saturated colours, generous radii (24–28 pt), full-width pill buttons, one blue for primary actions, white trays rising over dimmed content, list rows with a leading icon and a chevron. Bold rounded grotesk at large sizes; numbers and names set big. Nothing outlined where a fill will do. Dark mode flips paper and ink and keeps the saturated colours.
 
@@ -143,9 +169,13 @@ Taken from the inspiration boards on the Squig canvas (2026-10-12).
 
 **Risk colours, fixed.** Green = routine, amber = protected or expiring, red = high risk. Nothing else in the app uses red. Agent body colours never carry meaning.
 
+**Open: the app's own colour versus the agents' colours.** Undecided (2026-10-12). Options for the designer to show: (a) the app is neutral, paper and ink only, and agents own every saturated colour; (b) the app has one brand colour that no agent may wear; (c) the operator's own devices get a reserved colour so a phone never reads as an agent. Show all three on the Home screen.
+
 **Energy budget.** The maximalist isometric illustration on the board is the ceiling, not the floor: that much colour and depth is for the pairing screen, an empty swarm, and the big moments (first agent, farewell). Day-to-day screens stay calm so the characters and the risk colour do the talking.
 
 **Tokens for the designer agent.** Paper #F7F6F2, ink #111, blue primary, risk green/amber/red, six character colours; radius 28 (cards, trays), 16 (rows), pill buttons 52 pt tall; type scale 34 / 22 / 17 / 13; spacing 8-grid; haptics: light on approve routine, heavy on reject and on red approve.
+
+See also [10-character-system-prompt.md](10-character-system-prompt.md): the prompt to generate and iterate the character system with an image model.
 
 ## Motion and continuity principles
 
