@@ -38,10 +38,14 @@ func Run() int {
 
 // Theme: fg is painted explicitly, bg never (light terminals keep theirs).
 // One bold per screen (titleSt), one italic (placeholderSt).
+//
+// The palette assumes a dark terminal. DOP_THEME=light swaps the three
+// greys for a white background (focus darkest, hints lightest); styles
+// below derive from these vars at init, so the swap covers every view.
 var (
-	fg            = lipgloss.Color("#5c5c5c")
-	brand         = lipgloss.Color("#c2c4cc")
-	muted         = lipgloss.Color("#404040")
+	fg            = themed("#5c5c5c", "#444444")
+	brand         = themed("#c2c4cc", "#111111")
+	muted         = themed("#404040", "#8c8c8c")
 	ok            = lipgloss.Color("#10b981")
 	danger        = lipgloss.Color("#ef4444")
 	titleSt       = lipgloss.NewStyle().Bold(true).Foreground(fg)
@@ -58,6 +62,14 @@ var (
 	cursorSt = focusSt
 	helpSt   = mutedSt
 )
+
+// themed picks the light value when DOP_THEME=light, else the dark one.
+func themed(dark, light string) lipgloss.Color {
+	if os.Getenv("DOP_THEME") == "light" {
+		return lipgloss.Color(light)
+	}
+	return lipgloss.Color(dark)
+}
 
 // --- state detection ---
 

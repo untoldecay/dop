@@ -108,6 +108,7 @@ env:
   DOP_TOKEN_FILE                path to a file containing a bearer (alternative to env)
   DOP_VAULT                     override vault path
   DOP_NO_TUI                    disable TUI on 'dop' alone (agents/cron)
+  DOP_THEME                     light — TUI palette for a white terminal (default: dark)
   DOP_ADMIN_TTL                 admin session idle timeout (default 15m)
   DOP_ADMIN_MAX_TTL             admin session absolute timeout (default 60m)
   DOP_AUTO_PULL                 max staleness before dop exec auto-pulls (default 5m)
