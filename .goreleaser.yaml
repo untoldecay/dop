@@ -55,7 +55,7 @@ builds:
     # release --snapshot` in unattended CI still works.
     hooks:
       post:
-        - cmd: sh -c 'if [ -n "$DOP_SIGN_IDENTITY" ]; then codesign --force --sign "$DOP_SIGN_IDENTITY" --options runtime --timestamp "{{ .Path }}" && codesign --display --verbose=2 "{{ .Path }}" 2>&1 | grep -E "Authority|TeamIdentifier"; else echo "[warn] DOP_SIGN_IDENTITY not set — binary will be adhoc-signed and cannot reach Secure Enclave"; fi'
+        - cmd: sh -c 'if [ -n "$DOP_SIGN_IDENTITY" ]; then codesign --force --sign "$DOP_SIGN_IDENTITY" --options runtime --timestamp "{{ .Path }}" && codesign --display --verbose=2 "{{ .Path }}" 2>&1 | grep -E "Authority|TeamIdentifier"; else echo "[warn] DOP_SIGN_IDENTITY not set — binary will be adhoc-signed (Gatekeeper warns on download; Secure Enclave works on any build since v1.20.0)"; fi'
   # Linux stays cgo-free — no SE there anyway, and pure-Go static
   # binaries cross-compile cleanly for both arches.
   - id: dop-linux
