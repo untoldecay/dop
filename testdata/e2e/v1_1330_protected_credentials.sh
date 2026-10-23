@@ -107,9 +107,8 @@ echo -n "$APPROVE" | "$DOP" integration protect --name secret-svc --add-owner bo
 "$DOP" integration protect --name secret-svc 2>&1 | grep -q "bob" || fail "bob not listed as owner"
 "$DOP" push >/dev/null 2>&1 || fail "push after protect failed"
 runB pull >/dev/null 2>&1 || fail "bob pull failed"
-# Grants followed the list.
-awk '/secret-svc.api:/{f=1} f{print; if(/^[^ ]/) exit}' "$VAULT_DIR/vault.yaml" | grep -q "owners:" \
-    || fail "grant did not follow the owners list"
+# The grant's lock resolves from the integration (no copy to sync): bob
+# acts on the grant right away, proven by the edit + issue below.
 # Co-owner bob can edit, and issue a bearer with the protected grant (his own passphrase).
 runB integration add --name secret-svc --description "edited by bob" >/dev/null 2>&1 \
     || fail "co-owner bob could not edit the protected integration"
@@ -132,8 +131,29 @@ if runB integration add --name secret-svc --description "bob again" >/dev/null 2
   fail "removed co-owner bob could still edit"
 fi
 grep -q '"event":"protected_owners"' "$AUDIT" || fail "no protected_owners audit event"
-HOME="$HOME_B" "$DOP" admin logout >/dev/null 2>&1 || true
 pass "protector pinned, removed co-owner refused, audit present"
+
+echo "=== [6c] the lock lives on the integration: unprotect frees the grant, re-protect by B locks A out"
+"$DOP" pull >/dev/null 2>&1 || true
+"$DOP" integration add --name secret-svc --protected=false >/dev/null 2>&1 || fail "owner could not unprotect"
+# No passphrase needed any more to issue the grant.
+"$DOP" token issue --grants secret-svc.api --name open-bot --no-bind >/dev/null 2>&1 \
+    || fail "grant still locked after its integration was unprotected"
+"$DOP" push >/dev/null 2>&1 || fail "push after unprotect failed"
+runB pull >/dev/null 2>&1 || fail "bob pull failed"
+echo -n "$APPROVE" | HOME="$HOME_B" DOP_APPROVAL_PASSPHRASE="$APPROVE" "$DOP" integration add --name secret-svc --protected --passphrase-stdin >/dev/null 2>&1 \
+    || fail "bob could not protect the open integration"
+HOME="$HOME_B" "$DOP" push >/dev/null 2>&1 || fail "bob push failed"
+"$DOP" pull >/dev/null 2>&1 || fail "A pull failed"
+if echo -n "$APPROVE" | "$DOP" token issue --grants secret-svc.api --name a-bot --no-bind --passphrase-stdin >/dev/null 2>&1; then
+  fail "A could issue a grant of an integration now protected by bob"
+fi
+# Hand it back so [7] (A removes it) still holds.
+HOME="$HOME_B" "$DOP" integration add --name secret-svc --protected=false >/dev/null 2>&1 || fail "bob could not unprotect"
+HOME="$HOME_B" "$DOP" push >/dev/null 2>&1; "$DOP" pull >/dev/null 2>&1
+echo -n "$APPROVE" | "$DOP" integration add --name secret-svc --protected --passphrase-stdin >/dev/null 2>&1 || fail "A could not re-protect"
+HOME="$HOME_B" "$DOP" admin logout >/dev/null 2>&1 || true
+pass "lock follows the integration, not the copies"
 
 echo "=== [7] owner-only CLI gates (same session, verify positive path)"
 # Removing a protected integration you own + supplying no passphrase

@@ -388,11 +388,11 @@ func runTokenIssue(args []string) int {
 func gateProtectedGrants(client *admin.Client, paths *config.Paths, v *vault.Vault, grants []string, passStdin bool) ([]string, error) {
 	var protectedGrants []string
 	for _, gid := range grants {
-		g := v.Grants[gid]
-		if !g.Protected {
+		prot, owners := v.GrantProtection(gid)
+		if !prot {
 			continue
 		}
-		if err := requireProtectionOwner(client, "grant "+gid, g.Protected, g.OwnerSet()); err != nil {
+		if err := requireProtectionOwner(client, "grant "+gid, true, owners); err != nil {
 			return nil, err
 		}
 		protectedGrants = append(protectedGrants, gid)
@@ -2256,14 +2256,11 @@ func runTokenGrantMutation(args []string, mode string) int {
 	}
 
 	// Validate the grant argument.
-	var targetGrant vault.Grant
 	if mode == "add" {
-		g, ok := v.Grants[grantID]
-		if !ok {
+		if _, ok := v.Grants[grantID]; !ok {
 			fmt.Fprintf(os.Stderr, "dop token add-grant: no grant %q in vault (see `dop grant list`)\n", grantID)
 			return 1
 		}
-		targetGrant = g
 		for _, g := range match.Grants {
 			if g == grantID {
 				fmt.Fprintf(os.Stderr, "dop token add-grant: bearer already has grant %q\n", grantID)
@@ -2282,14 +2279,13 @@ func runTokenGrantMutation(args []string, mode string) int {
 			fmt.Fprintf(os.Stderr, "dop token remove-grant: bearer doesn't have grant %q\n", grantID)
 			return 1
 		}
-		targetGrant = v.Grants[grantID]
 	}
 
 	// v1.13.0-rc12 — protected grant → owner + passphrase gate.
 	// Applies to both add (giving the bearer access) and remove
 	// (changing who sees what, which should still be an audited move).
-	if targetGrant.Protected {
-		if err := requireProtectionOwner(client, "grant "+grantID, targetGrant.Protected, targetGrant.OwnerSet()); err != nil {
+	if prot, owners := v.GrantProtection(grantID); prot {
+		if err := requireProtectionOwner(client, "grant "+grantID, true, owners); err != nil {
 			fmt.Fprintf(os.Stderr, "dop token %s-grant: %v\n", mode, err)
 			return 1
 		}

@@ -268,7 +268,7 @@ dop integration list
 
 ### `dop integration protect`
 
-Who may act on a protected integration. The admin who protected it is the *protector* and stays an owner; this adds or removes *co-owners*. Every owner can modify the integration, add grants, issue and `dop use` bearers that carry its grants, each gated by their own approval passphrase. The integration's grants follow the list. Protection is a convention enforced by the CLI and the daemon's save guard, not a cryptographic wall: every admin can decrypt the vault.
+Who may act on a protected integration. The admin who protected it is the *protector* and stays an owner; this adds or removes *co-owners*. Every owner can modify the integration, add grants, issue and `dop use` bearers that carry its grants, each gated by their own approval passphrase. A grant's lock is resolved from its integration at check time, so unprotecting, re-protecting or changing owners applies to the grants at once; a grant can also carry a lock of its own (`dop grant add --protected`). Protection is a convention enforced by the CLI and the daemon's save guard, not a cryptographic wall: every admin can decrypt the vault.
 
 ```
 dop integration protect --name <N>                       # show the owners

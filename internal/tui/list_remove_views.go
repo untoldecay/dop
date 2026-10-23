@@ -137,7 +137,7 @@ func (v *integrationListView) load() tea.Msg {
 		}
 		return integListLoadedMsg{err: err.Error()}
 	}
-	return integListLoadedMsg{items: vlt.Integrations, grants: vlt.Grants, admins: vlt.Admins}
+	return integListLoadedMsg{items: vlt.Integrations, grants: vlt.EffectiveGrants(), admins: vlt.Admins}
 }
 
 func (v *integrationListView) selectedName() string {
@@ -994,7 +994,7 @@ func (v *integrationRemoveView) load() tea.Msg {
 		return integListLoadedMsg{err: err.Error()}
 	}
 	// v1.13.0-rc8 — we need grants + capabilities for the cascade preview.
-	return integListLoadedMsg{items: vlt.Integrations, grants: vlt.Grants, caps: vlt.Capabilities}
+	return integListLoadedMsg{items: vlt.Integrations, grants: vlt.EffectiveGrants(), caps: vlt.Capabilities}
 }
 
 // prepareTokenPicker populates tokenNames + resets selection for the
@@ -1778,7 +1778,7 @@ func (v *grantListView) load() tea.Msg {
 		}
 		return grantListLoadedMsg{err: err.Error()}
 	}
-	return grantListLoadedMsg{items: vlt.Grants}
+	return grantListLoadedMsg{items: vlt.EffectiveGrants()}
 }
 
 func (v *grantListView) selectedID() string {
@@ -2304,7 +2304,7 @@ func (v *grantRemoveView) load() tea.Msg {
 		}
 		return grantListLoadedMsg{err: err.Error()}
 	}
-	return grantListLoadedMsg{items: vlt.Grants}
+	return grantListLoadedMsg{items: vlt.EffectiveGrants()}
 }
 func (v *grantRemoveView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if ok, cmd := v.wizMsg(msg, false); ok {

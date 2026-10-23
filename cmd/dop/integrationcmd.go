@@ -910,6 +910,17 @@ func runIntegrationAdd(args []string) int {
 		Projects:    integProjects,
 		Tags:        integTags,
 	}
+	// v1.21 — an unlock clears the copies its grants took at creation,
+	// so nothing stays locked to the former owner (GrantProtection
+	// resolves the integration's lock live; the copies are compat only).
+	if !protect && existing.Protected {
+		for id, g := range v.Grants {
+			if g.Integration == key && g.Protected && strings.EqualFold(g.Owner, existing.Owner) {
+				g.Protected, g.Owner, g.Owners = false, "", nil
+				v.Grants[id] = g
+			}
+		}
+	}
 
 	if err := saveVaultViaDaemon(client, paths, vaultPath, v); err != nil {
 		fmt.Fprintf(os.Stderr, "dop integration add: %v\n", err)
@@ -1299,10 +1310,11 @@ func runGrantRename(args []string) int {
 	if _, exists := v.Grants[*to]; exists {
 		return fail(fmt.Errorf("a grant named %q already exists", *to))
 	}
-	if err := requireProtectionOwner(client, "grant "+*from, g.Protected, g.OwnerSet()); err != nil {
+	gProt, gOwners := v.GrantProtection(*from)
+	if err := requireProtectionOwner(client, "grant "+*from, gProt, gOwners); err != nil {
 		return fail(err)
 	}
-	if g.Protected {
+	if gProt {
 		if err := promptProtectionPassphrase(paths, "approval passphrase (rename grant "+*from+"): ", *passphraseStdin); err != nil {
 			return fail(err)
 		}
@@ -1353,13 +1365,13 @@ func runGrantRemove(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop grant remove: %v\n", err)
 		return 1
 	}
-	existing, ok := v.Grants[*id]
-	if !ok {
+	if _, ok := v.Grants[*id]; !ok {
 		fmt.Fprintf(os.Stderr, "dop grant remove: no grant named %q\n", *id)
 		return 1
 	}
 	// v1.13.0-rc12 — refuse removal of a protected grant you don't own.
-	if err := requireProtectionOwner(client, "grant "+*id, existing.Protected, existing.OwnerSet()); err != nil {
+	rmProt, rmOwners := v.GrantProtection(*id)
+	if err := requireProtectionOwner(client, "grant "+*id, rmProt, rmOwners); err != nil {
 		fmt.Fprintf(os.Stderr, "dop grant remove: %v\n", err)
 		return 1
 	}
@@ -1457,7 +1469,8 @@ func runGrantAdd(args []string) int {
 		action = "updated"
 		existingGrant = g
 		// Can't update a protected grant you don't own.
-		if err := requireProtectionOwner(client, "grant "+*id, g.Protected, g.OwnerSet()); err != nil {
+		upProt, upOwners := v.GrantProtection(*id)
+		if err := requireProtectionOwner(client, "grant "+*id, upProt, upOwners); err != nil {
 			fmt.Fprintf(os.Stderr, "dop grant add: %v\n", err)
 			return 1
 		}

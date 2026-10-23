@@ -285,6 +285,53 @@ func ownerSet(owner string, owners []string) []string {
 	return out
 }
 
+// OwnedBy reports whether pub is in owners (hex case ignored).
+func OwnedBy(owners []string, pub string) bool { return ownedBy(owners, pub) }
+
+// GrantProtection resolves a grant's lock at read time: protected when
+// its integration is protected or the grant carries a lock of its own;
+// owners is the union, the integration's protector first. The flags
+// stored on the grant are a copy made at `grant add` — they are only
+// consulted as a grant-level lock, never as the integration's, so an
+// integration's unprotect, re-protect or owner change reaches its
+// grants at once.
+func (v *Vault) GrantProtection(id string) (bool, []string) {
+	g, ok := v.Grants[id]
+	if !ok {
+		return false, nil
+	}
+	var integ Integration
+	if k, ok := v.FindIntegrationKey(g.Integration); ok {
+		integ = v.Integrations[k]
+	}
+	protected, owners := false, []string(nil)
+	if integ.Protected {
+		protected, owners = true, integ.OwnerSet()
+	}
+	// A copy of the integration's lock (same protector) is just a copy;
+	// a lock by someone else, or on an open integration, is the grant's own.
+	if g.Protected && (!integ.Protected || !strings.EqualFold(g.Owner, integ.Owner)) {
+		protected = true
+		owners = ownerSet("", append(append([]string(nil), owners...), g.OwnerSet()...))
+	}
+	return protected, owners
+}
+
+// EffectiveGrants is Grants with Protected / Owner / Owners replaced by
+// GrantProtection's answer. For display; never save it back.
+func (v *Vault) EffectiveGrants() map[string]Grant {
+	out := make(map[string]Grant, len(v.Grants))
+	for id, g := range v.Grants {
+		p, owners := v.GrantProtection(id)
+		g.Protected, g.Owner, g.Owners = p, "", nil
+		if len(owners) > 0 {
+			g.Owner, g.Owners = owners[0], owners[1:]
+		}
+		out[id] = g
+	}
+	return out
+}
+
 func ownedBy(owners []string, pub string) bool {
 	for _, o := range owners {
 		if strings.EqualFold(o, pub) {

@@ -218,7 +218,7 @@ func enforceProtectedOnSave(client *admin.Client, paths *config.Paths, old, next
 	// Pass 2 — grants (same rules).
 	for key, oldGrant := range old.Grants {
 		newGrant, present := next.Grants[key]
-		if oldGrant.Protected && !oldGrant.OwnedBy(actor) {
+		if prot, owners := old.GrantProtection(key); prot && !vault.OwnedBy(owners, actor) {
 			if !present {
 				next.Grants[key] = oldGrant
 				reverted = append(reverted, "grant:"+key+" (deletion)")

@@ -1070,7 +1070,7 @@ func (v *listView) load() tea.Msg {
 		names[a.Ed25519Pubkey] = n
 	}
 	pend, _ := pendingRows(v.paths) // best-effort, like the root banner
-	return listLoadedMsg{capabilities: caps, capIDs: ids, viewerPubkey: viewerPubkey, adminNames: names, grants: vv.Grants, pending: pend}
+	return listLoadedMsg{capabilities: caps, capIDs: ids, viewerPubkey: viewerPubkey, adminNames: names, grants: vv.EffectiveGrants(), pending: pend}
 }
 
 // visible returns the indexes into v.capabilities that should be shown

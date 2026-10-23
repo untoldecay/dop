@@ -66,7 +66,7 @@ func runIntegrationProtect(args []string) int {
 			fmt.Fprintf(os.Stderr, "dop integration protect: %v\n", err)
 			return 1
 		}
-		if !integ.OwnedBy(pub) && !ownedByList(next, pub) {
+		if !integ.OwnedBy(pub) && !vault.OwnedBy(next, pub) {
 			next = append(next, pub)
 		}
 	}
@@ -94,15 +94,7 @@ func runIntegrationProtect(args []string) int {
 		return 1
 	}
 	integ.Owners = next
-	v.Integrations[key] = integ
-	followed := 0
-	for id, g := range v.Grants {
-		if g.Integration == key && g.Protected && strings.EqualFold(g.Owner, integ.Owner) {
-			g.Owners = append([]string(nil), next...)
-			v.Grants[id] = g
-			followed++
-		}
-	}
+	v.Integrations[key] = integ // grants resolve the lock live (GrantProtection)
 	if err := saveVaultViaDaemon(client, paths, vp, v); err != nil {
 		fmt.Fprintf(os.Stderr, "dop integration protect: %v\n", err)
 		return 1
@@ -114,10 +106,9 @@ func runIntegrationProtect(args []string) int {
 			"owners":  strings.Join(integ.OwnerSet(), ","),
 			"added":   strings.Join(adds, ","),
 			"removed": strings.Join(rms, ","),
-			"grants":  fmt.Sprintf("%d", followed),
 		},
 	})
-	fmt.Fprintf(os.Stderr, "dop integration protect: %s is protected by %s (%d grant(s) follow)\n", key, adminNames(v, integ.OwnerSet()), followed)
+	fmt.Fprintf(os.Stderr, "dop integration protect: %s is protected by %s\n", key, adminNames(v, integ.OwnerSet()))
 	return 0
 }
 
@@ -163,13 +154,4 @@ func adminNames(v *vault.Vault, pubs []string) string {
 		out = append(out, n)
 	}
 	return strings.Join(out, ", ")
-}
-
-func ownedByList(owners []string, pub string) bool {
-	for _, o := range owners {
-		if strings.EqualFold(o, pub) {
-			return true
-		}
-	}
-	return false
 }

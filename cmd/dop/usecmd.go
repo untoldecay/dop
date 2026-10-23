@@ -238,14 +238,11 @@ func checkCapabilityProtection(client *admin.Client, crec vault.Capability) erro
 		return fmt.Errorf("session status: %w", err)
 	}
 	for _, gid := range crec.Grants {
-		g, ok := v.Grants[gid]
-		if !ok {
+		prot, owners := v.GrantProtection(gid)
+		if !prot {
 			continue
 		}
-		if !g.Protected {
-			continue
-		}
-		if !g.OwnedBy(st.AdminPubkey) {
+		if !vault.OwnedBy(owners, st.AdminPubkey) {
 			return fmt.Errorf("bearer carries protected grant %q owned by another admin — only the owner can `dop use` it", gid)
 		}
 	}
