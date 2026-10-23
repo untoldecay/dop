@@ -102,6 +102,9 @@ type Integration struct {
 	Tokens      map[string]Token  `yaml:"tokens,omitempty"`
 	Protected   bool              `yaml:"protected,omitempty"`
 	Owner       string            `yaml:"owner,omitempty"` // ed25519 pubkey hex
+	// v1.21 — co-owners (ed25519 pubkey hex). Owner stays the admin who
+	// protected it; everyone in OwnerSet() may modify, issue and use.
+	Owners []string `yaml:"owners,omitempty"`
 	// v1.13.0-rc13 — Kind describes HOW the credential is used so the
 	// agent's env bundle can be self-describing. Empty Kind is treated
 	// as IntegrationKindAPI for backward-compat (every pre-rc13
@@ -252,8 +255,43 @@ type Grant struct {
 	// grant-add path copies Integration.Protected/Owner at save time
 	// so the daemon doesn't need to do a two-hop lookup on every
 	// mutation check.
-	Protected bool   `yaml:"protected,omitempty"`
-	Owner     string `yaml:"owner,omitempty"`
+	Protected bool     `yaml:"protected,omitempty"`
+	Owner     string   `yaml:"owner,omitempty"`
+	Owners    []string `yaml:"owners,omitempty"` // v1.21 — follows Integration.Owners
+}
+
+// OwnerSet is every admin allowed to act on the integration: the
+// protector first, then the co-owners, deduped, hex case ignored.
+func (i Integration) OwnerSet() []string { return ownerSet(i.Owner, i.Owners) }
+
+// OwnedBy reports whether pub (ed25519 pubkey hex) may act on it.
+func (i Integration) OwnedBy(pub string) bool { return ownedBy(i.OwnerSet(), pub) }
+
+// OwnerSet / OwnedBy — same as on Integration; grants copy the list.
+func (g Grant) OwnerSet() []string      { return ownerSet(g.Owner, g.Owners) }
+func (g Grant) OwnedBy(pub string) bool { return ownedBy(g.OwnerSet(), pub) }
+
+func ownerSet(owner string, owners []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, o := range append([]string{owner}, owners...) {
+		k := strings.ToLower(strings.TrimSpace(o))
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, o)
+	}
+	return out
+}
+
+func ownedBy(owners []string, pub string) bool {
+	for _, o := range owners {
+		if strings.EqualFold(o, pub) {
+			return true
+		}
+	}
+	return false
 }
 
 // EffectivePrefix returns the env-var prefix DOP should use when

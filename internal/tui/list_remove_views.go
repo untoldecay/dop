@@ -42,6 +42,8 @@ const (
 	integModeIntEdit            = 9
 	integModeIntReview          = 10
 	integModeTokenRename        = 11
+	integModeOwners             = 12 // v1.21 — who may act on a protected integration
+	integModeOwnersPass         = 13
 )
 
 type integrationListView struct {
@@ -93,10 +95,18 @@ type integrationListView struct {
 
 	renameIn, renamePass textinput.Model // credential rename step
 	renameAt             int             // 1: the passphrase input has the caret
+
+	// Owners of a protected integration: a picker over the team, the
+	// protector pinned, then the approval passphrase.
+	admins       map[string]vault.Admin
+	ownerPick    multiPick
+	ownerWas     map[string]bool
+	ownerPrimary string // team name of the protector (cannot be unpicked)
+	ownerPass    textinput.Model
 }
 
 func newIntegrationListView(c *admin.Client, p *config.Paths) *integrationListView {
-	return &integrationListView{client: c, paths: p, list: newNameList()}
+	return &integrationListView{client: c, paths: p, list: newNameList(), ownerPass: newFormInput(true)}
 }
 
 func (v *integrationListView) Init() tea.Cmd { return v.load }
@@ -109,8 +119,9 @@ type integListLoadedMsg struct {
 	// v1.13.0-rc8 — the remove-view needs capabilities too so it can
 	// compute the cascade preview (which bearers get resealed, which
 	// go stale, which drop to zero grants).
-	caps map[string]vault.Capability
-	err  string
+	caps   map[string]vault.Capability
+	err    string
+	admins map[string]vault.Admin
 }
 
 type integActionMsg struct{ err string }
@@ -126,7 +137,7 @@ func (v *integrationListView) load() tea.Msg {
 		}
 		return integListLoadedMsg{err: err.Error()}
 	}
-	return integListLoadedMsg{items: vlt.Integrations, grants: vlt.Grants}
+	return integListLoadedMsg{items: vlt.Integrations, grants: vlt.Grants, admins: vlt.Admins}
 }
 
 func (v *integrationListView) selectedName() string {
@@ -150,6 +161,7 @@ func (v *integrationListView) referrers(name string) []string {
 var integInfoActions = []listAction{
 	{label: "Edit", key: "e", desc: "name, kind, description, URL, projects, tags, protection"},
 	{label: "Remove", key: "r", desc: "removes the integration and the grants that use it"},
+	{label: "Owners", key: "o", desc: "which admins may act on it (protected only)"},
 }
 
 var credActions = []listAction{
@@ -186,6 +198,7 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.loadErr = mm.err
 		v.items = mm.items
 		v.grants = mm.grants
+		v.admins = mm.admins
 		v.names = v.names[:0]
 		for n := range mm.items {
 			v.names = append(v.names, n)
@@ -210,7 +223,7 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if mm.err != "" {
 			// Errors stay on the screen that caused them, in plain words.
 			v.err = map[string]string{"remove": "Remove", "scope": "Scope note", "rotate": "Rotate",
-				"remove-cred": "Remove credential", "edit": "Save", "rename-cred": "Rename"}[v.pending] + " failed: " + cliErr(mm.err)
+				"remove-cred": "Remove credential", "edit": "Save", "rename-cred": "Rename", "owners": "Owners"}[v.pending] + " failed: " + cliErr(mm.err)
 			v.mode = v.back
 			return v, nil
 		}
@@ -268,6 +281,10 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateIntEdit(mm)
 		case integModeTokenRename:
 			return v.updateTokenRename(mm)
+		case integModeOwners:
+			return v.updateOwners(mm)
+		case integModeOwnersPass:
+			return v.updateOwnersPass(mm)
 		}
 	}
 	return v, nil
@@ -389,8 +406,144 @@ func (v *integrationListView) runInfoAction(k string) (tea.Model, tea.Cmd) {
 	if k == "e" {
 		return v.enterIntEdit(), nil
 	}
+	if k == "o" {
+		return v.enterOwners()
+	}
 	v.mode = integModeConfirm
 	return v, nil
+}
+
+// enterOwners opens the owners picker for the selected integration:
+// every team admin, the current owners pre-picked, the protector pinned.
+func (v *integrationListView) enterOwners() (tea.Model, tea.Cmd) {
+	name := v.selectedName()
+	it := v.items[name]
+	if !it.Protected {
+		v.err = "Not protected. Edit › protection first; owners only apply to a protected integration."
+		v.mode = integModeDetail
+		return v, nil
+	}
+	byPub := map[string]string{}
+	var names []string
+	for n, a := range v.admins {
+		byPub[strings.ToLower(a.Ed25519Pubkey)] = n
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	v.ownerPrimary = byPub[strings.ToLower(it.Owner)]
+	sel := map[string]bool{}
+	for _, o := range it.OwnerSet() {
+		if n, ok := byPub[strings.ToLower(o)]; ok {
+			sel[n] = true
+		}
+	}
+	var items []pickItem
+	for _, n := range names {
+		note := ""
+		if n == v.ownerPrimary {
+			note = "protector · always an owner"
+		}
+		items = append(items, pickItem{id: n, group: "team", col: midTrunc(v.admins[n].Ed25519Pubkey, 16), note: note})
+	}
+	v.ownerPick = multiPick{items: items, sel: sel}
+	v.ownerWas = map[string]bool{}
+	for k, b := range sel {
+		v.ownerWas[k] = b
+	}
+	v.ownerPass.Reset()
+	v.mode, v.err = integModeOwners, ""
+	return v, nil
+}
+
+// ownerDiff is what the picker changed: names to add, names to remove.
+func (v *integrationListView) ownerDiff() (add, rm []string) {
+	for _, it := range v.ownerPick.items {
+		now, was := v.ownerPick.sel[it.id], v.ownerWas[it.id]
+		switch {
+		case now && !was:
+			add = append(add, it.id)
+		case !now && was:
+			rm = append(rm, it.id)
+		}
+	}
+	return add, rm
+}
+
+func (v *integrationListView) updateOwners(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := mm.String()
+	switch k {
+	case "esc", "q", "ctrl+c":
+		v.mode, v.err = integModeDetail, ""
+		return v, nil
+	case "enter":
+		add, rm := v.ownerDiff()
+		if len(add) == 0 && len(rm) == 0 {
+			v.mode, v.flash = integModeDetail, "owners unchanged"
+			return v, nil
+		}
+		v.mode, v.err = integModeOwnersPass, ""
+		v.ownerPass.Reset()
+		return v, nil
+	}
+	v.ownerPick.key(k)
+	if v.ownerPrimary != "" {
+		v.ownerPick.sel[v.ownerPrimary] = true // the protector stays
+	}
+	return v, nil
+}
+
+func (v *integrationListView) updateOwnersPass(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch mm.String() {
+	case "esc", "ctrl+c":
+		v.mode, v.err = integModeOwners, ""
+		return v, nil
+	case "enter":
+		if v.ownerPass.Value() == "" {
+			v.err = "Approval passphrase is required"
+			return v, nil
+		}
+		return v.startRun("owners", integModeOwnersPass, v.doOwners())
+	default:
+		edit(&v.ownerPass, mm)
+	}
+	return v, nil
+}
+
+// doOwners shells out to `dop integration protect`; the passphrase
+// goes on stdin, never in argv.
+func (v *integrationListView) doOwners() tea.Cmd {
+	name, pass := v.selectedName(), v.ownerPass.Value()
+	add, rm := v.ownerDiff()
+	return func() tea.Msg {
+		args := []string{"integration", "protect", "--name", name, "--passphrase-stdin"}
+		if len(add) > 0 {
+			args = append(args, "--add-owner", strings.Join(add, ","))
+		}
+		if len(rm) > 0 {
+			args = append(args, "--remove-owner", strings.Join(rm, ","))
+		}
+		_, e := runDop(pass, args...)
+		return integActionMsg{err: e}
+	}
+}
+
+func (v *integrationListView) viewOwners(width, height int) string {
+	name := v.selectedName()
+	if v.mode == integModeOwnersPass {
+		w := wiz{width: width, height: height, help: v.help}
+		return w.screen("Owners of "+name, "", "Approval passphrase", []string{inputRow(&v.ownerPass)}, "", v.err, "", wizKeys("save"))
+	}
+	body := append([]string{"  " + mutedSt.Render("Admins who may modify, issue and use "+name), ""},
+		v.ownerPick.rows(width, frameRows(height)-4, nil)...)
+	st := status{err: v.err}
+	add, rm := v.ownerDiff()
+	switch {
+	case len(add)+len(rm) > 0:
+		st.setHint(fmt.Sprintf("+%d −%d · enter to save", len(add), len(rm)))
+	default:
+		st.setHint("space toggles · the protector cannot be removed")
+	}
+	return frame(width, height, "Owners of "+name, nil, "", body, st.String(), footer(width, hint("space", "toggle"), hint("enter", "save"), keyBack))
 }
 
 // enterIntEdit builds the integration edit form from the selected
@@ -517,6 +670,8 @@ func (v *integrationListView) View() string {
 		return v.viewIntEdit(width, height)
 	case integModeTokenRename:
 		return v.viewTokenRename(width, height)
+	case integModeOwners, integModeOwnersPass:
+		return v.viewOwners(width, height)
 	}
 
 	km := integListKeys
@@ -716,7 +871,7 @@ func (v *integrationListView) viewConfirm(width, height int) string {
 // (the subprocess can't be cancelled).
 func (v *integrationListView) viewRun(width, height int) string {
 	what := v.selectedTokenName()
-	verb := map[string]string{"remove": "Removing %s…", "scope": "Saving the scope note of %s…",
+	verb := map[string]string{"remove": "Removing %s…", "scope": "Saving the scope note of %s…", "owners": "Saving the owners of %s…",
 		"rotate": "Rotating %s…", "remove-cred": "Removing %s…"}[v.pending]
 	if v.pending == "remove" {
 		what = v.selectedName()
@@ -733,7 +888,7 @@ func (v *integrationListView) viewRun(width, height int) string {
 
 // viewDone is the ✓ outcome of an integration action; any key returns.
 func (v *integrationListView) viewDone(width, height int) string {
-	title := map[string]string{"remove": "✓ Integration removed", "scope": "✓ Scope note saved",
+	title := map[string]string{"remove": "✓ Integration removed", "scope": "✓ Scope note saved", "owners": "✓ Owners saved",
 		"rotate": "✓ Credential rotated", "remove-cred": "✓ Credential removed", "edit": "✓ Integration saved",
 		"rename-cred": "✓ Credential renamed"}[v.pending]
 	rows := [][2]string{{"integration", v.keep}}

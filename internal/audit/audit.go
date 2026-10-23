@@ -52,6 +52,8 @@ const (
 	// so the audit trail is symmetric: every protect transition logs,
 	// in either direction. Fires only on actual true→false flips.
 	EventProtectedUnlock = "protected_unlock"
+	// v1.21 — co-owner list of a protected integration changed.
+	EventProtectedOwners = "protected_owners"
 	// v1.13.0-rc15 — endpoints doc probe at `integration add` time.
 	// Opt-in via --probe-endpoints. One event per run (success OR
 	// failure). Lets operators audit "did DOP make an outbound HTTP

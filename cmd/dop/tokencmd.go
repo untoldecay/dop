@@ -392,7 +392,7 @@ func gateProtectedGrants(client *admin.Client, paths *config.Paths, v *vault.Vau
 		if !g.Protected {
 			continue
 		}
-		if err := requireProtectionOwner(client, "grant "+gid, g.Protected, g.Owner); err != nil {
+		if err := requireProtectionOwner(client, "grant "+gid, g.Protected, g.OwnerSet()); err != nil {
 			return nil, err
 		}
 		protectedGrants = append(protectedGrants, gid)
@@ -2289,7 +2289,7 @@ func runTokenGrantMutation(args []string, mode string) int {
 	// Applies to both add (giving the bearer access) and remove
 	// (changing who sees what, which should still be an audited move).
 	if targetGrant.Protected {
-		if err := requireProtectionOwner(client, "grant "+grantID, targetGrant.Protected, targetGrant.Owner); err != nil {
+		if err := requireProtectionOwner(client, "grant "+grantID, targetGrant.Protected, targetGrant.OwnerSet()); err != nil {
 			fmt.Fprintf(os.Stderr, "dop token %s-grant: %v\n", mode, err)
 			return 1
 		}

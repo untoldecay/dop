@@ -1149,6 +1149,17 @@ func walkIntegrations(w *walker) {
 	w.dump("integration-detail-remove", "Integrations · remove confirm from the detail")
 	w.esc()
 	w.esc()
+	// Owners (v1.21): picker over the team, protector pinned, passphrase.
+	open()
+	w.keys("enter", "down", "down", "enter")
+	w.dump("integration-owners", "Integrations · owners picker (protected)", "key")
+	w.keys(" ")
+	w.dump("integration-owners-picked", "Integrations · co-owner picked")
+	w.keys("enter")
+	w.dump("integration-owners-pass", "Integrations · owners · approval passphrase", "key")
+	w.esc()
+	w.esc()
+	w.esc()
 	// default picker choices: scope note keeps its preset, edit saves unchanged
 	tok()
 	w.line("enter", "enter")

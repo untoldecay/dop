@@ -266,6 +266,25 @@ List integrations with their tokens, metadata, kind, and lock status. Admins see
 dop integration list
 ```
 
+### `dop integration protect`
+
+Who may act on a protected integration. The admin who protected it is the *protector* and stays an owner; this adds or removes *co-owners*. Every owner can modify the integration, add grants, issue and `dop use` bearers that carry its grants, each gated by their own approval passphrase. The integration's grants follow the list. Protection is a convention enforced by the CLI and the daemon's save guard, not a cryptographic wall: every admin can decrypt the vault.
+
+```
+dop integration protect --name <N>                       # show the owners
+dop integration protect --name <N> --add-owner bob       # team name or pubkey prefix
+dop integration protect --name <N> --remove-owner bob
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--name` | "" | Required. Must already be protected. |
+| `--add-owner` | "" | Comma-separated admins to add. |
+| `--remove-owner` | "" | Comma-separated admins to remove. The protector cannot be removed; unprotect instead. |
+| `--passphrase-stdin` | false | Read the approval passphrase from stdin. |
+
+Only a current owner may run it. In the TUI: List › Integrations › open one › **Owners**.
+
 ### `dop integration remove`
 
 ```

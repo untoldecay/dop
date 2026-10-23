@@ -31,7 +31,7 @@ import (
 // mutation that touches a protected integration or grant. Returns
 // nil when the resource isn't protected (unrestricted) or when the
 // session owns it (allowed).
-func requireProtectionOwner(client *admin.Client, resource string, protected bool, owner string) error {
+func requireProtectionOwner(client *admin.Client, resource string, protected bool, owners []string) error {
 	if !protected {
 		return nil
 	}
@@ -39,12 +39,21 @@ func requireProtectionOwner(client *admin.Client, resource string, protected boo
 	if err != nil {
 		return fmt.Errorf("read session: %w", err)
 	}
-	if !strings.EqualFold(st.AdminPubkey, owner) {
-		return fmt.Errorf(
-			"%s is protected and owned by another admin (owner=%s…) — only they can modify it",
-			resource, short(owner))
+	for _, o := range owners {
+		if strings.EqualFold(st.AdminPubkey, o) {
+			return nil
+		}
 	}
-	return nil
+	who := "another admin"
+	if len(owners) > 0 {
+		who = "owner=" + short(owners[0]) + "…"
+		if len(owners) > 1 {
+			who += fmt.Sprintf(" +%d", len(owners)-1)
+		}
+	}
+	return fmt.Errorf(
+		"%s is protected and owned by %s — only its owners can modify it (an owner can add you: dop integration protect --add-owner)",
+		resource, who)
 }
 
 // promptProtectionPassphrase runs the approval-passphrase gate used
@@ -123,7 +132,7 @@ func enforceProtectedOnSave(client *admin.Client, paths *config.Paths, old, next
 	for key, oldInteg := range old.Integrations {
 		newInteg, present := next.Integrations[key]
 		// Resource was protected and session is not the owner.
-		if oldInteg.Protected && !strings.EqualFold(oldInteg.Owner, actor) {
+		if oldInteg.Protected && !oldInteg.OwnedBy(actor) {
 			if !present {
 				// Non-owner tried to delete a protected integration → revert.
 				next.Integrations[key] = oldInteg
@@ -209,7 +218,7 @@ func enforceProtectedOnSave(client *admin.Client, paths *config.Paths, old, next
 	// Pass 2 — grants (same rules).
 	for key, oldGrant := range old.Grants {
 		newGrant, present := next.Grants[key]
-		if oldGrant.Protected && !strings.EqualFold(oldGrant.Owner, actor) {
+		if oldGrant.Protected && !oldGrant.OwnedBy(actor) {
 			if !present {
 				next.Grants[key] = oldGrant
 				reverted = append(reverted, "grant:"+key+" (deletion)")
@@ -311,7 +320,7 @@ func integrationEqual(a, b vault.Integration) bool {
 	if a.Protected != b.Protected {
 		return false
 	}
-	if !strings.EqualFold(a.Owner, b.Owner) {
+	if !strings.EqualFold(a.Owner, b.Owner) || !stringSlicesEqual(a.Owners, b.Owners) {
 		return false
 	}
 	// v1.13.0-rc13 — a non-owner MUST NOT flip Kind on a protected
@@ -335,7 +344,7 @@ func grantEqual(a, b vault.Grant) bool {
 	if a.Protected != b.Protected {
 		return false
 	}
-	if !strings.EqualFold(a.Owner, b.Owner) {
+	if !strings.EqualFold(a.Owner, b.Owner) || !stringSlicesEqual(a.Owners, b.Owners) {
 		return false
 	}
 	return true

@@ -25,7 +25,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/fray/dop/internal/admin"
@@ -246,7 +245,7 @@ func checkCapabilityProtection(client *admin.Client, crec vault.Capability) erro
 		if !g.Protected {
 			continue
 		}
-		if !strings.EqualFold(g.Owner, st.AdminPubkey) {
+		if !g.OwnedBy(st.AdminPubkey) {
 			return fmt.Errorf("bearer carries protected grant %q owned by another admin — only the owner can `dop use` it", gid)
 		}
 	}

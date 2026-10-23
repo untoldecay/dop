@@ -19,6 +19,7 @@ Every DOP feature as of **v1.13.0**, in one scannable table. Grouped by surface,
 | Credentials | Masked `exec` output | Injected key values in the child's output become `‹NAME›` before reaching the screen — pipes and terminals (the child gets its own pseudo-terminal behind the mask). | v1.18 · v1.18.2 |
 | Credentials | Protected credentials | Owner-locked integrations/grants (Shape B). CLI gate + daemon-side revert catches freehand `vault edit`. | v1.13.0-rc12 |
 | Credentials | Protected audit trail | 3 event kinds: `protected_create`, `protected_token_issue`, `protected_bypass_attempt`. | v1.13.0-rc12 |
+| Credentials | Several owners | `dop integration protect --add-owner` / TUI Owners: co-admins act on a protected integration with their own approval passphrase; the protector stays pinned; grants follow. `protected_owners` audit event. | v1.21 |
 | Credentials | Token lifecycle | `set-token` command (CLI + TUI): rotate value, edit scope note. Secret-safe (stdin only, never on argv). | v1.13.0-rc16 |
 | Credentials | Stale pending-claim reaper | Orphan `.json` files from SIGKILL/power-loss auto-clean on `dop claim --status`. | v1.13.0-rc17 |
 | Credentials | `--expires never` | Sentinel timestamp for infrastructure bearers that shouldn't auto-rotate. | v1.11.1 |
