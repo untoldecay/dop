@@ -41,6 +41,7 @@ import (
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/pendingclaim"
 	"github.com/fray/dop/internal/remoteclaim"
+	"github.com/fray/dop/internal/remoteuse"
 	"github.com/fray/dop/internal/userprefs"
 )
 
@@ -1788,6 +1789,23 @@ func walkPending(w *walker) {
 	w.keys("enter")
 	w.send("pendingResultMsg", pendingResultMsg{reject: true})
 	w.dump("pending-reject-done", "Pending claims · rejected")
+	// v1.21 — a lease request from a server: duration picker, then passphrase.
+	must(w.t, remoteuse.WriteRequest(w.paths, remoteuse.Request{RequestID: "3137e888aa0011223344556677889900aabbccdd", Subject: "cam-shell",
+		Host: "hermes-vps", AgentName: "buzz-reader", Recipient: "age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3290gq",
+		RequestedAt: time.Now(), ExpiresAt: time.Now().Add(remoteuse.TTL), Nonce: "n"}))
+	w.reset()
+	w.keys("a")
+	w.dump("pending-lease-list", "Pending claims · a lease request next to a claim", "key")
+	w.keys("down", "enter")
+	w.dump("pending-lease-pick", "Pending claims · lease · duration picker, 10 min first", "key")
+	w.keys("down")
+	w.dump("pending-lease-pick-30", "Pending claims · lease · 30 min picked")
+	w.keys("enter")
+	w.dump("pending-lease-pass", "Pending claims · lease · approval passphrase")
+	w.keys("approve", "enter")
+	w.send("pendingResultMsg", pendingResultMsg{})
+	w.dump("pending-lease-done", "Pending claims · lease granted")
+	must(w.t, remoteuse.Delete(w.paths, "3137e888aa0011223344556677889900aabbccdd"))
 }
 
 var walkSpecial = map[string]bool{

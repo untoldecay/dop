@@ -56,14 +56,18 @@ func runUse(args []string) int {
 	// an approval-passphrase gate; today the admin session unlock is
 	// the gate). Parsed but ignored so scripts can predeclare it.
 	_ = fs.Bool("passphrase-stdin", false, "reserved — currently a no-op; the admin daemon unlock is the authorization gate")
-	_ = fs.Parse(args)
+	remote := fs.Bool("remote", false, "no admin key on this machine — ask the admin for a short-lived lease through the vault repo (v1.21)")
+	agentName := fs.String("agent-name", "", "with --remote: who asks (shown to the admin; default: hostname)")
+	// Flags may follow the subject (`dop use cam-shell --remote`).
+	flagArgs, posArgs := splitFlagsAndPositionals(fs, args)
+	_ = fs.Parse(flagArgs)
 	if *legacyPrintExport {
 		fmt.Fprintln(os.Stderr, "dop use: --print-export is deprecated and has no effect (removed in rc6h).")
 	}
 
-	rest := fs.Args()
+	rest := posArgs
 	if len(rest) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: dop use [--token-file FILE] <subject>")
+		fmt.Fprintln(os.Stderr, "usage: dop use [--token-file FILE] [--remote [--agent-name X]] <subject>")
 		fmt.Fprintln(os.Stderr, "  Attaches an admin-stashed bearer to the current shell.")
 		fmt.Fprintln(os.Stderr, "  Default: prints `export DOP_TOKEN=…` to stdout for `eval \"$(…)\"`.")
 		fmt.Fprintln(os.Stderr, "  Issue the bearer with:")
@@ -73,6 +77,9 @@ func runUse(args []string) int {
 	subject := rest[0]
 
 	paths, _ := config.Resolve()
+	if *remote {
+		return runUseRemote(paths, subject, *agentName, *tokenFile)
+	}
 	// rc6f — operator-friendly unlock: if the admin session is locked
 	// AND we're not inside the TUI, pop a native passphrase dialog
 	// instead of erroring out. Headless / scripted environments fall

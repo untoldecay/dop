@@ -20,6 +20,7 @@ import (
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/remoteclaim"
+	"github.com/fray/dop/internal/remoteuse"
 	"github.com/fray/dop/internal/vault"
 )
 
@@ -27,8 +28,10 @@ func runApproveRemote(args []string) int {
 	fs := flag.NewFlagSet("approve-remote", flag.ExitOnError)
 	subject := fs.String("subject", "", "subject of the remote claim to approve (required unless --list)")
 	list := fs.Bool("list", false, "list pending remote claims and exit")
-	reject := fs.Bool("reject", false, "drop the staged claim for --subject instead of approving it (no passphrase)")
+	reject := fs.Bool("reject", false, "drop the staged claim (or lease request) instead of approving it (no passphrase)")
 	pfromStdin := fs.Bool("passphrase-stdin", false, "read approval passphrase from stdin")
+	use := fs.String("use", "", "v1.21 — answer a `dop use --remote` request: request id prefix or subject")
+	lease := fs.Duration("lease", 10*time.Minute, "with --use: how long the lease lives (the operator picks, never the agent; capped by the bearer's --lease-cap)")
 	_ = fs.Parse(args)
 
 	paths, _ := config.Resolve()
@@ -36,8 +39,11 @@ func runApproveRemote(args []string) int {
 	if *list {
 		return runApproveRemoteList(paths)
 	}
+	if *use != "" {
+		return runApproveRemoteUse(paths, *use, *lease, *reject, *pfromStdin)
+	}
 	if *subject == "" {
-		fmt.Fprintln(os.Stderr, "usage: dop approve-remote --subject S  |  --list")
+		fmt.Fprintln(os.Stderr, "usage: dop approve-remote --subject S  |  --use ID --lease 10m  |  --list")
 		return 2
 	}
 	client, err := requireAdminSession(paths)
@@ -257,21 +263,36 @@ func runApproveRemoteList(paths *config.Paths) int {
 		fmt.Fprintf(os.Stderr, "dop approve-remote --list: %v\n", err)
 		return 1
 	}
-	if len(all) == 0 {
-		fmt.Println("(no pending remote claims)")
+	uses, _ := remoteuse.ListRequests(paths)
+	if len(all) == 0 && len(uses) == 0 {
+		fmt.Println("(no pending remote claims or lease requests)")
 		return 0
 	}
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "SUBJECT\tHOST\tKEY\tPUBKEY\tREQUESTED\tSTATE")
+	fmt.Fprintln(w, "KIND\tSUBJECT\tHOST\tKEY\tPUBKEY\tREQUESTED\tSTATE")
 	now := time.Now()
 	for _, r := range all {
 		state := "pending"
 		if now.After(r.ExpiresAt) {
 			state = "expired"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s…\t%s\t%s\n",
+		fmt.Fprintf(w, "claim\t%s\t%s\t%s\t%s…\t%s\t%s\n",
 			r.Subject, r.Host, r.EffectiveKeyType(), shortPub(r.Pubkey),
 			r.RequestedAt.Format(time.RFC3339), state)
+	}
+	for _, r := range uses {
+		state := "pending"
+		if now.After(r.ExpiresAt) {
+			state = "expired"
+		} else if _, err := remoteuse.ReadLease(paths, r.RequestID); err == nil {
+			state = "answered"
+		}
+		key, pub := "unsigned", "-"
+		if r.SignerPubkey != "" {
+			key, pub = r.SignerKeyType, shortPub(r.SignerPubkey)+"…"
+		}
+		fmt.Fprintf(w, "lease\t%s\t%s\t%s\t%s\t%s\t%s  (id %s, agent %s)\n",
+			r.Subject, r.Host, key, pub, r.RequestedAt.Format(time.RFC3339), state, r.RequestID[:8], r.AgentName)
 	}
 	_ = w.Flush()
 	return 0

@@ -611,13 +611,25 @@ Reject a pending claim. No passphrase (rejecting is safe).
 dop reject <SAS>
 ```
 
+### `dop use --remote`
+
+Server-side (no admin key): ask the admin for a **lease** of a portable bearer. dop makes a one-shot key, stages the request in the vault repo and waits up to 15 minutes. The admin picks the duration (never the agent); the server receives a fresh unbound bearer with the same grants that dies at that expiry, prints `export DOP_TOKEN=…` and deletes the request. When the lease ends the next `dop exec` fails; ask again.
+
+```
+dop use <subject> --remote [--agent-name X] [--token-file FILE]
+```
+
+Local `dop use` is unchanged: admin key, approval dialog, the bearer lives with the shell. The longest lease an admin may hand out is set when the bearer is made portable: `dop token issue --portable --lease-cap 30m` (default 1h).
+
 ### `dop approve-remote`
 
-Admin-side: accept a `dop claim --remote` staged in the vault. Verifies the agent's signature, prompts the passphrase, swaps the bundle, writes an updated signed record (with the agent's `key_type`; P-256 bindings get `env_wrapped` sealed on the spot), pushes. The TUI's pending-claims banner lists remote claims next to local ones.
+Admin-side: accept a `dop claim --remote` staged in the vault, or answer a `dop use --remote` lease request. Verifies the agent's signature, prompts the passphrase, swaps the bundle, writes an updated signed record (with the agent's `key_type`; P-256 bindings get `env_wrapped` sealed on the spot), pushes. The TUI's pending-claims banner lists remote claims next to local ones.
 
 ```
 dop approve-remote --subject <S> [--passphrase-stdin]
 dop approve-remote --subject <S> --reject
+dop approve-remote --use <id|subject> --lease 10m [--passphrase-stdin]
+dop approve-remote --use <id|subject> --reject
 dop approve-remote --list
 ```
 
@@ -625,7 +637,9 @@ dop approve-remote --list
 |---|---|---|
 | `--subject` | "" | Required unless `--list`. |
 | `--list` | false | List pending remote claims (subject, host, key type, pubkey, state). |
-| `--reject` | false | Drop the staged claim for `--subject`, commit, push. No passphrase. |
+| `--reject` | false | Drop the staged claim (or lease request), commit, push. No passphrase. |
+| `--use` | "" | Answer a lease request, by id prefix or subject. Mints a fresh unbound bearer with the portable bearer's grants, sealed to the server's one-shot key. |
+| `--lease` | 10m | With `--use`: how long the lease lives. Clamped to the bearer's `--lease-cap`. The TUI offers 10 min / 30 min / 1 h. |
 | `--passphrase-stdin` | false | Read passphrase from stdin. |
 
 ---

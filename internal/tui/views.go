@@ -899,8 +899,9 @@ type listView struct {
 	actionCursor  int             // index into currentActions()
 	pendingAction string          // revoke, reseal, add, remove, repin: the action in flight
 	tab           int             // listTab*: Active, Revoked, Pending (claims awaiting approval)
-	pending       []pendingRow    // Pending tab rows: local PIN claims + remote claims
+	pending       []pendingRow    // Pending tab rows: local PIN claims, remote claims, lease requests
 	pendPass      textinput.Model // approval passphrase for a pending claim
+	pendLease     int             // leasePresets index for a lease row
 	help          bool            // ? expanded help (list + detail)
 	err           string
 	flash         string
@@ -982,6 +983,7 @@ const (
 	listModeReissue   = 9  // claimed bearer: rotate (keep key) or new claim
 	listModePendPass  = 10 // Pending tab: approval passphrase for a claim
 	listModePendRejct = 11 // Pending tab: confirm reject
+	listModePendLease = 12 // Pending tab: lease duration picker (v1.21)
 )
 
 func newListView(c *admin.Client, p *config.Paths) *listView {
@@ -1225,7 +1227,7 @@ func (v *listView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateActionMode(mm)
 		case listModeConfirm:
 			return v.updateConfirmMode(mm)
-		case listModePendPass, listModePendRejct:
+		case listModePendPass, listModePendRejct, listModePendLease:
 			return v.updatePendingMode(mm)
 		case listModeGrantPick:
 			return v.updateGrantPickMode(mm)
@@ -1273,7 +1275,10 @@ func (v *listView) updateListMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch k := mm.String(); k {
 		case "enter", "a":
 			if len(v.pending) > 0 {
-				v.mode, v.doneSubj = listModePendPass, v.pending[v.cursor].subject
+				v.mode, v.doneSubj, v.pendLease = listModePendPass, v.pending[v.cursor].subject, 0
+				if v.pending[v.cursor].lease() {
+					v.mode = listModePendLease
+				}
 				v.pendPass.Reset()
 			}
 			return v, nil
@@ -1340,12 +1345,19 @@ func (v *listView) updatePendingMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case k == "esc" || k == "ctrl+c":
 		v.mode = listModeList
 		v.pendPass.Reset()
+	case v.mode == listModePendLease && (k == "up" || k == "k"):
+		stepCursor(&v.pendLease, len(leasePresets), -1)
+	case v.mode == listModePendLease && (k == "down" || k == "j"):
+		stepCursor(&v.pendLease, len(leasePresets), 1)
+	case v.mode == listModePendLease && k == "enter":
+		v.mode = listModePendPass
+		v.pendPass.Reset()
 	case v.mode == listModePendRejct && (k == "enter" || k == "y"):
 		if cmd := v.locked(mm, &v.err); cmd != nil {
 			return v, cmd
 		}
 		v.mode, v.pendingAction = listModeRun, "reject-claim"
-		return v, runPendingRow(v.pendingRowAt(), true, "")
+		return v, runPendingRow(v.pendingRowAt(), true, "", "")
 	case v.mode == listModePendRejct && k == "n":
 		v.mode = listModeList
 	case v.mode == listModePendPass && k == "enter":
@@ -1357,7 +1369,7 @@ func (v *listView) updatePendingMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return v, cmd
 		}
 		v.mode, v.pendingAction = listModeRun, "approve-claim"
-		return v, runPendingRow(v.pendingRowAt(), false, v.pendPass.Value())
+		return v, runPendingRow(v.pendingRowAt(), false, v.pendPass.Value(), leasePresets[v.pendLease].value)
 	case v.mode == listModePendPass:
 		edit(&v.pendPass, mm)
 	}
@@ -1368,9 +1380,14 @@ func (v *listView) updatePendingMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (v *listView) viewPending(width, height int) string {
 	w := wiz{width: width, height: height, help: v.help}
 	row := v.pendingRowAt()
-	from := "PIN " + row.sas
-	if row.remote() {
-		from = "remote · " + row.host
+	from := row.where()
+	if v.mode == listModePendLease {
+		var o [][2]string
+		for _, p := range leasePresets {
+			o = append(o, [2]string{p.label, ""})
+		}
+		return w.screen("Lease "+row.subject+" to "+row.agent, "", "For how long", optRows(o, v.pendLease),
+			"The agent asked, you pick. It asks again when the lease ends.", v.err, from, wizKeys("next"))
 	}
 	if v.mode == listModePendRejct {
 		lines := []string{mutedSt.Render("  " + from), mutedSt.Render("  The agent has to claim again if this was a mistake.")}
@@ -1973,7 +1990,7 @@ func (v *listView) View() string {
 		return v.viewPortable(width, height)
 	case listModeDone:
 		return v.viewDone(width, height)
-	case listModePendPass, listModePendRejct:
+	case listModePendPass, listModePendRejct, listModePendLease:
 		return v.viewPending(width, height)
 	}
 
@@ -2038,11 +2055,7 @@ func (v *listView) View() string {
 func (v *listView) renderPending() []string {
 	body := []string{"  " + mutedSt.Render(padTrunc("subject", 24)+"  "+padTrunc("from", 22)+"  expires")}
 	for i, r := range v.pending {
-		from := "PIN " + r.sas
-		if r.remote() {
-			from = "remote · " + r.host
-		}
-		cells := padTrunc(r.subject, 24) + "  " + padTrunc(from, 22)
+		cells := padTrunc(r.subject, 24) + "  " + padTrunc(r.where(), 22)
 		left := "in " + humanDuration(time.Until(r.expiresAt))
 		if i == v.cursor {
 			body = append(body, focusSt.Render("› "+cells+"  "+left))
