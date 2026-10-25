@@ -19,6 +19,7 @@ Every DOP feature as of **v1.13.0**, in one scannable table. Grouped by surface,
 | Credentials | Masked `exec` output | Injected key values in the child's output become `‹NAME›` before reaching the screen — pipes and terminals (the child gets its own pseudo-terminal behind the mask). | v1.18 · v1.18.2 |
 | Credentials | Protected credentials | Owner-locked integrations/grants (Shape B). CLI gate + daemon-side revert catches freehand `vault edit`. | v1.13.0-rc12 |
 | Credentials | Protected audit trail | 3 event kinds: `protected_create`, `protected_token_issue`, `protected_bypass_attempt`. | v1.13.0-rc12 |
+| Approval | Native dialog for remote questions | The session daemon watches the vault repo and raises the macOS dialog for remote claims and lease requests; lease dialog: Deny · duration ▸ · Approve. One approval card (fields, wording, mood per kind) behind every surface. | v1.21 |
 | Agents | Remote lease of a portable bearer | `dop use --remote` on a server asks; the admin picks 10 min / 30 min / 1 h in the TUI or `approve-remote --use`; a fresh unbound bearer sealed to a one-shot key, dies at expiry; local `dop use` unchanged. | v1.21 |
 | Credentials | Token lifecycle | `set-token` command (CLI + TUI): rotate value, edit scope note. Secret-safe (stdin only, never on argv). | v1.13.0-rc16 |
 | Credentials | Stale pending-claim reaper | Orphan `.json` files from SIGKILL/power-loss auto-clean on `dop claim --status`. | v1.13.0-rc17 |

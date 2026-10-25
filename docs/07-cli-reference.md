@@ -619,7 +619,9 @@ Server-side (no admin key): ask the admin for a **lease** of a portable bearer. 
 dop use <subject> --remote [--agent-name X] [--token-file FILE]
 ```
 
-Local `dop use` is unchanged: admin key, approval dialog, the bearer lives with the shell. The longest lease an admin may hand out is set when the bearer is made portable: `dop token issue --portable --lease-cap 30m` (default 1h).
+Local `dop use` is unchanged: admin key, approval dialog, the bearer lives with the shell. On a Server install the `--remote` flag is implied: `dop use <subject>` sees there is no admin key and asks for a lease.
+
+On the admin's Mac the session daemon watches the vault repo while it runs (every 20 s, `DOP_WATCH_INTERVAL`) and puts up the native dialog for remote claims and lease requests, so nothing has to be open. The lease dialog has three buttons: **Deny · 10 min ▸ · Approve**; the middle one cycles 10 min → 30 min → 1 hour, Approve grants the duration shown, Escape and the timeout leave the request pending for the TUI. `DOP_NO_WATCH=1` turns the watcher off. The longest lease an admin may hand out is set when the bearer is made portable: `dop token issue --portable --lease-cap 30m` (default 1h).
 
 ### `dop approve-remote`
 

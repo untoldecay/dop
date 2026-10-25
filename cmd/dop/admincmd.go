@@ -455,6 +455,9 @@ func runAdminSessionDaemon(args []string) int {
 	if err != nil {
 		return 1
 	}
+	// v1.21 — remote claims and lease requests arrive through the vault
+	// repo; put up the native dialog for them while the session lives.
+	startApprovalWatcher(paths)
 	// Signal readiness to parent, then close stdout so parent's Read returns.
 	fmt.Println("ready")
 	os.Stdout.Close()

@@ -15,7 +15,7 @@
 package approvalprompt
 
 import (
-	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -29,6 +29,8 @@ type Result struct {
 	Denied     bool
 	Timeout    bool
 	Passphrase string // zeroed by caller after Verify; never persisted
+	Choice     string // AskLease: the duration shown on the middle button when Approve was pressed
+	cycle      bool   // AskLease: the middle button was pressed
 }
 
 // ErrUnsupported — this build/platform/env can't show a native dialog.
@@ -44,68 +46,89 @@ var ErrUnsupported = errors.New("approvalprompt: native dialog unsupported on th
 // The timeout is enforced via osascript's `giving up after` clause —
 // no goroutine races, no process-kill cleanup.
 func Ask(title, body string, timeout time.Duration) (Result, error) {
+	return run(title, body, "", timeout)
+}
+
+// AskLease is the three-button variant for a remote lease request:
+// Deny · "<duration> ▸" · Approve. The middle button cycles through
+// durations by closing and reopening the dialog with an EMPTY
+// passphrase field (the typed text never travels into script source);
+// Approve submits the duration shown. Returns the picked duration in
+// Result.Choice. Escape and timeout deny.
+func AskLease(title, body string, durations []string, start int, timeout time.Duration) (Result, error) {
+	if len(durations) == 0 {
+		return Ask(title, body, timeout)
+	}
+	i := start % len(durations)
+	for {
+		res, err := run(title, body, durations[i]+" ▸", timeout)
+		if err != nil {
+			return res, err
+		}
+		if res.cycle {
+			i = (i + 1) % len(durations)
+			continue
+		}
+		res.Choice = durations[i]
+		return res, nil
+	}
+}
+
+// run shows the dialog once. middle is the optional third button. The
+// passphrase comes back on osascript's stdout, read by this process
+// only, parsed from a fixed three-line shape (no comma splitting).
+func run(title, body, middle string, timeout time.Duration) (Result, error) {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	// Escape for AppleScript — double quotes and backslashes.
 	escape := func(s string) string {
 		s = strings.ReplaceAll(s, `\`, `\\`)
 		s = strings.ReplaceAll(s, `"`, `\"`)
 		return s
 	}
-	script := fmt.Sprintf(
-		`display dialog "%s" default answer "" with hidden answer with title "%s" with icon caution buttons {"Deny","Approve"} default button "Approve" cancel button "Deny" giving up after %d`,
-		escape(body),
-		escape(title),
-		int(timeout.Seconds()),
-	)
-	cmd := exec.Command("osascript", "-e", script)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		// AppleScript exits non-zero on cancel. The literal "User
-		// canceled" / "User cancelled" markers appear in CombinedOutput.
-		s := string(out)
-		if strings.Contains(s, "User canceled") || strings.Contains(s, "User cancelled") {
+	buttons := `{"Deny","Approve"}`
+	if middle != "" {
+		buttons = `{"Deny","` + escape(middle) + `","Approve"}`
+	}
+	// Neutral icon on purpose: a caution glyph over a hidden-answer field
+	// is the silhouette of fake password prompts (contract 27).
+	dialog := fmt.Sprintf(
+		`set r to display dialog "%s" default answer "" with hidden answer with title "%s" with icon note buttons %s default button "Approve" cancel button "Deny" giving up after %d`,
+		escape(body), escape(title), buttons, int(timeout.Seconds()))
+	// Fixed shape: gave-up flag, button, then the text on its own line.
+	report := `return ((gave up of r) as text) & linefeed & (button returned of r) & linefeed & (text returned of r)`
+	cmd := exec.Command("osascript", "-e", dialog, "-e", report)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		se := stderr.String()
+		if strings.Contains(se, "User canceled") || strings.Contains(se, "User cancelled") || strings.Contains(se, "-128") {
 			return Result{Denied: true}, nil
 		}
-		return Result{}, fmt.Errorf("osascript: %w: %s", err, strings.TrimSpace(s))
+		// Never echo osascript output into the error: on a weird exit it
+		// could carry the dialog result.
+		return Result{}, fmt.Errorf("osascript failed (%v)", err)
 	}
-	// Successful dialog returns one of:
-	//   button returned:Approve, text returned:<typed>
-	//   button returned:Approve, text returned:<typed>, gave up:false
-	//   gave up:true     (giving-up timeout, no button pressed)
-	line := strings.TrimSpace(string(out))
-	if strings.Contains(line, "gave up:true") {
+	parts := strings.SplitN(strings.TrimRight(stdout.String(), "\n"), "\n", 3)
+	if len(parts) < 2 {
+		return Result{}, errors.New("osascript: unexpected result shape")
+	}
+	if parts[0] == "true" {
 		return Result{Timeout: true}, nil
 	}
-	// Parse button + text out of the comma-separated key:value pairs.
-	// osascript doesn't escape commas inside values, but the hidden-
-	// answer field forbids commas-in-input via the native widget. Safe
-	// to split on ", " for this specific caller.
-	var button, text string
-	sc := bufio.NewScanner(strings.NewReader(line))
-	sc.Buffer(nil, 1<<20)
-	for sc.Scan() {
-		parts := strings.Split(sc.Text(), ", ")
-		for _, p := range parts {
-			kv := strings.SplitN(p, ":", 2)
-			if len(kv) != 2 {
-				continue
-			}
-			switch strings.TrimSpace(kv[0]) {
-			case "button returned":
-				button = strings.TrimSpace(kv[1])
-			case "text returned":
-				text = strings.TrimSpace(kv[1])
-			}
-		}
+	text := ""
+	if len(parts) == 3 {
+		text = parts[2]
 	}
-	switch button {
+	switch parts[1] {
 	case "Approve":
 		return Result{Approved: true, Passphrase: text}, nil
-	case "Deny", "":
+	case "Deny":
 		return Result{Denied: true}, nil
 	default:
-		return Result{Denied: true}, nil
+		if middle != "" && parts[1] == middle {
+			return Result{cycle: true}, nil
+		}
+		return Result{}, errors.New("osascript: unexpected button")
 	}
 }
