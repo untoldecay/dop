@@ -45,7 +45,7 @@ b init --cache "$BARE" >/dev/null 2>&1 || fail "server attach failed"
 pass "server attached"
 
 echo "=== [B1] server asks: dop use cam-shell --remote (waits in the background)"
-( b use cam-shell --remote --agent-name buzz-reader >"$WORKROOT/use1.out" 2>"$WORKROOT/use1.err" ) & USE1=$!
+( b use cam-shell --agent-name buzz-reader >"$WORKROOT/use1.out" 2>"$WORKROOT/use1.err" ) & USE1=$!
 for i in $(seq 1 30); do a pull >/dev/null 2>&1 || true; ls "$A_VAULT/pending-use"/*.json >/dev/null 2>&1 && break; sleep 1; done
 REQ=$(a approve-remote --list 2>&1 | awk '/^lease/{print $0}' | sed -n 's/.*id \([0-9a-f]*\).*/\1/p' | head -1)
 [[ -n "$REQ" ]] || { cat "$WORKROOT/use1.err"; fail "request not visible to the admin"; }

@@ -77,7 +77,13 @@ func runUse(args []string) int {
 	subject := rest[0]
 
 	paths, _ := config.Resolve()
-	if *remote {
+	// No admin key on this machine (Server / cache install): the only
+	// way to a portable bearer is a lease from an admin, so go there
+	// without making anyone remember a flag.
+	if *remote || !admin.KeyFileExists(paths) {
+		if !*remote {
+			fmt.Fprintln(os.Stderr, "dop use: no admin key on this machine — asking the admin for a lease (dop use --remote).")
+		}
 		return runUseRemote(paths, subject, *agentName, *tokenFile)
 	}
 	// rc6f — operator-friendly unlock: if the admin session is locked
