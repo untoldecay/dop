@@ -5,9 +5,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,6 +29,14 @@ func runUseRemote(paths *config.Paths, subject, agentName, tokenFile string) int
 	fail := func(err error) int { fmt.Fprintf(os.Stderr, "dop use --remote: %v\n", err); return 1 }
 	if _, err := os.Stat(paths.Vault); err != nil {
 		return fail(fmt.Errorf("no vault here — on a server, attach it first: pick Server in `dop`, or `dop init --cache <repo>`"))
+	}
+	// A lease already granted for this subject and still alive is reused:
+	// every shell call of an agent is a fresh shell, and the operator
+	// approved the lease, not one process (mirrors the local trust cache).
+	if c, ok := readLeaseCache(paths, subject); ok {
+		fmt.Fprintf(os.Stderr, "dop use: reusing the lease of %s granted earlier (as %s, expires %s). It asks again when it ends.\n",
+			subject, c.LeaseSubject, c.ExpiresAt.Local().Format("15:04"))
+		return emitLease(c.Token, c.LeaseSubject, tokenFile)
 	}
 	ident, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -56,12 +66,29 @@ func runUseRemote(paths *config.Paths, subject, agentName, tokenFile string) int
 			return fail(fmt.Errorf("sign request: %w", err))
 		}
 	}
-	if err := remoteuse.WriteRequest(paths, req); err != nil {
-		return fail(fmt.Errorf("stage request: %w", err))
+	// Start from the team's current tip: a request staged on a stale copy
+	// is refused at push. If this copy has diverged (an earlier request
+	// that never made it), a cache install has nothing of its own to
+	// keep, so it drops its local commits and follows the team.
+	stage := func() error {
+		if err := remoteuse.WriteRequest(paths, req); err != nil {
+			return fmt.Errorf("stage request: %w", err)
+		}
+		return gitCommitPushRel(paths, fmt.Sprintf("dop: lease request %s for %s", id[:8], subject), remoteuse.RelPaths(id)[0])
 	}
-	if err := gitCommitPushRel(paths, fmt.Sprintf("dop: lease request %s for %s", id[:8], subject), remoteuse.RelPaths(id)[0]); err != nil {
-		_ = remoteuse.Delete(paths, id)
-		return fail(fmt.Errorf("push request: %w — the server needs push access to the vault repo", err))
+	_ = autoPullAndMerge(paths)
+	if err := stage(); err != nil {
+		_ = autoPullAndMerge(paths)
+		if err = stage(); err != nil {
+			if pullKeepTeam(paths) != 0 {
+				_ = remoteuse.Delete(paths, id)
+				return fail(fmt.Errorf("push request: %w — the server needs push access to the vault repo", err))
+			}
+			if err = stage(); err != nil {
+				_ = remoteuse.Delete(paths, id)
+				return fail(fmt.Errorf("push request: %w — the server needs push access to the vault repo", err))
+			}
+		}
 	}
 	audit.Append(paths, audit.Event{Kind: audit.EventUseRemoteRequest, Subject: subject,
 		Extra: map[string]string{"request": id[:8], "host": host, "agent_name": agentName}})
@@ -111,18 +138,64 @@ func runUseRemote(paths *config.Paths, subject, agentName, tokenFile string) int
 			Extra: map[string]string{"request": id[:8], "lease_subject": lease.LeaseSubject, "expires_at": lease.ExpiresAt.Format(time.RFC3339), "approver": short(lease.Approver)}})
 		fmt.Fprintf(os.Stderr, "dop use --remote: lease granted as %s, expires %s (%s). When it expires, ask again.\n",
 			lease.LeaseSubject, lease.ExpiresAt.Local().Format("15:04"), time.Until(lease.ExpiresAt).Round(time.Minute))
-		if tokenFile != "" {
-			if err := writeTokenFile(tokenFile, bearer, lease.LeaseSubject); err != nil {
-				return fail(fmt.Errorf("write token file: %w", err))
-			}
-			fmt.Fprintf(os.Stderr, "  wrote %s — export DOP_TOKEN_FILE=%s\n", tokenFile, tokenFile)
-			return 0
+		writeLeaseCache(paths, subject, leaseCache{Token: bearer, LeaseSubject: lease.LeaseSubject, ExpiresAt: lease.ExpiresAt})
+		return emitLease(bearer, lease.LeaseSubject, tokenFile)
+	}
+}
+
+// emitLease hands the bearer to the caller: a token file, or the export
+// line. The operator approved this exact print on their machine; no
+// local guard (there is no admin daemon here to ask).
+func emitLease(bearer, leaseSubject, tokenFile string) int {
+	if tokenFile != "" {
+		if err := writeTokenFile(tokenFile, bearer, leaseSubject); err != nil {
+			fmt.Fprintf(os.Stderr, "dop use --remote: write token file: %v\n", err)
+			return 1
 		}
-		// The operator approved this exact print on their machine; no
-		// local guard (there is no admin daemon here to ask).
-		fmt.Printf("export DOP_TOKEN=%s\n", bearer)
+		fmt.Fprintf(os.Stderr, "  wrote %s — export DOP_TOKEN_FILE=%s\n", tokenFile, tokenFile)
 		return 0
 	}
+	fmt.Printf("export DOP_TOKEN=%s\n", bearer)
+	return 0
+}
+
+// leaseCache is the granted lease kept on the server for its lifetime
+// (mode 0600 under the dop root), so an agent's next shell call reuses
+// it instead of asking the operator again.
+type leaseCache struct {
+	Token        string    `json:"token"`
+	LeaseSubject string    `json:"lease_subject"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
+
+func leaseCachePath(paths *config.Paths, subject string) string {
+	safe := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			return r
+		}
+		return '_'
+	}, subject)
+	return filepath.Join(paths.Root, "leases", safe+".json")
+}
+
+func readLeaseCache(paths *config.Paths, subject string) (leaseCache, bool) {
+	var c leaseCache
+	blob, err := os.ReadFile(leaseCachePath(paths, subject))
+	if err != nil || json.Unmarshal(blob, &c) != nil || c.Token == "" {
+		return c, false
+	}
+	if time.Until(c.ExpiresAt) < 30*time.Second {
+		_ = os.Remove(leaseCachePath(paths, subject))
+		return c, false
+	}
+	return c, true
+}
+
+func writeLeaseCache(paths *config.Paths, subject string, c leaseCache) {
+	p := leaseCachePath(paths, subject)
+	_ = os.MkdirAll(filepath.Dir(p), 0o700)
+	blob, _ := json.Marshal(c)
+	_ = os.WriteFile(p, blob, 0o600)
 }
 
 // localAgentSigner returns a usable claimed agent key on this host, or nil.

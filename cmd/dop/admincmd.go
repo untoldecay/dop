@@ -20,6 +20,7 @@ import (
 	"github.com/fray/dop/internal/approval"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/userprefs"
+	"github.com/fray/dop/internal/version"
 )
 
 func runAdmin(args []string) int {
@@ -224,8 +225,15 @@ func runAdminLogin(args []string) int {
 	paths, _ := config.Resolve()
 	client := admin.NewClient(admin.SockPath(paths))
 	if client.SessionActive() {
-		fmt.Fprintln(os.Stderr, "dop admin login: session already active — run `dop admin status` or `dop admin logout`")
-		return 1
+		// A daemon from another build keeps running after an upgrade;
+		// the operator is logging in anyway, so give them this build.
+		if st, err := client.Status(); err == nil && st.Version != version.Short() {
+			_ = client.Logout()
+			fmt.Fprintln(os.Stderr, "dop admin login: the running session was from another dop build — restarting it on this one")
+		} else {
+			fmt.Fprintln(os.Stderr, "dop admin login: session already active — run `dop admin status` or `dop admin logout`")
+			return 1
+		}
 	}
 
 	pass, err := readPassphrase("Passphrase: ", *pfromStdin)
@@ -346,6 +354,28 @@ func runAdminGUIUnlock(args []string) int {
 	return 0
 }
 
+// endSessionWhenBinaryChanges logs the daemon out once the executable it
+// was started from is replaced or removed (size or mtime differ).
+func endSessionWhenBinaryChanges(sock string) {
+	self, err := os.Executable()
+	if err != nil {
+		return
+	}
+	was, err := os.Stat(self)
+	if err != nil {
+		return
+	}
+	for {
+		time.Sleep(envDuration("DOP_BINARY_CHECK_INTERVAL", 30*time.Second))
+		now, err := os.Stat(self)
+		if err == nil && now.Size() == was.Size() && now.ModTime().Equal(was.ModTime()) {
+			continue
+		}
+		_ = admin.NewClient(sock).Logout()
+		return
+	}
+}
+
 // runAdminLogout kills the session daemon via the socket.
 func runAdminLogout(args []string) int {
 	paths, _ := config.Resolve()
@@ -387,6 +417,12 @@ func runAdminStatus(args []string) int {
 	}
 	fmt.Println("unlocked")
 	fmt.Printf("  version:          %s\n", versionString())
+	if st.Version != "" && st.Version != version.Short() {
+		fmt.Printf("  daemon version:   %s  (logout + login to update it)\n", st.Version)
+	}
+	if st.Watcher != "" {
+		fmt.Printf("  approval dialogs: %s\n", st.Watcher)
+	}
 	fmt.Printf("  admin pubkey:     %s\n", st.AdminPubkey)
 	fmt.Printf("  age recipient:    %s\n", st.AgeRecipient)
 	fmt.Printf("  idle TTL left:    %s\n", roundDur(idleRemaining))
@@ -457,7 +493,12 @@ func runAdminSessionDaemon(args []string) int {
 	}
 	// v1.21 — remote claims and lease requests arrive through the vault
 	// repo; put up the native dialog for them while the session lives.
-	startApprovalWatcher(paths)
+	s.SetWatcherState(startApprovalWatcher(paths))
+	// An upgrade replaces the binary under a running daemon; the old
+	// code would keep serving (and miss daemon-side features) until the
+	// TTL. End the session instead: the next dop command asks to unlock
+	// and starts the new build.
+	go endSessionWhenBinaryChanges(*sockPath)
 	// Signal readiness to parent, then close stdout so parent's Read returns.
 	fmt.Println("ready")
 	os.Stdout.Close()

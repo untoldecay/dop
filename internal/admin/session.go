@@ -27,9 +27,10 @@ import (
 	"time"
 
 	"github.com/fray/dop/internal/approval"
-	"github.com/fray/dop/internal/sopsfile"
 	"github.com/fray/dop/internal/approvalprompt"
 	"github.com/fray/dop/internal/config"
+	"github.com/fray/dop/internal/sopsfile"
+	"github.com/fray/dop/internal/version"
 )
 
 // Default TTLs. Overridable at Session creation.
@@ -55,6 +56,7 @@ type Session struct {
 	mu           sync.Mutex
 	startedAt    time.Time
 	lastActivity time.Time
+	watcherState string
 
 	// v1.14.0-rc6 — shell trust cache (legacy; kept for one-release
 	// backward-compat with CLIs that still send OpShellTrust).
@@ -271,6 +273,14 @@ func (s *Session) bumpActivity() {
 	s.lastActivity = s.now()
 }
 
+// SetWatcherState records what `dop admin status` says about the
+// approval watcher ("on" or "off: <reason>").
+func (s *Session) SetWatcherState(state string) {
+	s.mu.Lock()
+	s.watcherState = state
+	s.mu.Unlock()
+}
+
 func (s *Session) opStatus() Response {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -290,6 +300,8 @@ func (s *Session) opStatus() Response {
 		AbsTTLSeconds:    int64(s.absTTL.Seconds()),
 		StartedAtUnix:    s.startedAt.Unix(),
 		LastActivityUnix: s.lastActivity.Unix(),
+		Version:          version.Short(),
+		Watcher:          s.watcherState,
 	})
 	return okResp(data)
 }

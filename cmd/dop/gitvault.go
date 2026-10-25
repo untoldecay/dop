@@ -147,6 +147,36 @@ func gitRun(out io.Writer, dir string, args []string) error {
 }
 
 // gitShow returns path's content at rev (`git show rev:path`).
+// gitLsTree lists every file of the commit at rev as path → blob hash.
+func gitLsTree(dir, rev string) (map[string]string, error) {
+	if gitInProcess() {
+		g, err := vaultgit.Open(dir)
+		if err != nil {
+			return nil, err
+		}
+		return g.Files(rev)
+	}
+	cmd := exec.Command("git", "ls-tree", "-r", rev)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	files := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		// "<mode> blob <hash>\t<path>"
+		meta, path, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		f := strings.Fields(meta)
+		if len(f) == 3 {
+			files[path] = f[2]
+		}
+	}
+	return files, nil
+}
+
 func gitShow(dir, rev, path string) ([]byte, error) {
 	if gitInProcess() {
 		g, err := vaultgit.Open(dir)

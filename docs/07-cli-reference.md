@@ -92,7 +92,7 @@ Print session state, admin pubkey, age recipient, remaining TTLs, and an agent-k
 dop admin status
 ```
 
-Prints `locked` with no session; `unlocked` plus details otherwise.
+Prints `locked` with no session; `unlocked` plus details otherwise. Two lines matter after an upgrade: `daemon version` appears when the running session was started by another dop build (`dop admin login` restarts it on this build, and a daemon ends its own session within 30 s of its binary being replaced), and `approval dialogs` says whether the native dialog for remote requests is on, or why not.
 
 ### `dop admin set-approval`
 
@@ -639,6 +639,8 @@ dop use <subject> --remote [--agent-name X] [--token-file FILE]
 ```
 
 Local `dop use` is unchanged: admin key, approval dialog, the bearer lives with the shell. On a Server install the `--remote` flag is implied: `dop use <subject>` sees there is no admin key and asks for a lease.
+
+The server syncs its vault copy before staging the request and retries once on a refused push (a cache install owns nothing in the repo, so it follows the team). A granted lease is kept on the server for its lifetime (`leases/<subject>.json` in the DOP folder, mode 0600): every later `dop use <subject>` in that window reuses it instead of asking the operator again, the way local shells reuse a trusted grant. It is forgotten 30 s before expiry, and the next call asks again.
 
 On the admin's Mac the session daemon watches the vault repo while it runs (every 20 s, `DOP_WATCH_INTERVAL`) and puts up the native dialog for remote claims and lease requests, so nothing has to be open. The lease dialog has three buttons: **Deny · 10 min ▸ · Approve**; the middle one cycles 10 min → 30 min → 1 hour, Approve grants the duration shown, Escape and the timeout leave the request pending for the TUI. `DOP_NO_WATCH=1` turns the watcher off. The longest lease an admin may hand out is set when the bearer is made portable: `dop token issue --portable --lease-cap 30m` (default 1h).
 
