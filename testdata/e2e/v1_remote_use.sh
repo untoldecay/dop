@@ -7,7 +7,9 @@
 #   [A1] the request shows in approve-remote --list; wrong passphrase refused
 #   [A2] approve with a 10m lease → [B1] gets export DOP_TOKEN
 #   [B2] the lease bearer execs with the right env; it is NOT the portable bearer
+#   [B3] a second dop use reuses the lease (no new request) — v1.21 lease cache
 #   [A3] a 1s lease → expired lease refused on exec
+#   [A4] runs with a server copy behind the team — the request must still land (rc2 bug 1)
 #   [A4] reject → the waiting server exits non-zero
 #   [A5] asked lease above the cap is clamped
 set -euo pipefail
@@ -69,17 +71,29 @@ echo "$out" | grep -q "N_TOKEN=ntn_leased_secret" || { echo "$out"; fail "lease 
 a pull >/dev/null 2>&1; ls "$A_VAULT/pending-use"/*.json >/dev/null 2>&1 && fail "request/lease files not consumed"
 pass "lease execs; request consumed"
 
+echo "=== [B3] a second dop use reuses the lease — no new request"
+b use cam-shell --remote --agent-name buzz-reader >"$WORKROOT/reuse.out" 2>"$WORKROOT/reuse.err" || { cat "$WORKROOT/reuse.err"; fail "reuse exited non-zero"; }
+grep -q "reusing the lease" "$WORKROOT/reuse.err" || { cat "$WORKROOT/reuse.err"; fail "lease not reused"; }
+[[ "$(sed -n 's/^export DOP_TOKEN=//p' "$WORKROOT/reuse.out")" == "$LEASE" ]] || fail "reuse printed another bearer"
+a pull >/dev/null 2>&1; ls "$A_VAULT/pending-use"/*.json >/dev/null 2>&1 && fail "reuse staged a new request"
+pass "second use reuses the lease"
+forget_lease() { find "$B" -type d -name leases -exec rm -rf {} + 2>/dev/null || true; }
+
 echo "=== [A3] a 1s lease expires"
+forget_lease
 ( b use cam-shell --remote --agent-name buzz-reader >"$WORKROOT/use2.out" 2>/dev/null ) & USE2=$!
 for i in $(seq 1 30); do a pull >/dev/null 2>&1 || true; ls "$A_VAULT/pending-use"/*.json >/dev/null 2>&1 && break; sleep 1; done
 REQ2=$(a approve-remote --list 2>&1 | sed -n 's/.*id \([0-9a-f]*\).*/\1/p' | head -1)
-echo -n "$PASS-approve" | a approve-remote --use "$REQ2" --lease 1s --passphrase-stdin >/dev/null 2>&1 || fail "approve 1s failed"
+echo -n "$PASS-approve" | a approve-remote --use "$REQ2" --lease 1s --passphrase-stdin >"$WORKROOT/ap3.log" 2>&1 || { cat "$WORKROOT/ap3.log"; a approve-remote --list; ls "$A_VAULT/pending-use"; fail "approve 1s failed"; }
 wait $USE2 || fail "server use (1s) exited non-zero"
 SHORT=$(sed -n 's/^export DOP_TOKEN=//p' "$WORKROOT/use2.out"); sleep 2
 if HOME="$B" DOP_TOKEN="$SHORT" "$DOP" exec --agent-name buzz-reader -- true >/dev/null 2>&1; then fail "expired lease still execs"; fi
 pass "expired lease refused"
 
-echo "=== [A4] reject → server exits non-zero"
+echo "=== [A4] reject → server exits non-zero (server copy is behind the team: admin pushed first)"
+forget_lease
+a token issue --grants notion.read --name other-bearer --portable >/dev/null 2>&1 && a push >/dev/null 2>&1 || fail "admin second push failed"
+ls "$A_VAULT/pending-use"/*.json >/dev/null 2>&1 && fail "consumed request came back as a ghost after the admin's merge"
 ( b use cam-shell --remote >/dev/null 2>"$WORKROOT/use3.err" ) & USE3=$!
 for i in $(seq 1 30); do a pull >/dev/null 2>&1 || true; ls "$A_VAULT/pending-use"/*.json >/dev/null 2>&1 && break; sleep 1; done
 REQ3=$(a approve-remote --list 2>&1 | sed -n 's/.*id \([0-9a-f]*\).*/\1/p' | head -1)
@@ -89,6 +103,7 @@ grep -q "rejected" "$WORKROOT/use3.err" || { cat "$WORKROOT/use3.err"; fail "ser
 pass "reject reaches the server"
 
 echo "=== [A5] lease above the cap is clamped to 30m"
+forget_lease
 ( b use cam-shell --remote >"$WORKROOT/use4.out" 2>/dev/null ) & USE4=$!
 for i in $(seq 1 30); do a pull >/dev/null 2>&1 || true; ls "$A_VAULT/pending-use"/*.json >/dev/null 2>&1 && break; sleep 1; done
 REQ4=$(a approve-remote --list 2>&1 | sed -n 's/.*id \([0-9a-f]*\).*/\1/p' | head -1)

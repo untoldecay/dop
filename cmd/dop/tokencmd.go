@@ -35,6 +35,7 @@ import (
 	"github.com/fray/dop/internal/envseal"
 	"github.com/fray/dop/internal/trust"
 	"github.com/fray/dop/internal/vault"
+	"github.com/fray/dop/internal/version"
 )
 
 func runToken(args []string) int {
@@ -1077,7 +1078,33 @@ func requireAdminSession(paths *config.Paths) (*admin.Client, error) {
 	if !client.SessionActive() {
 		return nil, fmt.Errorf("no active admin session — run `dop admin login` first")
 	}
+	warnStaleDaemon(client)
 	return client, nil
+}
+
+// warnStaleDaemon says so, once per process, when the running session
+// daemon was started by another dop build than this one: daemon-side
+// features (the approval watcher) only exist after logout + login.
+var staleDaemonWarned bool
+
+func warnStaleDaemon(client *admin.Client) {
+	if staleDaemonWarned || os.Getenv("DOP_FROM_TUI") == "1" {
+		return
+	}
+	st, err := client.Status()
+	if err != nil {
+		return
+	}
+	mine := version.Short()
+	if st.Version == mine {
+		return
+	}
+	staleDaemonWarned = true
+	was := st.Version
+	if was == "" {
+		was = "an older build"
+	}
+	fmt.Fprintf(os.Stderr, "dop: the admin session was started by %s; this is %s — run `dop admin logout && dop admin login` to pick up daemon-side changes (approval dialogs for remote requests).\n", was, mine)
 }
 
 // requireAdminSessionOrUnlock is the operator-friendly variant used
@@ -1429,6 +1456,7 @@ func autoPullAndMerge(paths *config.Paths) error {
 	if err := saveMergedVault(client, paths, result.Merged); err != nil {
 		return fmt.Errorf("save merged: %w", err)
 	}
+	mergeTeamFiles(paths, base, team)
 	if err := runGit(io.Discard, paths.Vault, "merge", "-s", "ours", team,
 		"--no-ff", "-m", "dop: auto-merged local + team vaults"); err != nil {
 		return fmt.Errorf("finalize merge: %w", err)

@@ -65,13 +65,20 @@ const (
 
 // StatusResp is the payload of an `OpStatus` response.
 type StatusResp struct {
-	Unlocked          bool   `json:"unlocked"`
-	AdminPubkey       string `json:"admin_pubkey"`
-	IdleTTLSeconds    int64  `json:"idle_ttl_seconds"`
-	AbsTTLSeconds     int64  `json:"abs_ttl_seconds"`
-	AgeRecipient      string `json:"age_recipient"`
-	StartedAtUnix     int64  `json:"started_at_unix"`
-	LastActivityUnix  int64  `json:"last_activity_unix"`
+	Unlocked         bool   `json:"unlocked"`
+	AdminPubkey      string `json:"admin_pubkey"`
+	IdleTTLSeconds   int64  `json:"idle_ttl_seconds"`
+	AbsTTLSeconds    int64  `json:"abs_ttl_seconds"`
+	AgeRecipient     string `json:"age_recipient"`
+	StartedAtUnix    int64  `json:"started_at_unix"`
+	LastActivityUnix int64  `json:"last_activity_unix"`
+	// v1.21 — the dop build the daemon was started from. A newer CLI
+	// warns when they differ: daemon-side features (approval watcher)
+	// only exist after a logout + login.
+	Version string `json:"version,omitempty"`
+	// Watcher says whether the daemon puts up native dialogs for remote
+	// requests: "on", or "off: <reason>".
+	Watcher string `json:"watcher,omitempty"`
 }
 
 // SetTTLReq is the payload of an `OpSetTTL` request. Response is plain ok.
@@ -200,8 +207,9 @@ type TrustContextResp struct {
 // Denied   = operator clicked Deny.
 // Timeout  = dialog didn't close within TimeoutMs.
 // Unsupported = running on a platform without a native dialog (Linux,
-//               headless container, DOP_NO_POPUP=1). Caller MUST fall
-//               back to the tunnel+phone flow.
+//
+//	headless container, DOP_NO_POPUP=1). Caller MUST fall
+//	back to the tunnel+phone flow.
 type ApprovalPopupResp struct {
 	Decision string `json:"decision"` // "approved" | "denied" | "timeout" | "unsupported"
 	Reason   string `json:"reason,omitempty"`

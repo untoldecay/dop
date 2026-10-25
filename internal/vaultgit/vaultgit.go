@@ -283,6 +283,25 @@ func (g *Repo) MergeBase(a, b string) (string, error) {
 }
 
 // Show returns a file's content at rev (`git show rev:path`).
+// Files lists every blob of the commit at rev as path → blob hash
+// (`git ls-tree -r rev`).
+func (g *Repo) Files(rev string) (map[string]string, error) {
+	c, err := g.Resolve(rev)
+	if err != nil {
+		return nil, err
+	}
+	it, err := c.Files()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	err = it.ForEach(func(f *object.File) error {
+		out[f.Name] = f.Hash.String()
+		return nil
+	})
+	return out, err
+}
+
 func (g *Repo) Show(rev, path string) ([]byte, error) {
 	c, err := g.Resolve(rev)
 	if err != nil {

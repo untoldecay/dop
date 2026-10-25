@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/fray/dop/internal/admin"
@@ -465,6 +466,9 @@ func pullSmartMerge(paths *config.Paths, ours, theirs int) int {
 		fmt.Fprintf(os.Stderr, "dop pull: couldn't save the merged vault: %v\n", err)
 		return 1
 	}
+	for _, p := range mergeTeamFiles(paths, base, team) {
+		fmt.Fprintf(os.Stderr, "  kept your version of %s (the team changed it too)\n", p)
+	}
 
 	// Make a real merge commit so history reflects both sides.
 	// -s ours accepts the other side's commits into history without
@@ -540,6 +544,57 @@ func decryptVaultAtRef(client *admin.Client, paths *config.Paths, ref string) (*
 func saveMergedVault(client *admin.Client, paths *config.Paths, v *vault.Vault) error {
 	vp := paths.Vault + "/vault.yaml"
 	return saveVaultViaDaemon(client, paths, vp, v)
+}
+
+// mergeTeamFiles brings the worktree's non-vault files (bearer bundles,
+// pending requests, leases, invites) up to the team's side of a
+// diverged merge. vault.Merge only knows vault.yaml, and the `-s ours`
+// merge commit keeps our tree whole — so a request the server already
+// consumed came back as a ghost in the pending list, and a bearer the
+// team re-issued was silently undone (rc2). Per file, three-way: the
+// team didn't touch it → ours stays; we didn't touch it → the team's
+// version (or its deletion) lands; both changed → ours stays and the
+// path is returned so the caller can say so.
+func mergeTeamFiles(paths *config.Paths, base, team string) (kept []string) {
+	dir := paths.Vault
+	b, _ := gitLsTree(dir, base)
+	o, err1 := gitLsTree(dir, "HEAD")
+	t, err2 := gitLsTree(dir, team)
+	if err1 != nil || err2 != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, m := range []map[string]string{b, o, t} {
+		for p := range m {
+			seen[p] = true
+		}
+	}
+	for p := range seen {
+		if p == "vault.yaml" || strings.HasPrefix(p, ".") {
+			continue
+		}
+		hb, ho, ht := b[p], o[p], t[p]
+		switch {
+		case ht == hb, ht == ho:
+			continue // team didn't move, or we already agree
+		case ho != hb:
+			kept = append(kept, p) // both sides changed it: ours wins, as for vault.yaml conflicts
+			continue
+		}
+		full := filepath.Join(dir, filepath.FromSlash(p))
+		if ht == "" {
+			_ = os.Remove(full)
+			continue
+		}
+		blob, err := gitShow(dir, team, p)
+		if err != nil {
+			continue
+		}
+		_ = os.MkdirAll(filepath.Dir(full), 0o700)
+		_ = os.WriteFile(full, blob, 0o600)
+	}
+	sort.Strings(kept)
+	return kept
 }
 
 // gitMergeBase returns the commit hash both refs share as an ancestor.
