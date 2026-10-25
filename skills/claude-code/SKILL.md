@@ -29,7 +29,7 @@ Three kinds exist and each has one correct way in. Check with `dop whoami` if un
 | You were given | Kind | How to use it |
 |---|---|---|
 | bearer + PIN (`dop claim …` in the handoff) | **claimed** | run the claim once; from then on `dop exec --agent-name <subject> -- <cmd>` with **no `DOP_TOKEN`** — this host's agent key is the proof |
-| a subject name and `/dop-use` or `dop use` | **portable** | `eval "$(dop use <subject>)" && dop exec --agent-name <task> -- <cmd>` in every shell call |
+| a subject name and `/dop-use` or `dop use` | **portable** | `eval "$(dop use <subject>)" && dop exec --agent-name <task> -- <cmd>` in every shell call. On a server (no admin here): `eval "$(dop use <subject> --remote --agent-name <you>)"` once — it waits while the operator picks a duration; when the lease ends `dop exec` says so, ask again |
 | a bare bearer, no PIN | **unbound** | `DOP_TOKEN=<bearer> dop exec --agent-name <task> -- <cmd>` |
 
 Never `eval "$(dop env)"`: it puts the raw keys in your shell. `dop env` is refused for claimed bearers anyway. Never write a key's value into a command; reference it by name inside the child, e.g. `dop exec --agent-name x -- sh -c 'curl -H "Authorization: Bearer $NOTION_TOKEN" …'`.

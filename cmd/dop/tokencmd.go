@@ -246,6 +246,7 @@ func runTokenIssue(args []string) int {
 	// unwrap. Opt-in because the normal flow is "bearer leaves admin,
 	// lives only with agent"; this is specifically for bearers the
 	// admin itself will use across their own shells.
+	leaseCap := fs.Duration("lease-cap", time.Hour, "with --portable: longest lease an admin may hand to `dop use --remote` for this bearer (v1.21)")
 	portable := fs.Bool("portable", false, "also wrap the bearer to the issuing admin's age recipient and stash it on the capability record, so the admin can later `dop use <subject>` from any shell on any of their machines (vault pull carries the stash)")
 	// v1.14.0-rc4 — Tier 2 opt-in to printing bearer+PIN on a non-tty.
 	// rc6h — --print-bearer retired (no-op since rc5 Option A, same as
@@ -377,7 +378,7 @@ func runTokenIssue(args []string) int {
 	if !neverExpires {
 		expiresAt = time.Now().Add(expDur).UTC().Truncate(time.Second)
 	}
-	return issueBearer("dop token issue", client, paths, v, vaultPath, strings.TrimSpace(*name), grants, expiresAt, *noBind, *bindPubkey, pinDur, *portable, protectedGrants)
+	return issueBearer("dop token issue", client, paths, v, vaultPath, strings.TrimSpace(*name), grants, expiresAt, *noBind, *bindPubkey, pinDur, *portable, *leaseCap, protectedGrants)
 }
 
 // gateProtectedGrants — v1.13.0-rc12: if any grant in the bundle is
@@ -410,7 +411,20 @@ func gateProtectedGrants(client *admin.Client, paths *config.Paths, v *vault.Vau
 // prefixes every message. Shared by token issue and token portable --on
 // (unclaimed re-issue).
 func issueBearer(name string, client *admin.Client, paths *config.Paths, v *vault.Vault, vaultPath, subject string, grants []string,
-	expiresAt time.Time, noBind bool, bindPubkey string, pinDur time.Duration, portable bool, protectedGrants []string) int {
+	expiresAt time.Time, noBind bool, bindPubkey string, pinDur time.Duration, portable bool, leaseCap time.Duration, protectedGrants []string) int {
+	bearer, pin, rc := mintBearer(name, client, paths, v, vaultPath, subject, grants, expiresAt, noBind, bindPubkey, pinDur, portable, leaseCap, protectedGrants)
+	if rc != 0 {
+		return rc
+	}
+	return printIssuedBearer(name, client, paths, subject, bearer, pin, pinDur)
+}
+
+// mintBearer does everything issueBearer does except printing: bundle,
+// signed record, vault save, sidecar, audit. Returns the bearer (+ PIN)
+// so callers that never print it — `dop approve-remote --use` seals it
+// to the asking server instead — can mint too.
+func mintBearer(name string, client *admin.Client, paths *config.Paths, v *vault.Vault, vaultPath, subject string, grants []string,
+	expiresAt time.Time, noBind bool, bindPubkey string, pinDur time.Duration, portable bool, leaseCap time.Duration, protectedGrants []string) (string, string, int) {
 	// Ensure vault_context exists (both in the vault AND as a sidecar
 	// so agent installs — which can't decrypt the vault — can compute
 	// lookup ids).
@@ -429,12 +443,12 @@ func issueBearer(name string, client *admin.Client, paths *config.Paths, v *vaul
 	bearer, err := capability.NewBearer()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, name+": %v\n", err)
-		return 1
+		return "", "", 1
 	}
 	capIDRaw, err := capability.NewCapabilityID()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, name+": %v\n", err)
-		return 1
+		return "", "", 1
 	}
 	capIDHex := hex.EncodeToString(capIDRaw[:])
 	if subject == "" {
@@ -445,7 +459,7 @@ func issueBearer(name string, client *admin.Client, paths *config.Paths, v *vaul
 	envBundle := resolveGrantsToEnv(v, grants)
 	if len(envBundle) == 0 {
 		fmt.Fprintln(os.Stderr, name+": resolved env bundle is empty (are the grants wired to integrations?)")
-		return 1
+		return "", "", 1
 	}
 
 	// Bump the per-subject generation.
@@ -475,7 +489,7 @@ func issueBearer(name string, client *admin.Client, paths *config.Paths, v *vaul
 		p, err := capability.NewPIN()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, name+": %v\n", err)
-			return 1
+			return "", "", 1
 		}
 		pin = p
 		pinExpiry := time.Now().Add(pinDur).UTC().Truncate(time.Second)
@@ -494,12 +508,12 @@ func issueBearer(name string, client *admin.Client, paths *config.Paths, v *vaul
 	bundlePath := filepath.Join(paths.Vault, "capabilities", lookupID+".bundle")
 	if err := os.MkdirAll(filepath.Dir(bundlePath), 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, name+": %v\n", err)
-		return 1
+		return "", "", 1
 	}
 	f, err := os.Create(bundlePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, name+": %v\n", err)
-		return 1
+		return "", "", 1
 	}
 	bundleBytes, err := capability.Write(f, capability.WriteOpts{
 		CapabilityID: capIDRaw,
@@ -513,7 +527,7 @@ func issueBearer(name string, client *admin.Client, paths *config.Paths, v *vaul
 	f.Close()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, name+": write bundle: %v\n", err)
-		return 1
+		return "", "", 1
 	}
 	bundleHash := capability.HashBundle(bundleBytes)
 
@@ -532,7 +546,7 @@ func issueBearer(name string, client *admin.Client, paths *config.Paths, v *vaul
 	}
 	if err := signRecordViaDaemon(client, &rec); err != nil {
 		fmt.Fprintf(os.Stderr, name+": sign: %v\n", err)
-		return 1
+		return "", "", 1
 	}
 	if v.Capabilities == nil {
 		v.Capabilities = map[string]vault.Capability{}
@@ -547,18 +561,21 @@ func issueBearer(name string, client *admin.Client, paths *config.Paths, v *vaul
 		st, err := client.Status()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, name+": session status for --portable: %v\n", err)
-			return 1
+			return "", "", 1
 		}
 		if st.AgeRecipient == "" {
 			fmt.Fprintln(os.Stderr, name+": --portable requires an active admin session with an age recipient")
-			return 1
+			return "", "", 1
 		}
 		wrapped, err := admin.WrapToRecipient([]byte(bearer), st.AgeRecipient)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, name+": wrap bearer for admin use: %v\n", err)
-			return 1
+			return "", "", 1
 		}
 		stored.PortableWrapped = wrapped
+		if leaseCap > 0 {
+			stored.LeaseCapSeconds = int(leaseCap.Seconds())
+		}
 	}
 	v.Capabilities[capIDHex] = stored
 
@@ -569,14 +586,14 @@ func issueBearer(name string, client *admin.Client, paths *config.Paths, v *vaul
 		// the stale vault count and collide with this bundle's gen.
 		_ = os.Remove(bundlePath)
 		fmt.Fprintf(os.Stderr, name+": %v (rolled back bundle)\n", err)
-		return 1
+		return "", "", 1
 	}
 	if err := writeRecordSidecar(paths, rec); err != nil {
 		// Vault has the record but sidecar failed. Roll bundle back
 		// too — without the sidecar, exec would reject anyway.
 		_ = os.Remove(bundlePath)
 		fmt.Fprintf(os.Stderr, name+": write record: %v (rolled back bundle; vault out of sync — run `dop token revoke %s`)\n", err, subject)
-		return 1
+		return "", "", 1
 	}
 
 	audit.Append(paths, audit.Event{
@@ -595,6 +612,11 @@ func issueBearer(name string, client *admin.Client, paths *config.Paths, v *vaul
 		logProtectedTokenIssue(paths, subject, protectedGrants)
 	}
 	fmt.Fprintf(os.Stderr, name+": issued %s (grants: %v, expires: %s)\n", subject, grants, tokenExpiryDisplay(expiresAt))
+	return bearer, pin, 0
+}
+
+// printIssuedBearer is the shown-once print behind the approval guard.
+func printIssuedBearer(name string, client *admin.Client, paths *config.Paths, subject, bearer, pin string, pinDur time.Duration) int {
 	// rc5 Option A: approval runs for every print surface. The capability
 	// is already written to the vault; if approval is denied the mutation
 	// stays intact — only the stdout print is suppressed.
@@ -921,7 +943,7 @@ func reissueUnclaimed(name string, client *admin.Client, paths *config.Paths, v 
 		return 1
 	}
 	if rc := issueBearer(name, client, paths, v, vaultPath, old.Subject, old.Grants, old.ExpiresAt,
-		noBind, "", pinDur, portable, protectedGrants); rc != 0 {
+		noBind, "", pinDur, portable, time.Duration(old.LeaseCapSeconds)*time.Second, protectedGrants); rc != 0 {
 		return rc
 	}
 	removeBearerFiles(paths, old.LookupID, name)
@@ -1750,6 +1772,7 @@ func putCapability(v *vault.Vault, id string, rec capability.Record) {
 		v.Capabilities = map[string]vault.Capability{}
 	}
 	c.PortableWrapped = v.Capabilities[id].PortableWrapped
+	c.LeaseCapSeconds = v.Capabilities[id].LeaseCapSeconds
 	v.Capabilities[id] = c
 }
 

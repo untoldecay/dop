@@ -430,6 +430,10 @@ type Capability struct {
 	// is "bearer leaves the admin, lives only with the agent"; this
 	// stash is specifically for bearers the admin itself will use.
 	PortableWrapped string `yaml:"portable_wrapped,omitempty" json:"portable_wrapped,omitempty"`
+	// v1.21 — longest lease an admin may hand to `dop use --remote` for
+	// this portable bearer (seconds; 0 = default 1h). Read by the
+	// approving admin only.
+	LeaseCapSeconds int    `yaml:"lease_cap_seconds,omitempty" json:"lease_cap_seconds,omitempty"`
 	Signature       string `yaml:"signature"`
 }
 

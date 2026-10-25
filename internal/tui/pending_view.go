@@ -24,6 +24,7 @@ import (
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/pendingclaim"
 	"github.com/fray/dop/internal/remoteclaim"
+	"github.com/fray/dop/internal/remoteuse"
 )
 
 // pendingRow is one approvable entry: a local PIN claim (sas set) or a
@@ -32,9 +33,30 @@ type pendingRow struct {
 	subject, pubkey, keyType string
 	sas, host                string
 	expiresAt                time.Time
+	// v1.21 — a `dop use --remote` lease request: reqID set, agent asks.
+	reqID, agent string
 }
 
 func (r pendingRow) remote() bool { return r.host != "" }
+func (r pendingRow) lease() bool  { return r.reqID != "" }
+
+// where is the second column: PIN, remote host, or lease host.
+func (r pendingRow) where() string {
+	switch {
+	case r.lease():
+		return "lease · " + r.host
+	case r.remote():
+		return "remote · " + r.host
+	}
+	return "PIN " + r.sas
+}
+
+// leasePresets is the duration picker the operator sees for a lease
+// request; the agent never picks. Cursor starts on the shortest; the
+// CLI clamps to the bearer's --lease-cap.
+var leasePresets = []struct {
+	label, value string
+}{{"10 min", "10m"}, {"30 min", "30m"}, {"1 hour", "1h"}}
 
 // pendingRows merges non-expired local + remote claims, local first.
 func pendingRows(paths *config.Paths) ([]pendingRow, error) {
@@ -55,6 +77,14 @@ func pendingRows(paths *config.Paths) ([]pendingRow, error) {
 	} else if err == nil {
 		err = rerr
 	}
+	if uses, uerr := remoteuse.ListRequests(paths); uerr == nil {
+		for _, r := range uses {
+			if _, answered := remoteuse.ReadLease(paths, r.RequestID); answered == nil || now.After(r.ExpiresAt) {
+				continue
+			}
+			rows = append(rows, pendingRow{subject: r.Subject, pubkey: r.SignerPubkey, keyType: r.SignerKeyType, host: r.Host, expiresAt: r.ExpiresAt, reqID: r.RequestID, agent: r.AgentName})
+		}
+	}
 	return rows, err
 }
 
@@ -66,6 +96,7 @@ type pendingView struct {
 	cursor int
 	pass   textinput.Model
 	step   int // pendingStep*
+	lease  int // leasePresets index for a lease row
 	err    string
 	done   bool
 	flash  string
@@ -77,6 +108,7 @@ const (
 	pendingStepReject // confirm
 	pendingStepRun
 	pendingStepDone
+	pendingStepLease // v1.21 — duration picker before the passphrase
 )
 
 type pendingResultMsg struct {
@@ -102,13 +134,22 @@ func (v *pendingView) Flash() string { return v.flash }
 
 // run shells out in a Cmd, never inside Update.
 func (v *pendingView) run(reject bool) tea.Cmd {
-	return runPendingRow(v.claims[v.cursor], reject, v.pass.Value())
+	return runPendingRow(v.claims[v.cursor], reject, v.pass.Value(), leasePresets[v.lease].value)
 }
 
-// runPendingRow approves (passphrase on stdin) or rejects one claim,
-// local or remote. Shared by the banner picker and Bearers › Pending.
-func runPendingRow(row pendingRow, reject bool, pass string) tea.Cmd {
+// runPendingRow approves (passphrase on stdin) or rejects one claim or
+// lease request. Shared by the banner picker and Bearers › Pending.
+// lease is the picked duration, used for lease rows only.
+func runPendingRow(row pendingRow, reject bool, pass, lease string) tea.Cmd {
 	return func() tea.Msg {
+		if row.lease() {
+			if reject {
+				_, e := runDop("", "approve-remote", "--use", row.reqID, "--reject")
+				return pendingResultMsg{reject: true, err: e}
+			}
+			_, e := runDop(pass, "approve-remote", "--use", row.reqID, "--lease", lease, "--passphrase-stdin")
+			return pendingResultMsg{err: e}
+		}
 		if row.remote() {
 			if reject {
 				_, e := runDop("", "approve-remote", "--subject", row.subject, "--reject")
@@ -148,6 +189,9 @@ func (v *pendingView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		v.flash = "Claim approved"
+		if v.claims[v.cursor].lease() {
+			v.flash = "Lease granted for " + leasePresets[v.lease].label
+		}
 		if mm.reject {
 			v.flash = "Claim rejected"
 		}
@@ -184,9 +228,24 @@ func (v *pendingView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "enter", "a":
 				if len(v.claims) > 0 {
-					v.step = pendingStepPass
+					v.step, v.lease = pendingStepPass, 0
+					if v.claims[v.cursor].lease() {
+						v.step = pendingStepLease
+					}
 					v.pass.Reset()
 				}
+			}
+		case pendingStepLease:
+			switch k {
+			case "esc":
+				v.step = pendingStepPick
+			case "up", "k":
+				stepCursor(&v.lease, len(leasePresets), -1)
+			case "down", "j":
+				stepCursor(&v.lease, len(leasePresets), 1)
+			case "enter":
+				v.step = pendingStepPass
+				v.pass.Reset()
 			}
 		case pendingStepReject:
 			switch k {
@@ -232,27 +291,36 @@ func (v *pendingView) View() string {
 	if len(v.claims) > 0 {
 		sel = v.claims[v.cursor]
 	}
-	// Second column: PIN for local claims, host for remote ones.
-	where := func(r pendingRow) string {
-		if r.remote() {
-			return "remote · " + r.host
-		}
-		return "PIN " + r.sas
-	}
+	where := func(r pendingRow) string { return r.where() }
 	switch v.step {
 	case pendingStepRun:
 		return v.running(title, "Working on "+sel.subject)
 	case pendingStepDone:
 		note := ""
-		if sel.remote() && !strings.Contains(v.flash, "rejected") {
+		switch {
+		case strings.Contains(v.flash, "rejected"):
+		case sel.lease():
+			note = "Pushed to the vault repo. The waiting server picks it up within seconds; the bearer dies when the lease ends."
+		case sel.remote():
 			note = "Pushed to the vault repo. The agent picks it up on its next dop pull / exec."
 		}
 		return v.doneScreen(v.flash, [][2]string{{"bearer", sel.subject}}, note, "")
 	case pendingStepReject:
 		body := strings.Split(strings.TrimRight(kv([2]string{"bearer", sel.subject}, [2]string{"from", where(sel)}), "\n"), "\n")
 		return frame(v.width, v.height, "Reject "+sel.subject+"?", nil, "", body, status{err: v.err}.String(), confirmFoot("reject"))
+	case pendingStepLease:
+		var o [][2]string
+		for _, p := range leasePresets {
+			o = append(o, [2]string{p.label, ""})
+		}
+		return v.screen("Lease "+sel.subject+" to "+sel.agent, "", "For how long", optRows(o, v.lease),
+			"The agent asked, you pick. It asks again when the lease ends.", v.err, where(sel), wizKeys("next"))
 	case pendingStepPass:
-		return v.screen("Approve "+sel.subject, "", "Approval passphrase", []string{inputRow(&v.pass)}, "", v.err, where(sel), wizKeys("approve"))
+		title := "Approve " + sel.subject
+		if sel.lease() {
+			title = "Lease " + sel.subject + " for " + leasePresets[v.lease].label
+		}
+		return v.screen(title, "", "Approval passphrase", []string{inputRow(&v.pass)}, "", v.err, where(sel), wizKeys("approve"))
 	}
 	if len(v.claims) == 0 {
 		return frame(v.width, v.height, title, nil, "", []string{bodySt.Render("  No pending claims. An agent's dop claim (local or --remote) shows up here.")}, status{err: v.err}.String(), footer(v.width, keyBack))

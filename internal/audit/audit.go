@@ -69,6 +69,12 @@ const (
 	// (bool-as-string: did it write to --token-file). NEVER the
 	// bearer value.
 	EventUseAttached = "use_attached"
+	// v1.21 — dop use --remote: the server asked (request), the admin
+	// answered (approved / rejected), the server opened the lease.
+	EventUseRemoteRequest  = "use_remote_request"
+	EventUseRemoteApproved = "use_remote_approved"
+	EventUseRemoteRejected = "use_remote_rejected"
+	EventUseRemoteLease    = "use_remote_lease"
 	// v1.14.0-rc3 — `dop integration rename` emits a single event with
 	// old_name + new_name + referrers (count of grants rewritten).
 	// Fires once per rename; the rename itself is atomic at save time.
