@@ -21,6 +21,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/fray/dop/internal/admin"
+	"github.com/fray/dop/internal/approvalcard"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/pendingclaim"
 	"github.com/fray/dop/internal/remoteclaim"
@@ -35,6 +37,60 @@ type pendingRow struct {
 	expiresAt                time.Time
 	// v1.21 — a `dop use --remote` lease request: reqID set, agent asks.
 	reqID, agent string
+	signed       bool // the lease request carried a valid agent signature
+}
+
+// card is the row as the operator's question (contract 27): every
+// pending surface renders this and nothing else.
+func (r pendingRow) card(touches string) approvalcard.Card {
+	c := approvalcard.Card{Subject: r.subject, Where: r.host, Touches: touches, Expires: r.expiresAt}
+	key := "agent key"
+	if r.keyType != "" {
+		key += " " + r.keyType
+	}
+	if r.pubkey != "" {
+		key += " " + midTrunc(r.pubkey, 16)
+	}
+	switch {
+	case r.lease():
+		c.Kind, c.Options = approvalcard.KindLease, approvalcard.LeaseOptions()
+		c.Who = r.agent + " (unsigned request)"
+		if r.signed {
+			c.Who = r.agent + " (signed by its agent key)"
+		}
+	case r.remote():
+		c.Kind, c.Who = approvalcard.KindRemoteClaim, key
+	default:
+		c.Kind, c.Who, c.Code = approvalcard.KindClaim, key, r.sas
+	}
+	return c
+}
+
+// cardScreen is the passphrase step every pending surface shows: the
+// card's effect and rows, the field, the footer.
+func cardScreen(w wiz, title string, c approvalcard.Card, input []string, err, hint string, km keyMap) string {
+	body := []string{"  " + bodySt.Render(c.Effect())}
+	for _, r := range c.Rows() {
+		body = append(body, "  "+mutedSt.Render(r[0]+": ")+bodySt.Render(r[1]))
+	}
+	body = append(body, "", "  "+mutedSt.Render(approvalcard.Passphrase), "")
+	body = append(body, input...)
+	return w.screen(title, "", "", body, c.Footer(), err, hint, km)
+}
+
+// grantsOf names the grants of a bearer for the card's "touches" row;
+// empty when the vault can't be read (no session yet).
+func grantsOf(paths *config.Paths, subject string) string {
+	v, _, err := loadVaultForListing(admin.NewClient(admin.SockPath(paths)), paths)
+	if err != nil {
+		return ""
+	}
+	for _, c := range v.Capabilities {
+		if c.Live() && c.Subject == subject {
+			return strings.Join(c.Grants, ", ")
+		}
+	}
+	return ""
 }
 
 func (r pendingRow) remote() bool { return r.host != "" }
@@ -50,13 +106,6 @@ func (r pendingRow) where() string {
 	}
 	return "PIN " + r.sas
 }
-
-// leasePresets is the duration picker the operator sees for a lease
-// request; the agent never picks. Cursor starts on the shortest; the
-// CLI clamps to the bearer's --lease-cap.
-var leasePresets = []struct {
-	label, value string
-}{{"10 min", "10m"}, {"30 min", "30m"}, {"1 hour", "1h"}}
 
 // pendingRows merges non-expired local + remote claims, local first.
 func pendingRows(paths *config.Paths) ([]pendingRow, error) {
@@ -82,7 +131,11 @@ func pendingRows(paths *config.Paths) ([]pendingRow, error) {
 			if _, answered := remoteuse.ReadLease(paths, r.RequestID); answered == nil || now.After(r.ExpiresAt) {
 				continue
 			}
-			rows = append(rows, pendingRow{subject: r.Subject, pubkey: r.SignerPubkey, keyType: r.SignerKeyType, host: r.Host, expiresAt: r.ExpiresAt, reqID: r.RequestID, agent: r.AgentName})
+			signed, verr := r.Verify()
+			if verr != nil {
+				continue // a bad signature never becomes a question
+			}
+			rows = append(rows, pendingRow{subject: r.Subject, pubkey: r.SignerPubkey, keyType: r.SignerKeyType, host: r.Host, expiresAt: r.ExpiresAt, reqID: r.RequestID, agent: r.AgentName, signed: signed})
 		}
 	}
 	return rows, err
@@ -134,7 +187,7 @@ func (v *pendingView) Flash() string { return v.flash }
 
 // run shells out in a Cmd, never inside Update.
 func (v *pendingView) run(reject bool) tea.Cmd {
-	return runPendingRow(v.claims[v.cursor], reject, v.pass.Value(), leasePresets[v.lease].value)
+	return runPendingRow(v.claims[v.cursor], reject, v.pass.Value(), approvalcard.LeaseOptions()[v.lease].Value)
 }
 
 // runPendingRow approves (passphrase on stdin) or rejects one claim or
@@ -190,7 +243,7 @@ func (v *pendingView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		v.flash = "Claim approved"
 		if v.claims[v.cursor].lease() {
-			v.flash = "Lease granted for " + leasePresets[v.lease].label
+			v.flash = "Lease granted for " + approvalcard.LeaseOptions()[v.lease].Label
 		}
 		if mm.reject {
 			v.flash = "Claim rejected"
@@ -240,9 +293,9 @@ func (v *pendingView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc":
 				v.step = pendingStepPick
 			case "up", "k":
-				stepCursor(&v.lease, len(leasePresets), -1)
+				stepCursor(&v.lease, len(approvalcard.LeaseOptions()), -1)
 			case "down", "j":
-				stepCursor(&v.lease, len(leasePresets), 1)
+				stepCursor(&v.lease, len(approvalcard.LeaseOptions()), 1)
 			case "enter":
 				v.step = pendingStepPass
 				v.pass.Reset()
@@ -306,21 +359,23 @@ func (v *pendingView) View() string {
 		}
 		return v.doneScreen(v.flash, [][2]string{{"bearer", sel.subject}}, note, "")
 	case pendingStepReject:
-		body := strings.Split(strings.TrimRight(kv([2]string{"bearer", sel.subject}, [2]string{"from", where(sel)}), "\n"), "\n")
+		c := sel.card("")
+		body := strings.Split(strings.TrimRight(kv(append([][2]string{{"bearer", sel.subject}}, c.Rows()...)...), "\n"), "\n")
 		return frame(v.width, v.height, "Reject "+sel.subject+"?", nil, "", body, status{err: v.err}.String(), confirmFoot("reject"))
 	case pendingStepLease:
+		c := sel.card("")
 		var o [][2]string
-		for _, p := range leasePresets {
-			o = append(o, [2]string{p.label, ""})
+		for _, p := range c.Options {
+			o = append(o, [2]string{p.Label, ""})
 		}
 		return v.screen("Lease "+sel.subject+" to "+sel.agent, "", "For how long", optRows(o, v.lease),
-			"The agent asked, you pick. It asks again when the lease ends.", v.err, where(sel), wizKeys("next"))
+			c.Footer(), v.err, where(sel), wizKeys("next"))
 	case pendingStepPass:
 		title := "Approve " + sel.subject
 		if sel.lease() {
-			title = "Lease " + sel.subject + " for " + leasePresets[v.lease].label
+			title = "Lease " + sel.subject + " for " + approvalcard.LeaseOptions()[v.lease].Label
 		}
-		return v.screen(title, "", "Approval passphrase", []string{inputRow(&v.pass)}, "", v.err, where(sel), wizKeys("approve"))
+		return cardScreen(v.wiz, title, sel.card(grantsOf(v.paths, sel.subject)), []string{inputRow(&v.pass)}, v.err, where(sel), wizKeys("approve"))
 	}
 	if len(v.claims) == 0 {
 		return frame(v.width, v.height, title, nil, "", []string{bodySt.Render("  No pending claims. An agent's dop claim (local or --remote) shows up here.")}, status{err: v.err}.String(), footer(v.width, keyBack))

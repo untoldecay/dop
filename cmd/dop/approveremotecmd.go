@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/fray/dop/internal/approval"
+	"github.com/fray/dop/internal/approvalcard"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
@@ -96,7 +97,10 @@ func runApproveRemote(args []string) int {
 	fmt.Fprintf(os.Stderr, "  new gen:      %d\n", match.NewGeneration)
 
 	// Passphrase gate.
-	pass, err := readPassphrase("Approval passphrase: ", *pfromStdin)
+	card := approvalcard.Card{Kind: approvalcard.KindRemoteClaim, Subject: match.Subject,
+		Who: "agent key " + match.EffectiveKeyType() + " " + short(match.Pubkey), Where: match.Host, Expires: match.ExpiresAt}
+	fmt.Fprintln(os.Stderr, card.Body())
+	pass, err := readPassphrase(approvalcard.Passphrase+": ", *pfromStdin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop approve-remote: %v\n", err)
 		return 1

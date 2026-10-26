@@ -3,12 +3,12 @@
 // available (timeout, daemon unreachable, platform unsupported).
 //
 // Shape mirrors `dop claim` approval:
-//   1. Start a small HTTP server on 127.0.0.1:<random-port>.
-//   2. Optionally spawn `cloudflared` for a public URL.
-//   3. Print URL + terminal QR to stderr.
-//   4. Wait for a POST /approve with the passphrase.
-//   5. Verify via `internal/approval.Verify`; rate-limit on failure.
-//   6. Return decision; clean up tunnel + server.
+//  1. Start a small HTTP server on 127.0.0.1:<random-port>.
+//  2. Optionally spawn `cloudflared` for a public URL.
+//  3. Print URL + terminal QR to stderr.
+//  4. Wait for a POST /approve with the passphrase.
+//  5. Verify via `internal/approval.Verify`; rate-limit on failure.
+//  6. Return decision; clean up tunnel + server.
 //
 // Deliberately independent from `internal/approvalserver` because
 // that server is tightly coupled to `pendingclaim.Record` (claim-
@@ -21,7 +21,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"math/rand/v2"
 	"net"
@@ -34,6 +33,7 @@ import (
 	"github.com/mdp/qrterminal/v3"
 
 	"github.com/fray/dop/internal/approval"
+	"github.com/fray/dop/internal/approvalcard"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/tunnel"
 )
@@ -207,40 +207,11 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) renderForm(w http.ResponseWriter, errMsg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	// Mobile-first, no external resources. CSS inline.
-	page := `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DOP approval</title>
-<style>
-body{font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;margin:0;padding:1.5rem;background:#fafafa;color:#111;}
-@media(prefers-color-scheme:dark){body{background:#111;color:#eee;}input,button{background:#222;color:#eee;border-color:#444;}}
-h1{font-size:1.3rem;margin:0 0 1rem 0;}
-.subject{font-family:ui-monospace,monospace;background:#eee;padding:.5rem;border-radius:4px;margin-bottom:1rem;}
-@media(prefers-color-scheme:dark){.subject{background:#222;}}
-input[type=password]{width:100%;box-sizing:border-box;padding:1rem;font-size:1rem;border:1px solid #ccc;border-radius:6px;margin-bottom:1rem;}
-button{min-height:44px;padding:1rem;font-size:1rem;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;cursor:pointer;}
-button.primary{background:#0a7cff;color:#fff;border-color:#0a7cff;}
-button.danger{background:#e03b3b;color:#fff;border-color:#e03b3b;}
-.row{display:flex;gap:.5rem;}
-.row button{flex:1;}
-.err{color:#c00;margin-bottom:1rem;}
-.hint{color:#666;font-size:.9rem;margin-top:1rem;}
-@media(prefers-color-scheme:dark){.hint{color:#888;}}
-</style></head><body>
-<h1>Approve <code>` + html.EscapeString(s.req.Kind) + `</code>?</h1>
-<div class="subject">` + html.EscapeString(s.req.Subject) + `</div>`
-	if errMsg != "" {
-		page += `<div class="err">` + html.EscapeString(errMsg) + `</div>`
-	}
-	page += `<form method="POST" action="/c/` + s.displayToken + `/approve">
-<input type="password" name="passphrase" autofocus required placeholder="Approval passphrase">
-<div class="row"><button type="submit" class="primary">Approve</button>
-<button type="submit" formaction="/c/` + s.displayToken + `/reject" formmethod="POST" class="danger">Deny</button></div>
-</form>
-<div class="hint">A dop process on your machine is waiting for approval to print the secret above.</div>
-</body></html>`
-	_, _ = io.WriteString(w, page)
+	card := approvalcard.Card{Kind: approvalcard.PrintKind(s.req.Kind), Subject: s.req.Subject, Who: "dop " + strings.TrimPrefix(s.req.Kind, "print_")}
+	_ = approvalcard.Page(w, approvalcard.Form{Card: card, Error: errMsg,
+		Action: "/c/" + s.displayToken + "/approve", RejectAction: "/c/" + s.displayToken + "/reject"})
 }
 
 func (s *server) handleApprove(w http.ResponseWriter, r *http.Request) {

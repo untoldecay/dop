@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/fray/dop/internal/approval"
+	"github.com/fray/dop/internal/approvalcard"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/pendingclaim"
@@ -62,7 +63,10 @@ func runApprove(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop approve: this claim has already burned its %d passphrase attempts\n", pendingclaim.MaxFailures)
 		return 1
 	}
-	pass, err := readPassphrase("Approval passphrase: ", *pfromStdin)
+	card := approvalcard.Card{Kind: approvalcard.KindClaim, Subject: pending.Subject, Who: "agent key " + short(pending.Pubkey),
+		Where: pending.Host, Code: pending.SAS, Expires: pending.ExpiresAt}
+	fmt.Fprintln(os.Stderr, card.Body())
+	pass, err := readPassphrase(approvalcard.Passphrase+": ", *pfromStdin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop approve: %v\n", err)
 		return 1

@@ -14,6 +14,7 @@ import (
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/approval"
+	"github.com/fray/dop/internal/approvalcard"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/remoteuse"
@@ -100,12 +101,11 @@ func runApproveRemoteUse(paths *config.Paths, ref string, lease time.Duration, r
 	} else {
 		who += " (unsigned request)"
 	}
-	fmt.Fprintln(os.Stderr, "Lease request:")
-	fmt.Fprintf(os.Stderr, "  bearer:   %s\n", match.Subject)
-	fmt.Fprintf(os.Stderr, "  from:     %s on %s\n", who, match.Host)
-	fmt.Fprintf(os.Stderr, "  grants:   %s\n", strings.Join(crec.Grants, ", "))
-	fmt.Fprintf(os.Stderr, "  lease:    %s\n", lease)
-	pass, err := readPassphrase("Approval passphrase: ", pfromStdin)
+	card := approvalcard.Card{Kind: approvalcard.KindLease, Subject: match.Subject, Who: who, Where: match.Host,
+		Touches: strings.Join(crec.Grants, ", "), Expires: match.ExpiresAt}
+	fmt.Fprintln(os.Stderr, card.Body())
+	fmt.Fprintf(os.Stderr, "lease: %s\n%s\n", lease, card.Footer())
+	pass, err := readPassphrase(approvalcard.Passphrase+": ", pfromStdin)
 	if err != nil {
 		return fail(err)
 	}

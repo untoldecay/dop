@@ -47,6 +47,7 @@ type Card struct {
 	Who     string    // who asks: agent name, "signed by its agent key" / "unsigned"
 	Where   string    // host · harness
 	Touches string    // services / grants concerned
+	Code    string    // a code the operator compares with the agent's screen (the claim SAS)
 	Expires time.Time // when the question stops being valid (zero = none)
 	Options []Option  // e.g. lease durations; empty = plain approve / deny
 	Default int       // index into Options the surface preselects
@@ -103,23 +104,72 @@ func (c Card) Effect() string {
 	return c.Subject
 }
 
-// Lines is the body every text surface shows under the effect:
-// who, where, what it touches, until when. Empty fields are skipped.
-func (c Card) Lines() []string {
-	var out []string
+// Rows is the body every surface shows under the effect, as label /
+// value pairs: who and where, what it touches, the code to compare,
+// until when. Empty fields are skipped.
+func (c Card) Rows() [][2]string {
+	var out [][2]string
 	add := func(k, v string) {
 		if v != "" {
-			out = append(out, k+": "+v)
+			out = append(out, [2]string{k, v})
 		}
 	}
-	add("from", strings.TrimSpace(strings.Join([]string{c.Who, c.Where}, " on ")))
+	from := c.Who
+	switch {
+	case c.Who != "" && c.Where != "":
+		from = c.Who + " on " + c.Where
+	case c.Where != "":
+		from = c.Where
+	}
+	add("from", from)
 	add("touches", c.Touches)
+	add("code", c.Code)
 	if !c.Expires.IsZero() {
-		if left := time.Until(c.Expires).Round(time.Minute); left > 0 {
-			add("answer within", left.String())
+		if left := time.Until(c.Expires); left > 0 {
+			add("answer within", Human(left))
 		}
 	}
 	return out
+}
+
+// Lines is Rows as "label: value" text, for dialogs and CLI prompts.
+func (c Card) Lines() []string {
+	var out []string
+	for _, r := range c.Rows() {
+		out = append(out, r[0]+": "+r[1])
+	}
+	return out
+}
+
+// Passphrase is the one label every surface puts on the field.
+const Passphrase = "Approval passphrase"
+
+// LeaseDurations are the leases the operator can grant, shortest first;
+// the CLI clamps to the bearer's cap. The agent never picks.
+var LeaseDurations = []string{"10m", "30m", "1h"}
+
+// LeaseOptions is LeaseDurations as options, labelled for a human.
+func LeaseOptions() []Option {
+	labels := map[string]string{"10m": "10 min", "30m": "30 min", "1h": "1 hour"}
+	out := make([]Option, 0, len(LeaseDurations))
+	for _, d := range LeaseDurations {
+		l := labels[d]
+		if l == "" {
+			l = d
+		}
+		out = append(out, Option{Label: l, Value: d})
+	}
+	return out
+}
+
+// PrintKind maps a print guard surface ("print_use", "print_issue",
+// "print_claim", "print_env") to the card kind: printing scoped env is
+// the keys themselves, everything else prints a bearer.
+func PrintKind(surface string) Kind {
+	if surface == "print_env" {
+		return KindPrintKeys
+	}
+	return KindPrintBearer
 }
 
 // Body is Effect + Lines as one block, for dialogs and CLI prompts.
@@ -137,6 +187,23 @@ func (c Card) Footer() string {
 		return "Prefer dop exec: the agent can use the keys without seeing them."
 	}
 	return ""
+}
+
+// Human is the duration as people read it: "45s", "5m", "1h30m", "20h",
+// "3d" — never Go's "5m0s" (TUI contract 24).
+func Human(d time.Duration) string {
+	if d < time.Minute {
+		return d.Round(time.Second).String()
+	}
+	d = d.Round(time.Minute)
+	if d >= 24*time.Hour {
+		return fmt.Sprintf("%dd", d/(24*time.Hour))
+	}
+	s := strings.TrimSuffix(d.String(), "0s")
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }
 
 func firstWord(s string) string {

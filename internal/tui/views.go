@@ -23,6 +23,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/fray/dop/internal/admin"
+	"github.com/fray/dop/internal/approvalcard"
 	"github.com/fray/dop/internal/capability"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/vault"
@@ -1346,9 +1347,9 @@ func (v *listView) updatePendingMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		v.mode = listModeList
 		v.pendPass.Reset()
 	case v.mode == listModePendLease && (k == "up" || k == "k"):
-		stepCursor(&v.pendLease, len(leasePresets), -1)
+		stepCursor(&v.pendLease, len(approvalcard.LeaseOptions()), -1)
 	case v.mode == listModePendLease && (k == "down" || k == "j"):
-		stepCursor(&v.pendLease, len(leasePresets), 1)
+		stepCursor(&v.pendLease, len(approvalcard.LeaseOptions()), 1)
 	case v.mode == listModePendLease && k == "enter":
 		v.mode = listModePendPass
 		v.pendPass.Reset()
@@ -1369,7 +1370,7 @@ func (v *listView) updatePendingMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return v, cmd
 		}
 		v.mode, v.pendingAction = listModeRun, "approve-claim"
-		return v, runPendingRow(v.pendingRowAt(), false, v.pendPass.Value(), leasePresets[v.pendLease].value)
+		return v, runPendingRow(v.pendingRowAt(), false, v.pendPass.Value(), approvalcard.LeaseOptions()[v.pendLease].Value)
 	case v.mode == listModePendPass:
 		edit(&v.pendPass, mm)
 	}
@@ -1381,19 +1382,24 @@ func (v *listView) viewPending(width, height int) string {
 	w := wiz{width: width, height: height, help: v.help}
 	row := v.pendingRowAt()
 	from := row.where()
+	c := row.card("")
 	if v.mode == listModePendLease {
 		var o [][2]string
-		for _, p := range leasePresets {
-			o = append(o, [2]string{p.label, ""})
+		for _, p := range c.Options {
+			o = append(o, [2]string{p.Label, ""})
 		}
 		return w.screen("Lease "+row.subject+" to "+row.agent, "", "For how long", optRows(o, v.pendLease),
-			"The agent asked, you pick. It asks again when the lease ends.", v.err, from, wizKeys("next"))
+			c.Footer(), v.err, from, wizKeys("next"))
 	}
 	if v.mode == listModePendRejct {
-		lines := []string{mutedSt.Render("  " + from), mutedSt.Render("  The agent has to claim again if this was a mistake.")}
+		lines := []string{mutedSt.Render("  " + c.Effect()), mutedSt.Render("  The agent has to ask again if this was a mistake.")}
 		return w.confirmScreen("Reject "+row.subject+"?", lines, "reject", v.err)
 	}
-	return w.screen("Approve "+row.subject, "", "Approval passphrase", []string{inputRow(&v.pendPass)}, "", v.err, from, wizKeys("approve"))
+	title := "Approve " + row.subject
+	if row.lease() {
+		title = "Lease " + row.subject + " for " + approvalcard.LeaseOptions()[v.pendLease].Label
+	}
+	return cardScreen(w, title, row.card(grantsOf(v.paths, row.subject)), []string{inputRow(&v.pendPass)}, v.err, from, wizKeys("approve"))
 }
 
 func (v *listView) updateActionMode(mm tea.KeyMsg) (tea.Model, tea.Cmd) {

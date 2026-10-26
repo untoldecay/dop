@@ -45,6 +45,7 @@ import (
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/approval"
+	"github.com/fray/dop/internal/approvalcard"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/printapproval"
@@ -56,10 +57,10 @@ import (
 type Kind string
 
 const (
-	KindUse        Kind = "print_use"         // `dop use` export line
-	KindTokenIssue Kind = "print_issue"       // `dop token issue` bearer + PIN
-	KindEnv        Kind = "print_env"         // `dop env` scoped exports
-	KindClaim      Kind = "print_claim"       // `dop claim` success export
+	KindUse        Kind = "print_use"   // `dop use` export line
+	KindTokenIssue Kind = "print_issue" // `dop token issue` bearer + PIN
+	KindEnv        Kind = "print_env"   // `dop env` scoped exports
+	KindClaim      Kind = "print_claim" // `dop claim` success export
 )
 
 // Request bundles everything the caller passes to Guard. All fields
@@ -221,8 +222,12 @@ func Guard(req Request) error {
 			"surface": string(req.Kind),
 		},
 	})
-	prompt := fmt.Sprintf("A dop process is about to print %q to stdout.\n\nSurface: %s\nSubject: %s\n\nType your approval passphrase to allow this one invocation.",
-		req.Subject, req.Kind, req.Subject)
+	card := approvalcard.Card{Kind: approvalcard.PrintKind(string(req.Kind)), Subject: req.Subject, Who: "dop " + shortCmd(req.Kind)}
+	prompt := card.Body()
+	if f := card.Footer(); f != "" {
+		prompt += "\n\n" + f
+	}
+	prompt += "\n\n" + approvalcard.Passphrase + " allows this one invocation:"
 	// rc5b — timeout is operator-configurable (15/30/60s) via the TUI
 	// settings view, stored in userprefs. Falls back to the 60s default
 	// when prefs are absent or carry an invalid value.

@@ -27,10 +27,6 @@ import (
 	"github.com/fray/dop/internal/userprefs"
 )
 
-// leaseDurations are what the operator can pick in the dialog, shortest
-// first; the CLI clamps to the bearer's cap.
-var leaseDurations = []string{"10m", "30m", "1h"}
-
 type approvalWatcher struct {
 	paths   *config.Paths
 	timeout time.Duration
@@ -38,6 +34,9 @@ type approvalWatcher struct {
 	pull   func()
 	prompt func(card approvalcard.Card, lease bool) (approvalprompt.Result, error)
 	run    func(args []string, stdin string) error
+	// touches names the grants of a subject (what the lease / claim
+	// reaches); nil or "" when the vault can't be read right now.
+	touches func(subject string) string
 	seen   map[string]bool      // settled: approved, or denied by the operator
 	asked  map[string]time.Time // last time the dialog was shown for an id
 	reask  time.Duration        // a dialog nobody answered comes back after this
@@ -57,11 +56,25 @@ func newApprovalWatcher(paths *config.Paths) *approvalWatcher {
 		if f := card.Footer(); f != "" {
 			body += "\n\n" + f
 		}
-		body += "\n\nApproval passphrase:"
+		body += "\n\n" + approvalcard.Passphrase + ":"
 		if lease {
-			return approvalprompt.AskLease(card.Title(), body, leaseDurations, card.Default, w.timeout)
+			return approvalprompt.AskLease(card.Title(), body, approvalcard.LeaseDurations, card.Default, w.timeout)
 		}
 		return approvalprompt.Ask(card.Title(), body, w.timeout)
+	}
+	w.touches = func(subject string) string {
+		client, err := requireAdminSession(paths)
+		if err != nil {
+			return ""
+		}
+		v, _, err := loadVaultViaDaemon(client, paths)
+		if err != nil {
+			return ""
+		}
+		if _, crec, err := findActiveCapBySubject(v, subject); err == nil {
+			return strings.Join(crec.Grants, ", ")
+		}
+		return ""
 	}
 	w.run = func(args []string, stdin string) error {
 		self, err := os.Executable()
@@ -122,7 +135,7 @@ func (w *approvalWatcher) scan() []pendingQuestion {
 				id:    "lease:" + id,
 				lease: true,
 				card: approvalcard.Card{Kind: approvalcard.KindLease, Subject: r.Subject, Who: who, Where: r.Host,
-					Expires: r.ExpiresAt, Options: leaseOptions(), Default: 0},
+					Touches: w.touchesOf(r.Subject), Expires: r.ExpiresAt, Options: approvalcard.LeaseOptions(), Default: 0},
 				args: func(choice string) []string {
 					return []string{"approve-remote", "--use", id, "--lease", choice, "--passphrase-stdin"}
 				},
@@ -138,7 +151,7 @@ func (w *approvalWatcher) scan() []pendingQuestion {
 			out = append(out, pendingQuestion{
 				id: "claim:" + c.LookupID,
 				card: approvalcard.Card{Kind: approvalcard.KindRemoteClaim, Subject: subject,
-					Who: "agent key " + c.EffectiveKeyType(), Where: c.Host, Expires: c.ExpiresAt},
+					Who: "agent key " + c.EffectiveKeyType(), Where: c.Host, Touches: w.touchesOf(subject), Expires: c.ExpiresAt},
 				args: func(string) []string {
 					return []string{"approve-remote", "--subject", subject, "--passphrase-stdin"}
 				},
@@ -148,13 +161,11 @@ func (w *approvalWatcher) scan() []pendingQuestion {
 	return out
 }
 
-func leaseOptions() []approvalcard.Option {
-	labels := map[string]string{"10m": "10 min", "30m": "30 min", "1h": "1 hour"}
-	var o []approvalcard.Option
-	for _, d := range leaseDurations {
-		o = append(o, approvalcard.Option{Label: labels[d], Value: d})
+func (w *approvalWatcher) touchesOf(subject string) string {
+	if w.touches == nil {
+		return ""
 	}
-	return o
+	return w.touches(subject)
 }
 
 // tick pulls, scans, and asks one open question at a time. A question
