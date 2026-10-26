@@ -209,6 +209,9 @@ func runIntegrationList(args []string) int {
 			if note == "" {
 				note = "read-only"
 			}
+			if t.Note != "" {
+				note += ") note: (" + t.Note
+			}
 			fmt.Printf("    token %s: (%s)\n", tn, note)
 		}
 	}
