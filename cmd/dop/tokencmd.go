@@ -1941,6 +1941,12 @@ func resolveGrantsToEnv(v *vault.Vault, grants []string) map[string]string {
 		prefix := g.EffectivePrefix()
 		out[prefix+"_TOKEN"] = tok.Value
 		out[prefix+"_KIND"] = vault.IntegrationKindOf(integ)
+		// v1.21 — the credential's scope note reaches the agent too, so
+		// the intended use limits travel with the key. A hint, like
+		// _ALLOWED: nothing enforces it.
+		if tok.ScopeNote != "" {
+			out[prefix+"_SCOPE_NOTE"] = tok.ScopeNote
+		}
 
 		// Promoted metadata keys: canonical uppercase env names per kind.
 		// Keys the operator ALSO put in metadata under these well-known
@@ -2055,7 +2061,10 @@ func promotedMetadataKeys() map[string]string {
 		"cli_args_hint": "ARGS_HINT",
 		"cli_auth_env":  "CLI_AUTH_ENV", // v1.13.0-rc17 — template, expanded + exported directly too
 		"cli_install":   "CLI_INSTALL",  // v1.13.0-rc17 — install hint
-		"cli_help":      "CLI_HELP",     // v1.13.0-rc17 — help-entry command
+		// v1.21 — pinned version or sha256 for the install hint, so an
+		// agent never runs "whatever is on main right now".
+		"cli_install_verify": "CLI_INSTALL_VERIFY",
+		"cli_help":           "CLI_HELP", // v1.13.0-rc17 — help-entry command
 		// mcp
 		"mcp_url": "MCP_URL",
 		"mcp_cmd": "MCP_CMD",

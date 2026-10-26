@@ -237,7 +237,7 @@ dop integration add --name <N> --token NAME=VALUE[:SCOPE_NOTE] [...]
 | Flag | Default | Description |
 |---|---|---|
 | `--name` | "" | Integration name (required). Normalized: `Notion` and `notion` collide to one key. |
-| `--token` | — | `NAME=VALUE:SCOPE_NOTE` (repeatable). Required on create, optional on update. |
+| `--token` | — | `NAME=VALUE:SCOPE_NOTE` (repeatable). Required on create, optional on update. The scope note reaches the agent as `<PREFIX>_SCOPE_NOTE`. |
 | `--description` | "" | Free-text description. |
 | `--base-url` | "" | Base URL for the service. |
 | `--metadata` | — | Extra `KEY=VALUE` (repeatable). |
@@ -249,6 +249,7 @@ dop integration add --name <N> --token NAME=VALUE[:SCOPE_NOTE] [...]
 | `--args-hint` | "" | cli — free-form usage snippet. |
 | `--cli-auth-env` | "" | cli — `KEY=VAL;KEY=VAL` template; substitutes `$TOKEN`, `$SERVER_ROOT`, `$BASE_URL`. |
 | `--cli-install` | "" | cli — install hint for the binary. |
+| `--cli-install-verify` | "" | cli — pinned version or `sha256:<hex>` the agent checks after installing (`<PREFIX>_CLI_INSTALL_VERIFY`). |
 | `--cli-help` | "" | cli — command the agent runs to self-discover the CLI. |
 | `--mcp-url` | "" | mcp — HTTP URL for the MCP server. |
 | `--mcp-cmd` | "" | mcp — stdio launcher command. |
@@ -593,7 +594,7 @@ dop claim --status [--json]
 
 | Flag | Default | Description |
 |---|---|---|
-| `--token-file` | "" | Read bearer from file. |
+| `--token-file` | "" | Read bearer from file: the bare bearer, or the JSON `dop use --token-file` writes (`{token, subject, expires_at}`). |
 | `--shell` | false | Also print `export DOP_TOKEN=...`. |
 | `--skip-approval` | false | Finalize without out-of-band approval. Unsafe for chat handoff. |
 | `--no-tunnel` | false | Serve the approval page on LAN only; bind to `0.0.0.0`. |
@@ -732,7 +733,7 @@ dop exec [--agent-name X] [--token-file PATH] [--inherit-env] [--no-pull] -- CMD
 | Flag | Default | Description |
 |---|---|---|
 | `--agent-name` | "" | Self-reported label for audit. Disambiguates when multiple agent keys are present. |
-| `--token-file` | "" | Read bearer from file. |
+| `--token-file` | "" | Read bearer from file: the bare bearer, or the JSON `dop use --token-file` writes (`{token, subject, expires_at}`). |
 | `--inherit-env` | false | Let the child see the parent's env. Default is clean-env (keeps only `PATH`, `HOME`, `USER`, `SHELL`, `TERM`, `LANG`). |
 | `--no-pull` | false | Skip the silent auto-pull. |
 | `--clean-env` | — | Deprecated no-op. |

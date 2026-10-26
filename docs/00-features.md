@@ -29,6 +29,7 @@ Every DOP feature as of **v1.13.0**, in one scannable table. Grouped by surface,
 | Integration kinds | Kind field (api / cli / mcp / other) | Each integration declares what it IS, so the agent env can be shaped for use not just discovery. | v1.13.0-rc13 |
 | Integration kinds | Canonical env promotion | Metadata keys get exported as typed env vars (`${PREFIX}_KIND`, `_BASE_URL`, `_CMD`, `_MCP_URL`, etc.). | v1.13.0-rc13 |
 | Integration kinds | Advanced hint fields | `server_root`, `allowed`, `auth_style`, `cli_install`, `cli_help` — all optional, promote to canonical env suffixes. | v1.13.0-rc17 |
+| Integration kinds | Scope note + install check for agents | `<PREFIX>_SCOPE_NOTE` carries the credential's scope note; `cli_install_verify` → `<PREFIX>_CLI_INSTALL_VERIFY` pins the version or sha256 an agent checks before trusting an install hint. | v1.21 |
 | Integration kinds | `cli_auth_env` template expansion | Template `KEY=$TOKEN;KEY=$SERVER_ROOT` is parsed + substituted + exported DIRECTLY so the CLI's own env names populate. | v1.13.0-rc17 |
 | Integration kinds | Safety blacklist | Refuses to export expanded keys like `PATH`, `LD_PRELOAD`, `DOP_TOKEN` even when template requests them. | v1.13.0-rc17 |
 | Integration kinds | Endpoints probe | Opt-in `--probe-endpoints` walks common OpenAPI paths (api) or `tools/list` (mcp), stamps the result in metadata. | v1.13.0-rc15 |

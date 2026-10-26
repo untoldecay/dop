@@ -159,11 +159,11 @@ func runUse(args []string) int {
 	// Default: stdout eval line. Optional: write to token file.
 	disk := false
 	if *tokenFile != "" {
-		if err := writeTokenFile(*tokenFile, bearer, subject); err != nil {
+		if err := writeTokenFile(*tokenFile, bearer, subject, crec.ExpiresAt); err != nil {
 			fmt.Fprintf(os.Stderr, "dop use: write token file: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "dop use: wrote %s (mode 0600, TTL %s)\n", *tokenFile, defaultTokenFileTTL)
+		fmt.Fprintf(os.Stderr, "dop use: wrote %s (mode 0600)\n", *tokenFile)
 		fmt.Fprintf(os.Stderr, "  Point the agent at it: export DOP_TOKEN_FILE=%s\n", *tokenFile)
 		disk = true
 	} else {
@@ -267,12 +267,18 @@ func checkCapabilityProtection(client *admin.Client, crec vault.Capability) erro
 // present. Callers (and other DOP commands reading DOP_TOKEN_FILE)
 // should refuse to use a file older than defaultTokenFileTTL from
 // its stored issued_at.
-func writeTokenFile(path, bearer, subject string) error {
+func writeTokenFile(path, bearer, subject string, expiresAt time.Time) error {
+	// expires_at is when the bearer itself dies (a lease: the duration
+	// the operator picked). Unknown → the file's own 24h TTL. rc3 wrote
+	// now+24h for a 10-minute lease.
+	if expiresAt.IsZero() || expiresAt.After(time.Now().Add(defaultTokenFileTTL)) {
+		expiresAt = time.Now().Add(defaultTokenFileTTL)
+	}
 	payload := map[string]string{
 		"token":      bearer,
 		"subject":    subject,
 		"issued_at":  time.Now().UTC().Format(time.RFC3339),
-		"expires_at": time.Now().Add(defaultTokenFileTTL).UTC().Format(time.RFC3339),
+		"expires_at": expiresAt.UTC().Format(time.RFC3339),
 	}
 	data, _ := json.MarshalIndent(payload, "", "  ")
 	data = append(data, '\n')

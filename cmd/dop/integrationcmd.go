@@ -677,6 +677,7 @@ func runIntegrationAdd(args []string) int {
 	allowed := fs.String("allowed", "", "any kind — scope allowlist hint (free-form string, e.g. `Agent_Collab,Skills_Registry`). Non-enforced; agents read to avoid 403-probing.")
 	authStyle := fs.String("auth-style", "", "api kind — auth-presentation hint, e.g. `bearer-header`, `basic`, `query-param`. Lets agents skip the auth-shape guess.")
 	cliInstall := fs.String("cli-install", "", "cli kind — install hint for the binary (free-form, e.g. `go install github.com/you/mycli/cmd/mycli@latest`).")
+	cliInstallVerify := fs.String("cli-install-verify", "", "cli kind — what the agent checks after installing: a pinned version (`v2.4.1`) or `sha256:<hex>` of the binary.")
 	cliHelp := fs.String("cli-help", "", "cli kind — command the agent can run to self-discover the CLI (e.g. `mycli --help`).")
 	_ = fs.Parse(args)
 
@@ -758,6 +759,9 @@ func runIntegrationAdd(args []string) int {
 	}
 	if *cliInstall != "" {
 		meta["cli_install"] = *cliInstall
+	}
+	if *cliInstallVerify != "" {
+		meta["cli_install_verify"] = *cliInstallVerify
 	}
 	if *cliHelp != "" {
 		meta["cli_help"] = *cliHelp

@@ -77,6 +77,14 @@ grep -q "reusing the lease" "$WORKROOT/reuse.err" || { cat "$WORKROOT/reuse.err"
 [[ "$(sed -n 's/^export DOP_TOKEN=//p' "$WORKROOT/reuse.out")" == "$LEASE" ]] || fail "reuse printed another bearer"
 a pull >/dev/null 2>&1; ls "$A_VAULT/pending-use"/*.json >/dev/null 2>&1 && fail "reuse staged a new request"
 pass "second use reuses the lease"
+TOKF="$WORKROOT/lease-token.json"
+b use cam-shell --remote --token-file "$TOKF" >/dev/null 2>"$WORKROOT/tokf.err" || { cat "$WORKROOT/tokf.err"; fail "use --token-file exited non-zero"; }
+out=$(HOME="$B" DOP_TOKEN_FILE="$TOKF" "$DOP" exec --agent-name buzz-reader -- sh -c 'env | rev' 2>"$WORKROOT/tokf-exec.err" | rev)
+echo "$out" | grep -q "N_TOKEN=ntn_leased_secret" || { cat "$WORKROOT/tokf-exec.err"; fail "exec ignores DOP_TOKEN_FILE written by dop use"; }
+EXP=$(sed -n 's/.*"expires_at": *"\([^"]*\)".*/\1/p' "$TOKF")
+EXP_S=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$EXP" +%s 2>/dev/null || date -u -d "$EXP" +%s)
+(( EXP_S - $(date +%s) <= 600 )) || fail "token file expires_at ($EXP) is beyond the 10m lease"
+pass "token file execs and expires with the lease"
 forget_lease() { find "$B" -type d -name leases -exec rm -rf {} + 2>/dev/null || true; }
 
 echo "=== [A3] a 1s lease expires"

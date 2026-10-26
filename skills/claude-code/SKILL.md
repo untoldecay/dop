@@ -99,9 +99,12 @@ dop exec --agent-name <specific-task-name> -- <your command>
 | Preview env var names the token injects | `dop whoami` (`dop env` is refused for claimed bearers) |
 | Run a command with scoped env | `dop exec --agent-name X -- CMD` |
 | Strip inherited env from the child | add `--clean-env` |
+| Read the limits the operator set | `<PREFIX>_SCOPE_NOTE` and `<PREFIX>_ALLOWED` inside the child: prose from the operator, follow it |
+| Install a CLI an integration points at | `<PREFIX>_CLI_INSTALL` is the hint; `<PREFIX>_CLI_INSTALL_VERIFY` is the version or `sha256:` to check after installing |
 
 ## Do NOT
 
+- Pipe a URL into `sh` because `<PREFIX>_CLI_INSTALL` says so when no `<PREFIX>_CLI_INSTALL_VERIFY` is set: that runs whatever is on the branch right now. Pin a version, or ask the operator for one. dop itself upgrades with `dop update`, which verifies checksums; never re-run its install script.
 - Request `DOP_TOKEN` or any bearer in chat. It stays in the shell env only.
 - Run `dop token issue` or `dop token revoke` unprompted. Both are admin ops.
 - Fall back to raw upstream env vars (e.g. `NOTION_TOKEN=...`) if `dop exec` fails. Report the error instead.
