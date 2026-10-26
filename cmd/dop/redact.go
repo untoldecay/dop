@@ -10,7 +10,11 @@ import (
 
 // redactMetaSuffixes are injected env names that carry hints, not
 // secrets (integration kind, URLs, CLI usage) — left readable.
-var redactMetaSuffixes = []string{"_KIND", "_BASE_URL", "_MCP_URL", "_URL", "_CMD", "_HINT", "_HELP", "_ARGS_HINT", "_INSTALL", "_AUTH_STYLE", "_AUTH_HEADER", "_ENDPOINTS_URL", "_ALLOWED"}
+//
+// rc7: the operator's notes were missing here, so "read-only" came out
+// as ‹X_SCOPE_NOTE› in the child's output — and two credentials with
+// the same note shared one label, which read as a note on the wrong key.
+var redactMetaSuffixes = []string{"_KIND", "_BASE_URL", "_MCP_URL", "_URL", "_CMD", "_HINT", "_HELP", "_ARGS_HINT", "_INSTALL", "_INSTALL_VERIFY", "_AUTH_STYLE", "_AUTH_HEADER", "_ENDPOINTS_URL", "_ALLOWED", "_SCOPE_NOTE", "_NOTE", "_SERVER_ROOT"}
 
 // redactMinLen skips short values: too likely to match ordinary output.
 const redactMinLen = 8

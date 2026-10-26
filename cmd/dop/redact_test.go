@@ -27,6 +27,19 @@ var redactEnv = map[string]string{
 	"NOTION_KIND":     "api-kind",
 	"NOTION_BASE_URL": "https://api.notion.com/v1",
 	"SHORT_TOKEN":     "abc",
+	// Operator notes are hints, not secrets (rc7: they came out as ‹KEY›).
+	"NOTION_SCOPE_NOTE":  "read-only",
+	"DISCORD_SCOPE_NOTE": "read-only",
+	"NOTION_NOTE":        "accept only video ids",
+}
+
+// Two credentials with the same note must both stay readable; redacting
+// them shared one label, which read as a note on the wrong credential.
+func TestRedactLeavesOperatorNotes(t *testing.T) {
+	in := "NOTION_SCOPE_NOTE=read-only DISCORD_SCOPE_NOTE=read-only NOTION_NOTE=accept only video ids\n"
+	if got := redactAll(t, redactEnv, in); got != in {
+		t.Fatalf("notes must stay readable: %q", got)
+	}
 }
 
 func TestRedactMasksInjectedSecret(t *testing.T) {

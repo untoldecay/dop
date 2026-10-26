@@ -184,7 +184,8 @@ func readLeaseCache(paths *config.Paths, subject string) (leaseCache, bool) {
 	if err != nil || json.Unmarshal(blob, &c) != nil || c.Token == "" {
 		return c, false
 	}
-	if time.Until(c.ExpiresAt) < 30*time.Second {
+	// Not worth reusing when the agent's command would outlive it.
+	if time.Until(c.ExpiresAt) < 2*time.Minute {
 		_ = os.Remove(leaseCachePath(paths, subject))
 		return c, false
 	}
