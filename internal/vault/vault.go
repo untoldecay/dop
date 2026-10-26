@@ -437,6 +437,17 @@ type Capability struct {
 	Signature       string `yaml:"signature"`
 }
 
+// Expired is an active record whose expiry has passed: nothing revoked
+// it, but no bearer can use it any more. Lease bearers (`dop use
+// --remote`) end this way by design; the record stays for the audit
+// trail and `dop token prune`.
+func (c Capability) Expired() bool {
+	return c.Status == "active" && !c.ExpiresAt.IsZero() && time.Now().After(c.ExpiresAt)
+}
+
+// Live is what the Active bearer list shows: active and not expired.
+func (c Capability) Live() bool { return c.Status == "active" && !c.Expired() }
+
 // TouchedAt is the time a record ages from for dop token prune: RevokedAt
 // for a revoked record, the rotation seal (BearerWrapped.SealedAt) for a
 // rotated one. Records without those (revoked before RevokedAt existed)
@@ -444,6 +455,9 @@ type Capability struct {
 func (c Capability) TouchedAt() time.Time {
 	if c.Status == "revoked" && !c.RevokedAt.IsZero() {
 		return c.RevokedAt
+	}
+	if c.Expired() {
+		return c.ExpiresAt
 	}
 	if c.Status == "rotated" && c.BearerWrapped != nil && !c.BearerWrapped.SealedAt.IsZero() {
 		return c.BearerWrapped.SealedAt

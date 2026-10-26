@@ -469,6 +469,8 @@ dop token list [--all]
 |---|---|---|
 | `--all` | false | Include revoked capabilities. |
 
+An active bearer whose expiry has passed (a lease from `dop use --remote`, a short `--expires` bearer) is shown as `expired`, hidden without `--all`, left out of the TUI Active tab (it sits under Revoked), and pruned by `dop token prune` once older than the cutoff.
+
 ### `dop token show`
 
 Detail view for one token.

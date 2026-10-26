@@ -671,19 +671,23 @@ func runTokenList(args []string) int {
 	shown, hidden := 0, 0
 	for _, id := range names {
 		c := v.Capabilities[id]
-		if !*all && c.Status != capability.RecordStatusActive {
+		if !*all && !c.Live() {
 			hidden++
 			continue
 		}
+		status := c.Status
+		if c.Expired() {
+			status = "expired"
+		}
 		fmt.Printf("- %s  subject=%s  grants=%v  gen=%d  status=%s  expires=%s\n",
-			id[:12], c.Subject, c.Grants, c.Generation, c.Status,
+			id[:12], c.Subject, c.Grants, c.Generation, status,
 			tokenExpiryDisplay(c.ExpiresAt))
 		shown++
 	}
 	if shown == 0 && hidden > 0 {
-		fmt.Printf("(no active capabilities; %d revoked hidden — use --all to include)\n", hidden)
+		fmt.Printf("(no active capabilities; %d revoked or expired hidden — use --all to include)\n", hidden)
 	} else if hidden > 0 {
-		fmt.Printf("\n(%d revoked hidden — use --all to include)\n", hidden)
+		fmt.Printf("\n(%d revoked or expired hidden — use --all to include)\n", hidden)
 	}
 	return 0
 }
@@ -785,7 +789,7 @@ func runTokenPrune(args []string) int {
 	now := time.Now()
 	var ids []string
 	for id, c := range v.Capabilities {
-		if (c.Status == capability.RecordStatusRevoked || c.Status == capability.RecordStatusRotated) &&
+		if (c.Status == capability.RecordStatusRevoked || c.Status == capability.RecordStatusRotated || c.Expired()) &&
 			now.Sub(c.TouchedAt()) > cutoff {
 			ids = append(ids, id)
 		}
