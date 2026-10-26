@@ -1951,6 +1951,9 @@ func resolveGrantsToEnv(v *vault.Vault, grants []string) map[string]string {
 		if tok.ScopeNote != "" {
 			out[prefix+"_SCOPE_NOTE"] = tok.ScopeNote
 		}
+		if tok.Note != "" {
+			out[prefix+"_NOTE"] = tok.Note // free context from the operator
+		}
 
 		// Promoted metadata keys: canonical uppercase env names per kind.
 		// Keys the operator ALSO put in metadata under these well-known

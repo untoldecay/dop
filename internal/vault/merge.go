@@ -355,7 +355,7 @@ func equalIntegration(a, b Integration) bool {
 	}
 	for k, v := range a.Tokens {
 		w, ok := b.Tokens[k]
-		if !ok || v.Value != w.Value || v.ScopeNote != w.ScopeNote {
+		if !ok || v.Value != w.Value || v.ScopeNote != w.ScopeNote || v.Note != w.Note {
 			return false
 		}
 	}

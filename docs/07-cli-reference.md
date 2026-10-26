@@ -314,11 +314,11 @@ dop integration remove-token --name <N> --token <T> [--token <T2>...]
 
 ### `dop integration set-token`
 
-Rotate a token's value and/or edit its scope note. At least one of `--value`, `--value-stdin`, `--scope-note` is required.
+Rotate a token's value, edit its scope note (the level: read-only, read-write, admin, or your own words) and/or its note for agents (free context such as "accept only video ids"). At least one of `--value`, `--value-stdin`, `--scope-note`, `--note` is required.
 
 ```
 dop integration set-token --name <N> --token-name <T>
-  [--value <V>|--value-stdin] [--scope-note <S>]
+  [--value <V>|--value-stdin] [--scope-note <S>] [--note <text>]
 ```
 
 | Flag | Default | Description |
@@ -327,7 +327,8 @@ dop integration set-token --name <N> --token-name <T>
 | `--token-name` | "" | Upstream token (required). |
 | `--value` | "" | New value. |
 | `--value-stdin` | false | Read value from stdin (keeps secrets off the command line). |
-| `--scope-note` | "" | New scope note. |
+| `--scope-note` | "" | New scope note (level). Reaches the agent as `<PREFIX>_SCOPE_NOTE`. |
+| `--note` | — | Note for agents: free context the agent reads next to the key, as `<PREFIX>_NOTE`. Pass `""` to clear. TUI: credential → `t`. |
 
 P-256 bearers see the new value on next `dop exec`. ed25519 bearers need `dop token reseal <subject>`.
 
