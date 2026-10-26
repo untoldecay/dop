@@ -303,7 +303,7 @@ func integrationEqual(a, b vault.Integration) bool {
 	}
 	for k, v := range a.Tokens {
 		bt, ok := b.Tokens[k]
-		if !ok || bt.Value != v.Value || bt.ScopeNote != v.ScopeNote {
+		if !ok || bt.Value != v.Value || bt.ScopeNote != v.ScopeNote || bt.Note != v.Note {
 			return false
 		}
 	}

@@ -234,7 +234,10 @@ func (v *Vault) FindIntegrationKey(name string) (string, bool) {
 
 type Token struct {
 	Value     string `yaml:"value"`
-	ScopeNote string `yaml:"scope_note,omitempty"`
+	ScopeNote string `yaml:"scope_note,omitempty"` // level: read-only / read-write / admin / free
+	// Note is free context for the agent that gets this credential
+	// ("accept only video ids"), distinct from the level above. v1.21.
+	Note string `yaml:"note,omitempty"`
 }
 
 // Grant maps a scope label to (integration, upstream-token, env prefix).

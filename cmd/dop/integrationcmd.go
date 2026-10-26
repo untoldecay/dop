@@ -480,6 +480,7 @@ func runIntegrationSetToken(args []string) int {
 	tokenName := fs.String("token-name", "", "upstream token to mutate (required)")
 	newValue := fs.String("value", "", "new value for the token (rotate). omit to leave unchanged.")
 	newScope := fs.String("scope-note", "", "new scope note for the token. omit to leave unchanged.")
+	newNote := fs.String("note", "", "free context for the agent that gets this credential (e.g. \"accept only video ids\"); reaches it as <PREFIX>_NOTE. omit to leave unchanged, pass \"\" to clear.")
 	valueStdin := fs.Bool("value-stdin", false, "read the new value from stdin instead of --value (used by TUI + scripts to keep secrets off the command line)")
 	_ = fs.Parse(args)
 
@@ -489,8 +490,9 @@ func runIntegrationSetToken(args []string) int {
 	}
 	rotating := *newValue != "" || *valueStdin
 	editingScope := fs.Lookup("scope-note").Value.String() != "" || hasFlagExplicit(fs, "scope-note")
-	if !rotating && !editingScope {
-		fmt.Fprintln(os.Stderr, "dop integration set-token: supply at least one of --value / --value-stdin / --scope-note")
+	editingNote := hasFlagExplicit(fs, "note")
+	if !rotating && !editingScope && !editingNote {
+		fmt.Fprintln(os.Stderr, "dop integration set-token: supply at least one of --value / --value-stdin / --scope-note / --note")
 		return 2
 	}
 
@@ -551,8 +553,12 @@ func runIntegrationSetToken(args []string) int {
 		}
 		tok.ScopeNote = *newScope
 	}
-	if !rotated && !scopeChanged {
-		fmt.Fprintln(os.Stderr, "dop integration set-token: nothing to change (value + scope unchanged)")
+	noteChanged := editingNote && *newNote != tok.Note
+	if noteChanged {
+		tok.Note = *newNote
+	}
+	if !rotated && !scopeChanged && !noteChanged {
+		fmt.Fprintln(os.Stderr, "dop integration set-token: nothing to change (value, scope and note unchanged)")
 		return 0
 	}
 	integ.Tokens[*tokenName] = tok
@@ -580,6 +586,9 @@ func runIntegrationSetToken(args []string) int {
 	}
 	if scopeChanged {
 		parts = append(parts, fmt.Sprintf("scope %q", tok.ScopeNote))
+	}
+	if noteChanged {
+		parts = append(parts, fmt.Sprintf("note %q", tok.Note))
 	}
 	fmt.Fprintf(os.Stderr, "dop integration set-token: %s/%s → %s\n", key, *tokenName, strings.Join(parts, ", "))
 	fmt.Fprintln(os.Stderr, "  bearers currently holding this token see the new value on their NEXT exec (direct availability) — or after `dop token reseal <subject>` for ed25519-bound bearers.")

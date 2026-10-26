@@ -42,6 +42,7 @@ const (
 	integModeIntEdit            = 9
 	integModeIntReview          = 10
 	integModeTokenRename        = 11
+	integModeTokenEditNote      = 12 // v1.21 — free context for the agent
 )
 
 type integrationListView struct {
@@ -153,7 +154,8 @@ var integInfoActions = []listAction{
 }
 
 var credActions = []listAction{
-	{label: "Edit scope note", key: "s", desc: "the note that says what this credential can do"},
+	{label: "Edit scope note", key: "s", desc: "the level: read-only, read-write, admin, or your own words"},
+	{label: "Note for agents", key: "t", desc: "free context the agent gets with the key, e.g. \"accept only video ids\""},
 	{label: "Rotate value", key: "o", desc: "replace the upstream secret with a new value"},
 	{label: "Rename", key: "n", desc: "a new name; the grants that use it follow"},
 	{label: "Remove credential", key: "x", desc: "removes it and the grants that use it"},
@@ -257,6 +259,8 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateTokenAction(mm)
 		case integModeTokenEditScope:
 			return v.updateTokenEditScope(mm)
+		case integModeTokenEditNote:
+			return v.updateTokenEditNote(mm)
 		case integModeTokenRotate:
 			return v.updateTokenRotate(mm)
 		case integModeTokenRemoveConfirm:
@@ -509,6 +513,8 @@ func (v *integrationListView) View() string {
 		return v.viewDone(width, height)
 	case integModeTokenEditScope:
 		return v.viewTokenEditScope(width, height)
+	case integModeTokenEditNote:
+		return v.viewTokenEditNote(width, height)
 	case integModeTokenRotate:
 		return v.viewTokenRotate(width, height)
 	case integModeTokenRemoveConfirm:
@@ -643,10 +649,13 @@ func (v *integrationListView) viewDetail(width, height int) string {
 			break
 		}
 		acting := v.mode == integModeTokenAction
-		body = []string{"  " + mutedSt.Render(padTrunc("name", 24)+"  "+padTrunc("value", 14)+"  scope note")}
+		body = []string{"  " + mutedSt.Render(padTrunc("name", 24)+"  "+padTrunc("value", 14)+"  scope note · note")}
 		for i, tn := range v.tokenNames {
 			t := it.Tokens[tn]
 			cells, note := padTrunc(tn, 24)+"  "+padTrunc(maskLen(t.Value), 14), "  "+t.ScopeNote
+			if t.Note != "" {
+				note += " · " + t.Note
+			}
 			switch {
 			case i == v.tokenCursor && !acting:
 				body = append(body, focusSt.Render("› "+cells+note))
@@ -716,7 +725,7 @@ func (v *integrationListView) viewConfirm(width, height int) string {
 // (the subprocess can't be cancelled).
 func (v *integrationListView) viewRun(width, height int) string {
 	what := v.selectedTokenName()
-	verb := map[string]string{"remove": "Removing %s…", "scope": "Saving the scope note of %s…",
+	verb := map[string]string{"remove": "Removing %s…", "scope": "Saving the scope note of %s…", "note": "Saving the note of %s…",
 		"rotate": "Rotating %s…", "remove-cred": "Removing %s…"}[v.pending]
 	if v.pending == "remove" {
 		what = v.selectedName()
@@ -1178,6 +1187,10 @@ func (v *integrationListView) runTokenAction(a listAction) (tea.Model, tea.Cmd) 
 		}
 		v.tokenScopeMode = true
 		v.mode = integModeTokenEditScope
+	case "t":
+		v.tokenEditBuf.Reset()
+		v.tokenEditBuf.WriteString(v.items[v.selectedName()].Tokens[tokenName].Note)
+		v.mode = integModeTokenEditNote
 	case "o":
 		v.tokenEditBuf.Reset()
 		v.mode = integModeTokenRotate
@@ -1358,6 +1371,55 @@ func (v *integrationListView) doTokenSetScope() tea.Cmd {
 	}
 }
 
+// updateTokenEditNote: one free-text line; enter saves, esc goes back.
+func (v *integrationListView) updateTokenEditNote(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	v.err = ""
+	switch mm.String() {
+	case "esc":
+		v.mode = integModeTokenAction
+	case "enter":
+		return v.startRun("note", integModeTokenEditNote, v.doTokenSetNote())
+	case "backspace":
+		s := v.tokenEditBuf.String()
+		if len(s) > 0 {
+			v.tokenEditBuf.Reset()
+			v.tokenEditBuf.WriteString(s[:len(s)-1])
+		}
+	default:
+		if len(mm.Runes) > 0 {
+			v.tokenEditBuf.WriteString(string(mm.Runes))
+		}
+	}
+	return v, nil
+}
+
+func (v *integrationListView) viewTokenEditNote(width, height int) string {
+	body := []string{formRow(true, "note", v.tokenEditBuf.String(), ""),
+		mutedSt.Render("  Free context the agent reads next to the key (" + strings.ToUpper(strings.ReplaceAll(v.selectedName(), "-", "_")) + "_…_NOTE). Empty clears it.")}
+	foot := footer(width, hint("enter", "save"), keyBack)
+	return frame(width, height, "Note for agents on "+v.selectedTokenName(), nil, v.selectedName(), body, status{err: v.err}.String(), foot)
+}
+
+func (v *integrationListView) doTokenSetNote() tea.Cmd {
+	integ := v.selectedName()
+	tok := v.selectedTokenName()
+	note := v.tokenEditBuf.String()
+	return func() tea.Msg {
+		self, _ := os.Executable()
+		cmd := exec.Command(self, "integration", "set-token",
+			"--name", integ,
+			"--token-name", tok,
+			"--note", note)
+		cmd.Env = append(os.Environ(), "DOP_NO_TUI=1", "DOP_FROM_TUI=1")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return integActionMsg{err: strings.TrimSpace(stderr.String())}
+		}
+		return integActionMsg{}
+	}
+}
+
 func (v *integrationListView) doTokenRotate() tea.Cmd {
 	integ := v.selectedName()
 	tok := v.selectedTokenName()
@@ -1508,7 +1570,7 @@ func (v *integrationListView) viewTokenRotate(width, height int) string {
 func (v *integrationListView) viewTokenRemoveConfirm(width, height int) string {
 	name, tn := v.selectedName(), v.selectedTokenName()
 	body := strings.Split(kv([2]string{"integration", name},
-		[2]string{"scope note", v.items[name].Tokens[tn].ScopeNote}), "\n")
+		[2]string{"scope note", v.items[name].Tokens[tn].ScopeNote}, [2]string{"note", v.items[name].Tokens[tn].Note}), "\n")
 	var refs []string
 	for _, gid := range v.referrers(name) {
 		if v.grants[gid].Token == tn {
