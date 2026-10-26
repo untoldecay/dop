@@ -493,7 +493,7 @@ func runAdminSessionDaemon(args []string) int {
 	}
 	// v1.21 — remote claims and lease requests arrive through the vault
 	// repo; put up the native dialog for them while the session lives.
-	s.SetWatcherState(startApprovalWatcher(paths))
+	s.SetWatcherState(startApprovalWatcher(paths, s.SetWatcherState))
 	// An upgrade replaces the binary under a running daemon; the old
 	// code would keep serving (and miss daemon-side features) until the
 	// TTL. End the session instead: the next dop command asks to unlock
