@@ -845,6 +845,7 @@ var advFieldSpecs = []advFieldSpec{
 	{"allowed scope hint", "Agent_Collab,Skills_Registry", "--allowed", "allowed", nil},
 	{"auth style", "bearer-header, basic, query-param", "--auth-style", "auth_style", []string{"cli", "mcp", "other"}},
 	{"install hint", "go install example.com/mycli@latest", "--cli-install", "cli_install", []string{"api", "mcp", "other"}},
+	{"install check", "v2.4.1 or sha256:<hex> of the binary", "--cli-install-verify", "cli_install_verify", []string{"api", "mcp", "other"}},
 	{"help entry", "mycli --help", "--cli-help", "cli_help", []string{"api", "mcp", "other"}},
 	{"endpoints URL", "https://api.example.com/openapi.json", "--endpoints-url", "endpoints_url", []string{"cli", "mcp", "other"}},
 	{"auth header", "Bearer", "--auth-header", "auth_header", []string{"cli", "mcp", "other"}},

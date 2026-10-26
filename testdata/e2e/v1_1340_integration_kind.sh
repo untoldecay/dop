@@ -57,6 +57,7 @@ echo "=== [3] cli kind — CMD + ARGS_HINT (no BASE_URL)"
 "$DOP" integration add --kind cli --name boiler-cli \
     --token api=cli_val:read-only \
     --cmd boiler \
+    --cli-install "go install example.com/boiler@latest" --cli-install-verify "v2.4.1" \
     --args-hint "boiler query --json" >/dev/null 2>&1 || fail "cli create failed"
 "$DOP" grant add --id boiler-cli.api --integration boiler-cli --token api >/dev/null 2>&1
 OUT=$("$DOP" token issue --grants boiler-cli.api --name test-cli 2>&1)
@@ -67,6 +68,8 @@ ENV_CLI=$(DOP_TOKEN="$B2" "$DOP" env 2>&1)
 echo "$ENV_CLI" | grep -q "BOILER_CLI_API_KIND='cli'" || fail "cli KIND missing: $ENV_CLI"
 echo "$ENV_CLI" | grep -q "BOILER_CLI_API_CMD='boiler'" || fail "cli CMD missing: $ENV_CLI"
 echo "$ENV_CLI" | grep -q "BOILER_CLI_API_ARGS_HINT='boiler query --json'" || fail "cli ARGS_HINT missing: $ENV_CLI"
+echo "$ENV_CLI" | grep -q "BOILER_CLI_API_SCOPE_NOTE='read-only'" || fail "cli SCOPE_NOTE missing (v1.21): $ENV_CLI"
+echo "$ENV_CLI" | grep -q "BOILER_CLI_API_CLI_INSTALL_VERIFY='v2.4.1'" || fail "cli CLI_INSTALL_VERIFY missing (v1.21): $ENV_CLI"
 if echo "$ENV_CLI" | grep -q "BOILER_CLI_API_BASE_URL"; then fail "cli should not expose BASE_URL: $ENV_CLI"; fi
 pass "cli env bundle correct"
 
