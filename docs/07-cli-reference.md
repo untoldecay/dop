@@ -574,7 +574,7 @@ dop claim --status [--json]
 
 | Flag | Default | Description |
 |---|---|---|
-| `--token-file` | "" | Read bearer from file. |
+| `--token-file` | "" | Read bearer from file: the bare bearer, or the JSON `dop use --token-file` writes (`{token, subject, expires_at}`). |
 | `--shell` | false | Also print `export DOP_TOKEN=...`. |
 | `--skip-approval` | false | Finalize without out-of-band approval. Unsafe for chat handoff. |
 | `--no-tunnel` | false | Serve the approval page on LAN only; bind to `0.0.0.0`. |
@@ -713,7 +713,7 @@ dop exec [--agent-name X] [--token-file PATH] [--inherit-env] [--no-pull] -- CMD
 | Flag | Default | Description |
 |---|---|---|
 | `--agent-name` | "" | Self-reported label for audit. Disambiguates when multiple agent keys are present. |
-| `--token-file` | "" | Read bearer from file. |
+| `--token-file` | "" | Read bearer from file: the bare bearer, or the JSON `dop use --token-file` writes (`{token, subject, expires_at}`). |
 | `--inherit-env` | false | Let the child see the parent's env. Default is clean-env (keeps only `PATH`, `HOME`, `USER`, `SHELL`, `TERM`, `LANG`). |
 | `--no-pull` | false | Skip the silent auto-pull. |
 | `--clean-env` | — | Deprecated no-op. |

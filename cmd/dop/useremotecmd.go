@@ -36,7 +36,7 @@ func runUseRemote(paths *config.Paths, subject, agentName, tokenFile string) int
 	if c, ok := readLeaseCache(paths, subject); ok {
 		fmt.Fprintf(os.Stderr, "dop use: reusing the lease of %s granted earlier (as %s, expires %s). It asks again when it ends.\n",
 			subject, c.LeaseSubject, c.ExpiresAt.Local().Format("15:04"))
-		return emitLease(c.Token, c.LeaseSubject, tokenFile)
+		return emitLease(c.Token, c.LeaseSubject, tokenFile, c.ExpiresAt)
 	}
 	ident, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -139,16 +139,16 @@ func runUseRemote(paths *config.Paths, subject, agentName, tokenFile string) int
 		fmt.Fprintf(os.Stderr, "dop use --remote: lease granted as %s, expires %s (%s). When it expires, ask again.\n",
 			lease.LeaseSubject, lease.ExpiresAt.Local().Format("15:04"), time.Until(lease.ExpiresAt).Round(time.Minute))
 		writeLeaseCache(paths, subject, leaseCache{Token: bearer, LeaseSubject: lease.LeaseSubject, ExpiresAt: lease.ExpiresAt})
-		return emitLease(bearer, lease.LeaseSubject, tokenFile)
+		return emitLease(bearer, lease.LeaseSubject, tokenFile, lease.ExpiresAt)
 	}
 }
 
 // emitLease hands the bearer to the caller: a token file, or the export
 // line. The operator approved this exact print on their machine; no
 // local guard (there is no admin daemon here to ask).
-func emitLease(bearer, leaseSubject, tokenFile string) int {
+func emitLease(bearer, leaseSubject, tokenFile string, expiresAt time.Time) int {
 	if tokenFile != "" {
-		if err := writeTokenFile(tokenFile, bearer, leaseSubject); err != nil {
+		if err := writeTokenFile(tokenFile, bearer, leaseSubject, expiresAt); err != nil {
 			fmt.Fprintf(os.Stderr, "dop use --remote: write token file: %v\n", err)
 			return 1
 		}

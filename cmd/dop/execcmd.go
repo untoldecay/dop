@@ -423,7 +423,24 @@ func readTokenFile(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read token file %q: %w", path, err)
 	}
-	return strings.TrimSpace(string(b)), nil
+	return bearerFromFileBytes(b), nil
+}
+
+// bearerFromFileBytes accepts both token-file shapes: the bare bearer
+// (dop claim --token-file, rotation rewrites) and the JSON document
+// `dop use --token-file` writes ({token, subject, expires_at}). rc3:
+// exec read the JSON as the bearer and answered "unknown bearer".
+func bearerFromFileBytes(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if strings.HasPrefix(s, "{") {
+		var doc struct {
+			Token string `json:"token"`
+		}
+		if json.Unmarshal([]byte(s), &doc) == nil && doc.Token != "" {
+			return strings.TrimSpace(doc.Token)
+		}
+	}
+	return s
 }
 
 // resolveResult carries the metadata we surface alongside the env map.

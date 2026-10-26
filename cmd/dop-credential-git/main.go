@@ -30,6 +30,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -137,7 +138,16 @@ func readBearer() string {
 	}
 	if p := os.Getenv("DOP_TOKEN_FILE"); p != "" {
 		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
+			s := strings.TrimSpace(string(b))
+			if strings.HasPrefix(s, "{") { // the JSON `dop use --token-file` writes
+				var doc struct {
+					Token string `json:"token"`
+				}
+				if json.Unmarshal([]byte(s), &doc) == nil && doc.Token != "" {
+					return doc.Token
+				}
+			}
+			return s
 		}
 	}
 	return ""
