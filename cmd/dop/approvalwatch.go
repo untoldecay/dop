@@ -20,6 +20,7 @@ import (
 
 	"github.com/fray/dop/internal/approvalcard"
 	"github.com/fray/dop/internal/approvalprompt"
+	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/remoteclaim"
 	"github.com/fray/dop/internal/remoteuse"
@@ -37,11 +38,19 @@ type approvalWatcher struct {
 	pull   func()
 	prompt func(card approvalcard.Card, lease bool) (approvalprompt.Result, error)
 	run    func(args []string, stdin string) error
-	seen   map[string]bool // request / claim ids already asked
+	seen   map[string]bool      // settled: approved, or denied by the operator
+	asked  map[string]time.Time // last time the dialog was shown for an id
+	reask  time.Duration        // a dialog nobody answered comes back after this
+	report func(string)         // what `dop admin status` shows for the watcher
+	tally  struct {
+		asked int
+		last  string
+	}
 }
 
 func newApprovalWatcher(paths *config.Paths) *approvalWatcher {
-	w := &approvalWatcher{paths: paths, timeout: userprefs.Load(paths).ApprovalTimeout(), seen: map[string]bool{}}
+	w := &approvalWatcher{paths: paths, timeout: userprefs.Load(paths).ApprovalTimeout(), seen: map[string]bool{},
+		reask: envDuration("DOP_WATCH_REASK", 3*time.Minute)}
 	w.pull = func() { _ = autoPullAndMerge(paths) }
 	w.prompt = func(card approvalcard.Card, lease bool) (approvalprompt.Result, error) {
 		body := card.Body()
@@ -148,27 +157,70 @@ func leaseOptions() []approvalcard.Option {
 	return o
 }
 
-// tick pulls, scans, and asks one unseen question at a time.
+// tick pulls, scans, and asks one open question at a time. A question
+// the operator denied is settled; one nobody answered (timeout, Escape)
+// comes back after `reask` while the request lives — rc3: a dialog that
+// closed on its 60 s timeout while the operator was away never returned,
+// and the request sat in the TUI only.
 func (w *approvalWatcher) tick() {
 	w.pull()
-	for _, q := range w.scan() {
+	if w.asked == nil {
+		w.asked = map[string]time.Time{}
+	}
+	qs := w.scan()
+	defer w.status(len(qs))
+	for _, q := range qs {
 		if w.seen[q.id] {
 			continue
 		}
-		w.seen[q.id] = true
+		if t, ok := w.asked[q.id]; ok && time.Since(t) < w.reask {
+			continue
+		}
+		w.asked[q.id] = time.Now()
+		w.tally.asked++
 		res, err := w.prompt(q.card, q.lease)
 		if err != nil {
+			w.note(q, "no dialog: "+err.Error())
 			return // no GUI right now; the TUI still has it
 		}
-		if !res.Approved {
-			continue // deny / escape / timeout: leave it pending, ask once
+		switch {
+		case res.Denied:
+			w.seen[q.id] = true
+			w.note(q, "denied")
+			continue
+		case !res.Approved:
+			w.note(q, "unanswered") // timeout / Escape: back after reask
+			continue
 		}
 		pass := res.Passphrase
 		res.Passphrase = ""
 		if err := w.run(q.args(res.Choice), pass); err != nil {
 			// Wrong passphrase or a transient failure: ask again next tick.
-			delete(w.seen, q.id)
+			delete(w.asked, q.id)
+			w.note(q, "approve failed: "+err.Error())
+		} else {
+			w.seen[q.id] = true
+			w.note(q, "approved "+res.Choice)
 		}
 		return // one dialog per tick keeps the screen calm
 	}
+}
+
+// note records one dialog outcome in the audit log (`dop watch --filter
+// approval_dialog`) and in the status line. Never the passphrase.
+func (w *approvalWatcher) note(q pendingQuestion, result string) {
+	w.tally.last = fmt.Sprintf("%s %s → %s at %s", q.card.Kind, q.card.Subject, result, time.Now().Format("15:04:05"))
+	audit.Append(w.paths, audit.Event{Kind: "approval_dialog", Subject: q.card.Subject, Host: q.card.Where,
+		Extra: map[string]string{"id": q.id, "result": result}})
+}
+
+func (w *approvalWatcher) status(pending int) {
+	if w.report == nil {
+		return
+	}
+	s := fmt.Sprintf("on · checked %s · %d pending · %d dialog(s) shown", time.Now().Format("15:04:05"), pending, w.tally.asked)
+	if w.tally.last != "" {
+		s += " · last: " + w.tally.last
+	}
+	w.report(s)
 }

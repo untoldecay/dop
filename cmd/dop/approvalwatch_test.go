@@ -30,7 +30,7 @@ func TestApprovalWatcherLeaseFlow(t *testing.T) {
 	var prompted []approvalcard.Card
 	var ran [][]string
 	var stdins []string
-	w := &approvalWatcher{paths: paths, seen: map[string]bool{}, pull: func() {}}
+	w := &approvalWatcher{paths: paths, seen: map[string]bool{}, pull: func() {}, reask: time.Hour}
 	w.prompt = func(c approvalcard.Card, lease bool) (approvalprompt.Result, error) {
 		prompted = append(prompted, c)
 		if !lease {
@@ -77,6 +77,23 @@ func TestApprovalWatcherLeaseFlow(t *testing.T) {
 	w.tick()
 	if len(prompted) != 3 || len(ran) != 2 {
 		t.Fatalf("denied should be asked once and never run: prompted=%d ran=%d", len(prompted), len(ran))
+	}
+	// Unanswered (timeout / Escape) comes back once the cooldown passed.
+	must(remoteuse.WriteRequest(paths, remoteuse.Request{RequestID: "dddd4444", Subject: "away", Host: "vps",
+		Recipient: "age1x", RequestedAt: time.Now(), ExpiresAt: time.Now().Add(remoteuse.TTL), Nonce: "n"}))
+	w.prompt = func(c approvalcard.Card, lease bool) (approvalprompt.Result, error) {
+		prompted = append(prompted, c)
+		return approvalprompt.Result{Timeout: true}, nil
+	}
+	w.tick()
+	w.tick()
+	if len(prompted) != 4 {
+		t.Fatalf("unanswered should wait for the cooldown: prompted=%d", len(prompted))
+	}
+	w.reask = 0
+	w.tick()
+	if len(prompted) != 5 || prompted[4].Subject != "away" {
+		t.Fatalf("unanswered should be asked again after the cooldown: prompted=%d", len(prompted))
 	}
 	// The expired request never reached the dialog.
 	for _, c := range prompted {
