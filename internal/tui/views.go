@@ -1083,7 +1083,7 @@ func (v *listView) visible() []int {
 		return out
 	}
 	for i, c := range v.capabilities {
-		if (c.Status == capability.RecordStatusActive) == !v.revoked() {
+		if c.Live() == !v.revoked() { // expired leases sit with the revoked ones
 			out = append(out, i)
 		}
 	}
@@ -1997,7 +1997,7 @@ func (v *listView) View() string {
 	vis := v.visible()
 	nAct := 0
 	for _, c := range v.capabilities {
-		if c.Status == capability.RecordStatusActive {
+		if c.Live() {
 			nAct++
 		}
 	}
@@ -2148,6 +2148,9 @@ func binding(b *vault.Binding) string {
 func (v *listView) rowHint(i int) string {
 	c := v.capabilities[i]
 	parts := []string{v.capIDs[i][:min(8, len(v.capIDs[i]))]}
+	if c.Expired() {
+		return strings.Join(append(parts, "expired"), " · ")
+	}
 	if c.Status != capability.RecordStatusActive {
 		return strings.Join(append(parts, c.Status), " · ")
 	}
