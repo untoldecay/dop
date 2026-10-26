@@ -587,7 +587,7 @@ Ed25519 bearers cannot rotate — migrate first with `dop agent migrate`.
 
 ### `dop claim`
 
-Agent-side: bind a PIN-issued bearer to a local agent key. Default flow shows a QR, starts a Cloudflare quick tunnel, and blocks until the admin approves on their phone with the approval passphrase.
+Agent-side: bind a PIN-issued bearer to a local agent key. Default flow shows a QR, starts a Cloudflare quick tunnel, and blocks until the admin approves on their phone with the approval passphrase. The phone page is the same approval card as the native dialog, the TUI pending screens and `dop approve`: what happens if you say yes, who asks and from where, what it touches, the code to compare with the agent's screen, how long you have. Printing a bearer or keys through the tunnel uses the same page in red.
 
 ```
 dop claim <PIN> [flags]
