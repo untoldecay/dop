@@ -670,7 +670,7 @@ func runTokenList(args []string) int {
 	}
 	sort.Strings(names)
 	shown, hidden := 0, 0
-	confirmed := agentrules.Confirmed(paths)
+	acks := agentrules.Load(paths)
 	for _, id := range names {
 		c := v.Capabilities[id]
 		if !*all && !c.Live() {
@@ -682,8 +682,8 @@ func runTokenList(args []string) int {
 			status = "expired"
 		}
 		rules := ""
-		if r := agentrules.Status(confirmed, c.LookupID, c.Binding != nil && c.Binding.Pubkey != ""); r != "" {
-			rules = "  rules=" + r
+		if r := agentrules.Describe(acks, c.LookupID, c.Subject, c.Binding != nil && c.Binding.Pubkey != "", c.PortableWrapped != ""); r.Show && r.Status != "" {
+			rules = "  rules=" + r.Status
 		}
 		fmt.Printf("- %s  subject=%s  grants=%v  gen=%d  status=%s  expires=%s%s\n",
 			id[:12], c.Subject, c.Grants, c.Generation, status,

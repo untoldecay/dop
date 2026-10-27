@@ -77,6 +77,10 @@ grep -q "reusing the lease" "$WORKROOT/reuse.err" || { cat "$WORKROOT/reuse.err"
 [[ "$(sed -n 's/^export DOP_TOKEN=//p' "$WORKROOT/reuse.out")" == "$LEASE" ]] || fail "reuse printed another bearer"
 a pull >/dev/null 2>&1; ls "$A_VAULT/pending-use"/*.json >/dev/null 2>&1 && fail "reuse staged a new request"
 pass "second use reuses the lease"
+out=$(HOME="$B" "$DOP" exec --use cam-shell --agent-name buzz-reader -- sh -c 'env | rev' 2>"$WORKROOT/execuse.err" | rev)
+echo "$out" | grep -q "N_TOKEN=ntn_leased_secret" || { cat "$WORKROOT/execuse.err"; fail "exec --use did not run with the cached lease"; }
+grep -q "reusing the lease" "$WORKROOT/execuse.err" || { cat "$WORKROOT/execuse.err"; fail "exec --use should reuse the lease"; }
+pass "exec --use runs with the lease, nothing printed"
 TOKF="$WORKROOT/lease-token.json"
 b use cam-shell --remote --token-file "$TOKF" >/dev/null 2>"$WORKROOT/tokf.err" || { cat "$WORKROOT/tokf.err"; fail "use --token-file exited non-zero"; }
 out=$(HOME="$B" DOP_TOKEN_FILE="$TOKF" "$DOP" exec --agent-name buzz-reader -- sh -c 'env | rev' 2>"$WORKROOT/tokf-exec.err" | rev)

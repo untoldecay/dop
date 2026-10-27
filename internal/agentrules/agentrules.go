@@ -21,7 +21,7 @@ var Text string
 
 // Version changes when the rules change; an older ack still counts
 // (the point is that the agent carries the block, not its wording).
-const Version = 1
+const Version = 2 // v2: dop use / dop exec --use allowed where the operator asked; token files dop wrote are fine
 
 // Ack is what an agent host records: when, which agent keys live here.
 type Ack struct {
@@ -107,10 +107,16 @@ func NudgeDue(paths *config.Paths) bool {
 	return true
 }
 
-// Acks maps each acknowledged agent-key lookup id to its ack (host,
-// time): this host's ack plus every entry in the vault repo.
-func Acks(paths *config.Paths) map[string]Ack {
-	out := map[string]Ack{}
+// Acks are the acknowledgements known here, by agent-key lookup id and
+// by host: this host's ack plus every entry in the vault repo.
+type Acks struct {
+	ByKey  map[string]Ack
+	ByHost map[string]Ack
+}
+
+// Load reads them.
+func Load(paths *config.Paths) Acks {
+	out := Acks{ByKey: map[string]Ack{}, ByHost: map[string]Ack{}}
 	add := func(p string) {
 		blob, err := os.ReadFile(p)
 		if err != nil {
@@ -121,9 +127,12 @@ func Acks(paths *config.Paths) map[string]Ack {
 			return
 		}
 		for _, id := range a.LookupIDs {
-			if prev, ok := out[id]; !ok || a.AckedAt.After(prev.AckedAt) {
-				out[id] = a
+			if prev, ok := out.ByKey[id]; !ok || a.AckedAt.After(prev.AckedAt) {
+				out.ByKey[id] = a
 			}
+		}
+		if prev, ok := out.ByHost[a.Host]; a.Host != "" && (!ok || a.AckedAt.After(prev.AckedAt)) {
+			out.ByHost[a.Host] = a
 		}
 	}
 	add(localPath(paths))
@@ -137,23 +146,50 @@ func Acks(paths *config.Paths) map[string]Ack {
 // Confirmed is the set of acknowledged agent-key lookup ids.
 func Confirmed(paths *config.Paths) map[string]bool {
 	out := map[string]bool{}
-	for id := range Acks(paths) {
+	for id := range Load(paths).ByKey {
 		out[id] = true
 	}
 	return out
 }
 
-// Detail is the bearer detail row: where and when the agent
-// acknowledged, or what is missing.
-func Detail(acks map[string]Ack, lookupID string, bound bool) string {
-	if !bound {
-		return "no agent key yet — shown once the bearer is claimed"
+// HostOf is the host a lease bearer was granted to ("cam-shell@srv1" →
+// "srv1"); "" for any other subject.
+func HostOf(subject string) string {
+	if i := strings.LastIndex(subject, "@"); i > 0 {
+		return subject[i+1:]
 	}
-	a, ok := acks[lookupID]
-	if !ok {
-		return "not confirmed — the agent has not run dop skill rules --ack"
+	return ""
+}
+
+// Info is what a bearer row or detail says about the rules.
+type Info struct {
+	Show   bool   // false: the row is not meaningful for this bearer (a portable original)
+	Status string // "confirmed" / "unconfirmed" / "" (no agent yet)
+	Detail string // the detail-view sentence
+}
+
+// Describe decides per bearer: a bound bearer by its agent key, a lease
+// by the host it was granted to, an unclaimed PIN bearer as "not yet";
+// the operator's own portable original has no agent and shows nothing.
+func Describe(acks Acks, lookupID, subject string, bound, portable bool) Info {
+	when := func(a Ack) string {
+		return "confirmed by " + a.Host + " · " + a.AckedAt.Local().Format("2006-01-02 15:04")
 	}
-	return "confirmed by " + a.Host + " · " + a.AckedAt.Local().Format("2006-01-02 15:04")
+	switch {
+	case bound:
+		if a, ok := acks.ByKey[lookupID]; ok {
+			return Info{Show: true, Status: "confirmed", Detail: when(a)}
+		}
+		return Info{Show: true, Status: "unconfirmed", Detail: "not confirmed — the agent has not run dop skill rules --ack"}
+	case HostOf(subject) != "":
+		if a, ok := acks.ByHost[HostOf(subject)]; ok {
+			return Info{Show: true, Status: "confirmed", Detail: when(a)}
+		}
+		return Info{Show: true, Status: "unconfirmed", Detail: "not confirmed — no agent on " + HostOf(subject) + " has run dop skill rules --ack"}
+	case portable:
+		return Info{}
+	}
+	return Info{Show: true, Detail: "no agent key yet — shown once the bearer is claimed"}
 }
 
 // Status is the operator-facing word for one bearer: "" when the

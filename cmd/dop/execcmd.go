@@ -49,6 +49,7 @@ func runExec(args []string) int {
 	inheritEnv := fs.Bool("inherit-env", false, "let the child see the parent process's env (LEGACY behaviour — leaks unrelated secrets)")
 	_ = fs.Bool("clean-env", true, "deprecated: clean is now the default; use --inherit-env to opt back into parent-env passthrough")
 	noPull := fs.Bool("no-pull", false, "skip the silent auto-pull freshness check")
+	useSubject := fs.String("use", "", "on a host without the admin key: lease this portable bearer (or reuse the lease already granted) and run the command with it — the bearer never leaves dop")
 	_ = fs.Parse(args)
 	cleanEnv := !*inheritEnv
 
@@ -76,6 +77,21 @@ func runExec(args []string) int {
 	// after claim — the proof of possession IS the agent key file (or
 	// the Secure Enclave).
 	bearer, source, bearerErr := readBearerWithSource(*tokenFile)
+	// v1.21 rc18 — `dop exec --use <subject>`: the lease stays inside dop.
+	// No export line, no token file, nothing for an agent to carry.
+	if *useSubject != "" {
+		paths, _ := config.Resolve()
+		if admin.KeyFileExists(paths) {
+			fmt.Fprintf(os.Stderr, "dop exec --use: this host holds the admin key — here run `eval \"$(dop use %s)\"` (it asks you) then dop exec.\n", *useSubject)
+			return 1
+		}
+		b, _, _, lerr := acquireLease(paths, *useSubject, *agentName)
+		if lerr != nil {
+			fmt.Fprintf(os.Stderr, "dop exec --use: %v\n", lerr)
+			return 1
+		}
+		bearer, source, bearerErr = b, "", nil
+	}
 	var (
 		env                 map[string]string
 		res                 resolveResult
@@ -131,7 +147,7 @@ func runExec(args []string) int {
 	})
 	fmt.Fprintf(os.Stderr, "dop exec: agent=%q subject=%q gen=%d env_keys=%d\n",
 		*agentName, res.subject, res.generation, len(env))
-	if res.binding != nil && agentrules.NudgeDue(paths) {
+	if !admin.KeyFileExists(paths) && agentrules.NudgeDue(paths) {
 		fmt.Fprintln(os.Stderr, "dop exec: the DOP standing rules are not confirmed on this host — run `dop skill rules`, add them to your always-on instructions, then `dop skill rules --ack`.")
 	}
 	if err := execChild(child, env, cleanEnv); err != nil {

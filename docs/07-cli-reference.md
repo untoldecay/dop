@@ -644,6 +644,8 @@ dop use <subject> --remote [--agent-name X] [--token-file FILE]
 
 Local `dop use` is unchanged: admin key, approval dialog, the bearer lives with the shell. On a Server install the `--remote` flag is implied: `dop use <subject>` sees there is no admin key and asks for a lease.
 
+Agents on a server can skip the export line altogether: `dop exec --use <subject> --agent-name <you> -- <cmd>` takes the lease (or reuses it) and runs the command in one go, so no bearer ever reaches a shell variable or a file.
+
 The server syncs its vault copy before staging the request and retries once on a refused push (a cache install owns nothing in the repo, so it follows the team). A granted lease is kept on the server for its lifetime (`leases/<subject>.json` in the DOP folder, mode 0600): every later `dop use <subject>` in that window reuses it instead of asking the operator again, the way local shells reuse a trusted grant. It is forgotten 2 minutes before expiry, and the next call asks again.
 
 On the admin's Mac the session daemon watches the vault repo while it runs (every 20 s, `DOP_WATCH_INTERVAL`) and puts up the native dialog for remote claims and lease requests, so nothing has to be open. The lease dialog has three buttons: **Deny · 10 min ▸ · Approve**; the middle one cycles 10 min → 30 min → 1 hour, Approve grants the duration shown, Escape and the timeout leave the request pending for the TUI. `DOP_NO_WATCH=1` turns the watcher off. A dialog nobody answers closes on its timeout (60 s by default, Settings) and comes back 3 minutes later (`DOP_WATCH_REASK`) while the request lives; Deny settles it for the dialog (the TUI still lists it). Every outcome is an `approval_dialog` audit event (`dop watch --filter approval_dialog`), and `dop admin status` shows the watcher's last check, how many dialogs it showed and the last result. The longest lease an admin may hand out is set when the bearer is made portable: `dop token issue --portable --lease-cap 30m` (default 1h).
@@ -730,13 +732,14 @@ Read a capability bundle and never open the vault.
 Resolve the bearer (or local agent key), inject the scoped env, exec the child. `DOP_TOKEN` / `DOP_TOKEN_FILE` are always stripped from the child's env.
 
 ```
-dop exec [--agent-name X] [--token-file PATH] [--inherit-env] [--no-pull] -- CMD [ARGS...]
+dop exec [--agent-name X] [--token-file PATH] [--use SUBJECT] [--inherit-env] [--no-pull] -- CMD [ARGS...]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--agent-name` | "" | Self-reported label for audit. Disambiguates when multiple agent keys are present. |
 | `--token-file` | "" | Read bearer from file: the bare bearer, or the JSON `dop use --token-file` writes (`{token, subject, expires_at}`). |
+| `--use` | "" | On a host without the admin key: lease this portable bearer (or reuse the lease already granted, same rules as `dop use`) and run the command with it. The bearer never leaves dop: no export line, no file. On the admin's machine it refuses and points at `eval "$(dop use …)"`. |
 | `--inherit-env` | false | Let the child see the parent's env. Default is clean-env (keeps only `PATH`, `HOME`, `USER`, `SHELL`, `TERM`, `LANG`). |
 | `--no-pull` | false | Skip the silent auto-pull. |
 | `--clean-env` | — | Deprecated no-op. |

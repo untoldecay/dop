@@ -16,6 +16,7 @@ Follow the DOP credential-access safety protocol exactly:
   eval "$(dop use $1)" && <your command>
   ```
 - Run the actual credentialed command through `dop exec --agent-name <specific-task-label> -- <command>` so the scoped env is injected only into the child process.
+- On a server (no admin key on this host) skip the eval entirely: `dop exec --use $1 --agent-name <specific-task-label> -- <command>` asks the operator for a lease the first time, reuses it afterwards, and never puts the bearer in a shell variable or a file.
 - First confirm what the bearer unlocks:
   ```bash
   eval "$(dop use $1)" && dop whoami

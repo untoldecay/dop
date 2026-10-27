@@ -26,7 +26,20 @@ import (
 const remoteUsePoll = 5 * time.Second
 
 func runUseRemote(paths *config.Paths, subject, agentName, tokenFile string) int {
-	fail := func(err error) int { fmt.Fprintf(os.Stderr, "dop use --remote: %v\n", err); return 1 }
+	bearer, leaseSubject, expiresAt, err := acquireLease(paths, subject, agentName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop use --remote: %v\n", err)
+		return 1
+	}
+	return emitLease(bearer, leaseSubject, tokenFile, expiresAt)
+}
+
+// acquireLease is the lease flow without any printing of the bearer:
+// the cached lease when one is alive, else a request staged in the vault
+// repo and the wait for the admin's answer. `dop use --remote` prints
+// what it returns; `dop exec --use` hands it straight to the child.
+func acquireLease(paths *config.Paths, subject, agentName string) (bearer, leaseSubject string, expiresAt time.Time, err error) {
+	fail := func(err error) (string, string, time.Time, error) { return "", "", time.Time{}, err }
 	if _, err := os.Stat(paths.Vault); err != nil {
 		return fail(fmt.Errorf("no vault here — on a server, attach it first: pick Server in `dop`, or `dop init --cache <repo>`"))
 	}
@@ -36,7 +49,7 @@ func runUseRemote(paths *config.Paths, subject, agentName, tokenFile string) int
 	if c, ok := readLeaseCache(paths, subject); ok {
 		fmt.Fprintf(os.Stderr, "dop use: reusing the lease of %s granted earlier (as %s, expires %s). It asks again when it ends.\n",
 			subject, c.LeaseSubject, c.ExpiresAt.Local().Format("15:04"))
-		return emitLease(c.Token, c.LeaseSubject, tokenFile, c.ExpiresAt)
+		return c.Token, c.LeaseSubject, c.ExpiresAt, nil
 	}
 	ident, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -139,7 +152,7 @@ func runUseRemote(paths *config.Paths, subject, agentName, tokenFile string) int
 		fmt.Fprintf(os.Stderr, "dop use --remote: lease granted as %s, expires %s (%s). When it expires, ask again.\n",
 			lease.LeaseSubject, lease.ExpiresAt.Local().Format("15:04"), time.Until(lease.ExpiresAt).Round(time.Minute))
 		writeLeaseCache(paths, subject, leaseCache{Token: bearer, LeaseSubject: lease.LeaseSubject, ExpiresAt: lease.ExpiresAt})
-		return emitLease(bearer, lease.LeaseSubject, tokenFile, lease.ExpiresAt)
+		return bearer, lease.LeaseSubject, lease.ExpiresAt, nil
 	}
 }
 

@@ -29,7 +29,7 @@ Three kinds exist and each has one correct way in. Check with `dop whoami` if un
 | You were given | Kind | How to use it |
 |---|---|---|
 | bearer + PIN (`dop claim …` in the handoff) | **claimed** | run the claim once; from then on `dop exec --agent-name <subject> -- <cmd>` with **no `DOP_TOKEN`** — this host's agent key is the proof |
-| a subject name and `/dop-use` or `dop use` | **portable** | `eval "$(dop use <subject>)" && dop exec --agent-name <task> -- <cmd>` in every shell call. On a server (no admin here) the same `dop use <subject> --agent-name <you>` asks the operator for a **lease** instead — it waits while they pick a duration, later calls reuse the lease, and when it ends `dop exec` says so: ask again. Never `dop admin login` or `dop token list` there: your grants are `dop whoami` |
+| a subject name and `/dop-use` or `dop use` | **portable** | `eval "$(dop use <subject>)" && dop exec --agent-name <task> -- <cmd>` in every shell call. On a server (no admin here) use `dop exec --use <subject> --agent-name <you> -- <cmd>`: it asks the operator for a **lease** (waits while they pick a duration), reuses it on later calls, and the bearer never leaves dop; when the lease ends it says so, ask again. Never `dop admin login` or `dop token list` there: your grants are `dop whoami` |
 | a bare bearer, no PIN | **unbound** | `DOP_TOKEN=<bearer> dop exec --agent-name <task> -- <cmd>` |
 
 Never `eval "$(dop env)"`: it puts the raw keys in your shell. `dop env` is refused for claimed bearers anyway. Never write a key's value into a command; reference it by name inside the child, e.g. `dop exec --agent-name x -- sh -c 'curl -H "Authorization: Bearer $NOTION_TOKEN" …'`.

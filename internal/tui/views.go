@@ -2176,8 +2176,8 @@ func (v *listView) rowHint(i int) string {
 	if c.PortableWrapped != "" {
 		parts = append(parts, "portable")
 	}
-	if r := agentrules.Status(agentrules.Confirmed(v.paths), c.LookupID, c.Binding != nil && c.Binding.Pubkey != ""); r != "" {
-		parts = append(parts, "rules "+r)
+	if r := agentrules.Describe(agentrules.Load(v.paths), c.LookupID, c.Subject, c.Binding != nil && c.Binding.Pubkey != "", c.PortableWrapped != ""); r.Show && r.Status != "" {
+		parts = append(parts, "rules "+r.Status)
 	}
 	if o := v.owner(c); o != "" && o != "you" {
 		parts = append(parts, "by "+o)
@@ -2303,15 +2303,18 @@ func (v *listView) viewDetail(width, height int) string {
 	if gl == "" {
 		gl = "none"
 	}
-	// v1.21 — did the agent put the standing rules in its config?
-	rules := agentrules.Detail(agentrules.Acks(v.paths), c.LookupID, c.Binding != nil && c.Binding.Pubkey != "")
-	lines := strings.Split(strings.TrimRight(kv(
-		[2]string{"expires", exp}, [2]string{"grants", gl},
-		[2]string{"binding", bind}, [2]string{"rules", rules}, [2]string{"portable", portable},
+	// v1.21 — did the agent put the standing rules in its config? A
+	// portable original has no agent: no row. Its leases do.
+	head := [][2]string{{"expires", exp}, {"grants", gl}, {"binding", bind}}
+	if r := agentrules.Describe(agentrules.Load(v.paths), c.LookupID, c.Subject, c.Binding != nil && c.Binding.Pubkey != "", c.PortableWrapped != ""); r.Show {
+		head = append(head, [2]string{"rules", r.Detail})
+	}
+	head = append(head, [2]string{"portable", portable})
+	lines := strings.Split(strings.TrimRight(kv(append(head,
 		[2]string{"id", mutedSt.Render(id)}, [2]string{"created", mutedSt.Render(absDate(c.CreatedAt))},
 		[2]string{"issued by", mutedSt.Render(by)}, [2]string{"generation", mutedSt.Render(fmt.Sprint(c.Generation))},
-	), "\n"), "\n")
-	body = append(append(append([]string{}, lines[:5]...), ""), lines[5:]...)
+	)...), "\n"), "\n")
+	body = append(append(append([]string{}, lines[:len(head)]...), ""), lines[len(head):]...)
 	km.short = []key.Binding{hint("enter", "run"), hint("tab", "grants"), keyBack}
 	if len(acts) > 0 {
 		body = append(body, "")
