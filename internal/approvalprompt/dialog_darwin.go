@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -106,15 +107,40 @@ func run(title, body, middle string, timeout time.Duration) (Result, error) {
 			return Result{Denied: true}, nil
 		}
 		// Never echo osascript output into the error: on a weird exit it
-		// could carry the dialog result.
-		return Result{}, fmt.Errorf("osascript failed (%v)", err)
+		// could carry the dialog result. The AppleScript error number is
+		// safe and is what tells a locked screen from a bad script.
+		return Result{}, fmt.Errorf("osascript failed (%v%s)", err, appleScriptCode(se))
 	}
-	parts := strings.SplitN(strings.TrimRight(stdout.String(), "\n"), "\n", 3)
-	if len(parts) < 2 {
-		return Result{}, errors.New("osascript: unexpected result shape")
+	return parseReport(stdout.String(), middle)
+}
+
+// appleScriptCode pulls "(-1712)"-style error numbers out of osascript's
+// stderr, with the one-word reason for the common ones.
+func appleScriptCode(stderr string) string {
+	m := appleCodeRe.FindString(stderr)
+	if m == "" {
+		return ""
 	}
+	why := map[string]string{"-1712": "AppleEvent timed out", "-1743": "not permitted to control System Events",
+		"-600": "no GUI application", "-10810": "could not launch", "-1708": "dialog not handled (screen locked?)"}[strings.Trim(m, "()")]
+	if why != "" {
+		return ", AppleScript " + m + " " + why
+	}
+	return ", AppleScript " + m
+}
+
+var appleCodeRe = regexp.MustCompile(`\(-\d+\)`)
+
+// parseReport reads the fixed three-line shape osascript prints:
+// gave-up flag, button, text. A dialog that gave up prints "true" and
+// two empty lines (rc8 read that as a malformed result).
+func parseReport(out, middle string) (Result, error) {
+	parts := strings.SplitN(strings.TrimSuffix(out, "\n"), "\n", 3)
 	if parts[0] == "true" {
 		return Result{Timeout: true}, nil
+	}
+	if len(parts) < 2 {
+		return Result{}, errors.New("osascript: unexpected result shape")
 	}
 	text := ""
 	if len(parts) == 3 {
