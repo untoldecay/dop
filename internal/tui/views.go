@@ -1002,6 +1002,14 @@ func (v *listView) pendingRowAt() pendingRow {
 	return pendingRow{}
 }
 func (v *listView) Init() tea.Cmd { return v.load }
+
+// Reload re-reads the vault while the list or a detail is on screen.
+func (v *listView) Reload() tea.Cmd {
+	if v.mode != listModeList {
+		return nil
+	}
+	return v.load
+}
 func (v *listView) Done() bool    { return v.done }
 func (v *listView) Flash() string { return v.flash }
 

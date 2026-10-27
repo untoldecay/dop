@@ -130,9 +130,29 @@ type rootModel struct {
 	pendingSyncFn func(*rootModel) (tea.Model, tea.Cmd)
 }
 
-// vaultSyncedMsg — the screen-entry pull finished. note is a merge
-// conflict line to show, or "".
-type vaultSyncedMsg struct{ note string }
+// vaultSyncedMsg — a pull finished. note is a merge conflict line to
+// show, or "". reload: it was the freshness tick's pull, so the open
+// screen re-reads the vault instead of a screen opening.
+type vaultSyncedMsg struct {
+	note   string
+	reload bool
+}
+
+// reloader is a screen that can re-read the vault while it is open
+// (returns nil when a form or an action is in progress).
+type reloader interface{ Reload() tea.Cmd }
+
+// freshnessTickMsg fires every freshnessEvery while the TUI runs: the
+// open screen pulls when the last pull is older than the window (same
+// rule as screen entry), then re-reads the vault; the root menu
+// refreshes its pending banner. Screens never go stale (v1.21 rc16).
+type freshnessTickMsg struct{}
+
+const freshnessEvery = 20 * time.Second
+
+func freshnessTick() tea.Cmd {
+	return tea.Tick(freshnessEvery, func(time.Time) tea.Msg { return freshnessTickMsg{} })
+}
 
 // syncThen pulls the team vault before opening fn's screen, when the
 // last pull is older than the freshness window. Otherwise opens it now.
@@ -327,9 +347,9 @@ func (m *rootModel) rebuildMenu() {
 
 func (m *rootModel) Init() tea.Cmd {
 	if m.child != nil {
-		return m.child.Init()
+		return tea.Batch(m.child.Init(), freshnessTick())
 	}
-	return nil
+	return freshnessTick()
 }
 
 // closeChild interface — child views set Done() = true to be popped.
@@ -356,7 +376,27 @@ func (m *rootModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.st.setFlash(sz.note)
 			return fn(m)
 		}
+		if sz.note != "" {
+			m.st.setFlash(sz.note)
+		}
+		if r, ok := m.child.(reloader); ok && sz.reload {
+			return m, r.Reload()
+		}
 		return m, nil
+	case freshnessTickMsg:
+		if m.child == nil {
+			m.refreshState() // the pending banner follows the vault
+			return m, freshnessTick()
+		}
+		r, ok := m.child.(reloader)
+		if !ok || m.pendingSyncFn != nil {
+			return m, freshnessTick()
+		}
+		if vaultSyncDue(m.paths) {
+			paths := m.paths
+			return m, tea.Batch(func() tea.Msg { return vaultSyncedMsg{note: syncVault(paths), reload: true} }, freshnessTick())
+		}
+		return m, tea.Batch(r.Reload(), freshnessTick())
 	case guiUnlockResultMsg:
 		if m.child != nil && m.pendingUnlockFn == nil {
 			break // a view's sessionGuard save
@@ -428,7 +468,7 @@ func (m *rootModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.menu[m.cursor].fn(m)
 		case "a":
 			if m.pendingCount > 0 {
-				return m.openPendingApprove()
+				return m.syncThen((*rootModel).openPendingApprove)
 			}
 			// fall through to menu shortcuts
 			for _, it := range m.menu {

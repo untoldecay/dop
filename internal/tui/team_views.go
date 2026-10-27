@@ -381,7 +381,14 @@ func newTeamListView(c *admin.Client, p *config.Paths) *teamListView {
 	return &teamListView{client: c, paths: p, pass: newFormInput(true)}
 }
 func (v *teamListView) Init() tea.Cmd { return v.load }
-func (v *teamListView) Done() bool    { return v.done }
+
+func (v *teamListView) Reload() tea.Cmd {
+	if v.mode != teamModeList { // forms and actions are left alone
+		return nil
+	}
+	return v.load
+}
+func (v *teamListView) Done() bool { return v.done }
 
 type teamListLoadedMsg struct {
 	admins  map[string]vault.Admin

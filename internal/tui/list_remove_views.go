@@ -111,6 +111,13 @@ func newIntegrationListView(c *admin.Client, p *config.Paths) *integrationListVi
 }
 
 func (v *integrationListView) Init() tea.Cmd { return v.load }
+
+func (v *integrationListView) Reload() tea.Cmd {
+	if v.mode != integModeList && v.mode != integModeDetail {
+		return nil
+	}
+	return v.load
+}
 func (v *integrationListView) Done() bool    { return v.done }
 func (v *integrationListView) Flash() string { return v.flash }
 
@@ -1816,6 +1823,13 @@ func newGrantListView(c *admin.Client, p *config.Paths) *grantListView {
 	return &grantListView{client: c, paths: p, list: newNameList()}
 }
 func (v *grantListView) Init() tea.Cmd { return v.load }
+
+func (v *grantListView) Reload() tea.Cmd {
+	if v.mode != grantModeList && v.mode != grantModeDetail {
+		return nil
+	}
+	return v.load
+}
 func (v *grantListView) Done() bool    { return v.done }
 func (v *grantListView) Flash() string { return v.flash }
 

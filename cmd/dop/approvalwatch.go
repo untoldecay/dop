@@ -50,7 +50,11 @@ type approvalWatcher struct {
 func newApprovalWatcher(paths *config.Paths) *approvalWatcher {
 	w := &approvalWatcher{paths: paths, timeout: userprefs.Load(paths).ApprovalTimeout(), seen: map[string]bool{},
 		reask: envDuration("DOP_WATCH_REASK", 3*time.Minute)}
-	w.pull = func() { _ = autoPullAndMerge(paths) }
+	w.pull = func() {
+		if autoPullAndMerge(paths) == nil {
+			touchPullMarker(paths) // the TUI's freshness window sees this pull
+		}
+	}
 	w.prompt = func(card approvalcard.Card, lease bool) (approvalprompt.Result, error) {
 		body := card.Body()
 		if f := card.Footer(); f != "" {

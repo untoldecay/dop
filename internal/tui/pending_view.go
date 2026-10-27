@@ -169,6 +169,24 @@ type pendingResultMsg struct {
 	err    string
 }
 
+// pendingReloadMsg carries re-read rows (freshness tick).
+type pendingReloadMsg struct {
+	rows []pendingRow
+	err  error
+}
+
+// Reload re-reads the pending requests while the picker is on screen.
+func (v *pendingView) Reload() tea.Cmd {
+	if v.step != pendingStepPick {
+		return nil
+	}
+	paths := v.paths
+	return func() tea.Msg {
+		rows, err := pendingRows(paths)
+		return pendingReloadMsg{rows: rows, err: err}
+	}
+}
+
 func (m *rootModel) openPendingApprove() (tea.Model, tea.Cmd) {
 	v := &pendingView{paths: m.paths, pass: newFormInput(true)}
 	rows, err := pendingRows(m.paths)
@@ -231,6 +249,13 @@ func (v *pendingView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return v, cmd
 	}
 	switch mm := msg.(type) {
+	case pendingReloadMsg:
+		if mm.err != nil {
+			v.err = mm.err.Error()
+		}
+		v.claims = mm.rows
+		v.cursor = max(min(v.cursor, len(v.claims)-1), 0)
+		return v, nil
 	case pendingResultMsg:
 		if mm.err != "" {
 			v.err = firstLine(mm.err)
