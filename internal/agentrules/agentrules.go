@@ -101,10 +101,10 @@ func NudgeDue(paths *config.Paths) bool {
 	return true
 }
 
-// Confirmed is the set of agent-key lookup ids whose host acknowledged
-// the rules: this host's ack plus every entry in the vault repo.
-func Confirmed(paths *config.Paths) map[string]bool {
-	out := map[string]bool{}
+// Acks maps each acknowledged agent-key lookup id to its ack (host,
+// time): this host's ack plus every entry in the vault repo.
+func Acks(paths *config.Paths) map[string]Ack {
+	out := map[string]Ack{}
 	add := func(p string) {
 		blob, err := os.ReadFile(p)
 		if err != nil {
@@ -115,7 +115,9 @@ func Confirmed(paths *config.Paths) map[string]bool {
 			return
 		}
 		for _, id := range a.LookupIDs {
-			out[id] = true
+			if prev, ok := out[id]; !ok || a.AckedAt.After(prev.AckedAt) {
+				out[id] = a
+			}
 		}
 	}
 	add(localPath(paths))
@@ -124,6 +126,28 @@ func Confirmed(paths *config.Paths) map[string]bool {
 		add(p)
 	}
 	return out
+}
+
+// Confirmed is the set of acknowledged agent-key lookup ids.
+func Confirmed(paths *config.Paths) map[string]bool {
+	out := map[string]bool{}
+	for id := range Acks(paths) {
+		out[id] = true
+	}
+	return out
+}
+
+// Detail is the bearer detail row: where and when the agent
+// acknowledged, or what is missing.
+func Detail(acks map[string]Ack, lookupID string, bound bool) string {
+	if !bound {
+		return "no agent key yet — shown once the bearer is claimed"
+	}
+	a, ok := acks[lookupID]
+	if !ok {
+		return "not confirmed — the agent has not run dop skill rules --ack"
+	}
+	return "confirmed by " + a.Host + " · " + a.AckedAt.Local().Format("2006-01-02 15:04")
 }
 
 // Status is the operator-facing word for one bearer: "" when the

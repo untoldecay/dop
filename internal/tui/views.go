@@ -2295,13 +2295,15 @@ func (v *listView) viewDetail(width, height int) string {
 	if gl == "" {
 		gl = "none"
 	}
+	// v1.21 — did the agent put the standing rules in its config?
+	rules := agentrules.Detail(agentrules.Acks(v.paths), c.LookupID, c.Binding != nil && c.Binding.Pubkey != "")
 	lines := strings.Split(strings.TrimRight(kv(
 		[2]string{"expires", exp}, [2]string{"grants", gl},
-		[2]string{"binding", bind}, [2]string{"portable", portable},
+		[2]string{"binding", bind}, [2]string{"rules", rules}, [2]string{"portable", portable},
 		[2]string{"id", mutedSt.Render(id)}, [2]string{"created", mutedSt.Render(absDate(c.CreatedAt))},
 		[2]string{"issued by", mutedSt.Render(by)}, [2]string{"generation", mutedSt.Render(fmt.Sprint(c.Generation))},
 	), "\n"), "\n")
-	body = append(append(append([]string{}, lines[:4]...), ""), lines[4:]...)
+	body = append(append(append([]string{}, lines[:5]...), ""), lines[5:]...)
 	km.short = []key.Binding{hint("enter", "run"), hint("tab", "grants"), keyBack}
 	if len(acts) > 0 {
 		body = append(body, "")

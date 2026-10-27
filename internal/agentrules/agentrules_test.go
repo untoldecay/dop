@@ -3,6 +3,7 @@ package agentrules
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/fray/dop/internal/config"
@@ -43,6 +44,12 @@ func TestAckNudgeConfirmed(t *testing.T) {
 	}
 	if Status(Confirmed(admin), "abc123", true) != "confirmed" || Status(Confirmed(admin), "zzz", true) != "unconfirmed" || Status(nil, "x", false) != "" {
 		t.Fatal("status words")
+	}
+	if d := Detail(Acks(admin), "abc123", true); !strings.HasPrefix(d, "confirmed by ") {
+		t.Fatalf("detail %q", d)
+	}
+	if d := Detail(Acks(admin), "zzz", true); !strings.HasPrefix(d, "not confirmed") {
+		t.Fatalf("detail %q", d)
 	}
 	if len(Text) < 200 || Text[0] != '#' {
 		t.Fatal("rules text embedded")
