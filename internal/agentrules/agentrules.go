@@ -34,8 +34,9 @@ type Ack struct {
 func localPath(paths *config.Paths) string { return filepath.Join(paths.Root, "agent-rules.ack") }
 func nudgePath(paths *config.Paths) string { return filepath.Join(paths.Root, "agent-rules.nudged") }
 
-// VaultDir is where acks travel to the admin: one file per agent host
-// in the vault repo, pushed by the agent host when it can.
+// VaultDir is where acks travel to the admin: one file per agent key
+// in the vault repo, pushed by the agent host when it can. (rc13 wrote
+// one file per host; three agents on one server overwrote each other.)
 func VaultDir(paths *config.Paths) string { return filepath.Join(paths.Vault, "agent-rules") }
 
 // LocalKeys lists the lookup ids of the agent keys on this host.
@@ -50,9 +51,10 @@ func LocalKeys(paths *config.Paths) []string {
 	return ids
 }
 
-// Record writes the local ack and, when a vault repo is present, the
-// host's entry in it. It returns the entry's path relative to the
-// vault ("" when none) so the caller can commit and push it.
+// Record writes the local ack and, when a vault repo is present, one
+// entry per agent key of this install in it. It returns the entries'
+// directory relative to the vault ("" when none) so the caller can
+// commit and push.
 func Record(paths *config.Paths) (rel string, err error) {
 	host, _ := os.Hostname()
 	if host == "" {
@@ -74,11 +76,15 @@ func Record(paths *config.Paths) (rel string, err error) {
 	if err := os.MkdirAll(VaultDir(paths), 0o755); err != nil {
 		return "", err
 	}
-	name := safe(host) + ".json"
-	if err := os.WriteFile(filepath.Join(VaultDir(paths), name), blob, 0o644); err != nil {
-		return "", err
+	for _, id := range a.LookupIDs {
+		one := a
+		one.LookupIDs = []string{id}
+		b, _ := json.MarshalIndent(one, "", "  ")
+		if err := os.WriteFile(filepath.Join(VaultDir(paths), safe(id)+".json"), append(b, '\n'), 0o644); err != nil {
+			return "", err
+		}
 	}
-	return filepath.Join("agent-rules", name), nil
+	return "agent-rules", nil
 }
 
 // AckedHere says whether this host acknowledged the rules.

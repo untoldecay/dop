@@ -31,11 +31,21 @@ func TestAckNudgeConfirmed(t *testing.T) {
 	// A vault repo here → the host's entry travels with it.
 	must(os.MkdirAll(filepath.Join(paths.Vault, ".git"), 0o755))
 	rel, err := Record(paths)
-	if err != nil || rel == "" {
+	if err != nil || rel != "agent-rules" {
 		t.Fatalf("vault entry: %q %v", rel, err)
 	}
-	if _, err := os.Stat(filepath.Join(paths.Vault, rel)); err != nil {
+	if _, err := os.Stat(filepath.Join(paths.Vault, rel, "abc123.json")); err != nil {
 		t.Fatal(err)
+	}
+	// A second install on the same host must not erase the first.
+	other := &config.Paths{Root: t.TempDir(), Vault: paths.Vault}
+	must(os.MkdirAll(filepath.Join(other.Root, "agent-keys"), 0o700))
+	must(os.WriteFile(filepath.Join(other.Root, "agent-keys", "def456.key"), []byte("k"), 0o600))
+	if _, err := Record(other); err != nil {
+		t.Fatal(err)
+	}
+	if c := Confirmed(&config.Paths{Root: t.TempDir(), Vault: paths.Vault}); !c["abc123"] || !c["def456"] {
+		t.Fatalf("both installs on the host must stay confirmed: %v", c)
 	}
 	// The admin reads the vault entries of other hosts.
 	admin := &config.Paths{Root: t.TempDir(), Vault: paths.Vault}
