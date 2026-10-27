@@ -139,7 +139,9 @@ PIN2=$(echo "$issue" | grep -E '^[A-Z]{2}-[A-Z]{2}-[A-Z]{2}$' | head -1)
 [[ -n "$BEARER2" && -n "$PIN2" ]] || fail "second issue failed"
 HOME="$MACHINE_A" "$DOP" push >/dev/null 2>&1 || fail "push after second issue failed"
 # No `dop pull` on B: claim must fetch the fresh bundle by itself.
-out=$(HOME="$MACHINE_B" DOP_TOKEN="$BEARER2" "$DOP" claim --remote "$PIN2" 2>&1) || { echo "$out"; fail "second remote claim failed (claim did not auto-pull?)"; }
+# No --remote this time: a host without the admin key implies it (v1.21 rc11).
+out=$(HOME="$MACHINE_B" DOP_TOKEN="$BEARER2" "$DOP" claim "$PIN2" 2>&1) || { echo "$out"; fail "second remote claim failed (claim did not auto-pull?)"; }
+echo "$out" | grep -q "\-\-remote implied" || { echo "$out"; fail "claim without --remote on an agent host must imply it"; }
 HOME="$MACHINE_A" "$DOP" pull >/dev/null 2>&1 || true
 out=$(HOME="$MACHINE_A" "$DOP" approve-remote --subject reject-bot --reject 2>&1)
 echo "$out" | grep -q "rejected reject-bot" || { echo "$out"; fail "reject did not report"; }

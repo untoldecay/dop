@@ -147,6 +147,13 @@ func runClaim(args []string) int {
 	touchPullMarker(paths)
 
 	// --remote path: no daemon required, stage the claim in the vault.
+	// A host without the admin key (a Server install, an agent machine)
+	// has no other way to claim, so the flag is implied there — same
+	// rule as `dop use` (v1.21 rc11).
+	if !*remote && !admin.KeyFileExists(paths) {
+		fmt.Fprintln(os.Stderr, "dop claim: no admin key on this host — staging the claim in the vault repo for the admin (--remote implied)")
+		*remote = true
+	}
 	if *remote {
 		return runClaimRemote(paths, *tokenFile, pinArg, *keyTypeFlag)
 	}

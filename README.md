@@ -64,9 +64,12 @@ stops working when it expires, and it only works on the computer it was given to
 Give an agent one more tool, or take one away, without starting over. Or cancel
 its pass entirely — it stops working on its very next try.
 
-**Approve new agents from your phone.**
-When a new agent asks for access, it shows a QR code. Scan it with your phone,
-type your approval code, done. Nothing to install on the phone.
+**Approve new agents from where you are.**
+When an agent asks for access, a small DOP window appears on your Mac: who asks,
+from where, what it touches. Type your approval code, done. That covers agents
+on your own computer and on your servers. When an agent runs somewhere else, it
+shows a QR code instead and you approve the same card from your phone's browser.
+Nothing to install on the phone.
 
 **Made for small teams.**
 Invite a teammate; they join when they're ready and you let them in. If two of

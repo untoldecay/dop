@@ -602,7 +602,7 @@ dop claim --status [--json]
 | `--skip-approval` | false | Finalize without out-of-band approval. Unsafe for chat handoff. |
 | `--no-tunnel` | false | Serve the approval page on LAN only; bind to `0.0.0.0`. |
 | `--bind` | `127.0.0.1` with tunnel, `0.0.0.0` without | Interface to bind the approval server. |
-| `--remote` | false | No admin daemon here — stage the claim in the vault for `dop approve-remote`. Needs push on the vault remote. `--key-type` applies. |
+| `--remote` | false | No admin daemon here — stage the claim in the vault for `dop approve-remote`. Needs push on the vault remote. `--key-type` applies. Implied on a host without the admin key (Server install, agent machine). |
 | `--key-type` | "" (auto) | `p256` or `ed25519`. Auto = Secure Enclave P-256 on a Mac that has one, else a P-256 file. P-256 is required for direct grant edits, bearer rotation and bearer-free exec. |
 | `--cancel` | false | Delete the in-flight pending claim for `$DOP_TOKEN` and exit. |
 | `--status` | false | Print the pending-claim state and exit. |
