@@ -268,11 +268,13 @@ func (v *addIntegrationView) integName() string {
 func (v *addIntegrationView) rows() []*formField {
 	switch v.stage {
 	case integStageInteg:
-		return append([]*formField{v.name, v.kind, v.desc}, slotRows(v.kindVal(), v.url, v.scan)...)
-	case integStageCred:
+		// The Advanced tab lives with the integration's own rows: its
+		// values are stored on the integration, next to kind and URL.
 		if v.advTab {
 			return advRows(v.adv, v.kindVal())
 		}
+		return append([]*formField{v.name, v.kind, v.desc}, slotRows(v.kindVal(), v.url, v.scan)...)
+	case integStageCred:
 		r := []*formField{v.cred, v.value, v.scope}
 		if !v.existingIntegration {
 			r = append(r, v.protect)
@@ -364,7 +366,7 @@ func (v *addIntegrationView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		f := &v.form[v.stage]
-		if v.stage == integStageCred && !v.existingIntegration && f.open == 0 && (k == "tab" || k == "shift+tab") {
+		if v.stage == integStageInteg && f.open == 0 && (k == "tab" || k == "shift+tab") {
 			v.advTab, f.cur = !v.advTab, 0
 			return v, nil
 		}
@@ -434,6 +436,7 @@ func (v *addIntegrationView) next() {
 	f := &v.form[v.stage]
 	switch v.stage {
 	case integStageInteg:
+		v.advTab = false // Next validates the integration rows, whichever tab was showing
 		if v.err = f.missing(v.rows()); v.err != "" {
 			return
 		}
@@ -599,14 +602,14 @@ func (v *addIntegrationView) View() string {
 	var extra []key.Binding
 	var tabs []tab
 	hintTxt := ""
-	if v.stage == integStageCred && !v.existingIntegration {
+	if v.stage == integStageInteg {
 		tabs = []tab{{"Normal", -1, !v.advTab}, {"Advanced", -1, v.advTab}}
 		extra = []key.Binding{hint("tab", map[bool]string{true: "normal", false: "advanced"}[v.advTab])}
 		if v.advTab {
 			hintTxt = "Optional, stored on the integration."
 		}
 	}
-	if v.stage == integStageInteg && f.cur == 0 {
+	if v.stage == integStageInteg && !v.advTab && f.cur == 0 {
 		if n := v.name.val(); n != "" && v.integName() != n {
 			hintTxt = "Saved as " + v.integName() + "."
 		}
