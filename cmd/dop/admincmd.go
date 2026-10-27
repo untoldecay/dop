@@ -236,6 +236,10 @@ func runAdminLogin(args []string) int {
 		}
 	}
 
+	if !admin.KeyFileExists(paths) {
+		fmt.Fprintln(os.Stderr, "dop admin login: "+errNoAdminKey)
+		return 1
+	}
 	pass, err := readPassphrase("Passphrase: ", *pfromStdin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop admin login: %v\n", err)

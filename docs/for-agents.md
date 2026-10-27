@@ -131,7 +131,8 @@ Inside `dop exec` each granted credential comes with hints next to the key: `<PR
 | `refused every login dop tried` | No login for the vault repo on this machine | [Repo token](#if-the-vault-repo-refuses-the-login), saved by the user |
 | `unknown bearer (bundle not found…)` | The vault here doesn't have that bearer yet | Ask the user to `dop push` (or check you're on the right install, below) |
 | `PIN expired` / `PIN does not match` | PINs last 1 hour | Ask for a **Re-issue** and a fresh handoff |
-| `no active admin session` on `dop claim` | You ran a plain `dop claim` on a server | Use the handoff as given: it has `--remote` |
+| `no admin key on this host — admin commands run on the admin's machine` | You ran an admin command (`dop token list`, `dop admin login`, `dop token issue`) where only an agent lives | Don't. Your grants: `dop whoami`. Using them: `dop exec --agent-name <you> -- <cmd>`. Never type or guess a passphrase |
+| A plain `dop claim` on a server | Nothing wrong since v1.21: the flag is implied | It says `--remote implied` and stages the claim for the admin |
 | Works in one terminal, not in yours | Different DOP install (e.g. `DOP_HOME` set in one only) | `dop doctor` shows `install:home` when `DOP_HOME` is set; your environment must match where the server was set up. Use full paths (`/root/dop-test`), not `~/…`, in config files |
 
 Never work around a failure by asking for the raw key, the admin passphrase or

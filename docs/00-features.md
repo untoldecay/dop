@@ -42,8 +42,9 @@ Every DOP feature as of **v1.13.0**, in one scannable table. Grouped by surface,
 | Agent identity | Direct availability | Grant edits + bearer rotation take effect on the agent's next exec without re-claim. ECDH re-wrap over the admin daemon. | v1.12 |
 | Agent identity | Way B (bearer-free exec) | `dop exec` without `$DOP_TOKEN` scans local agent-keys and resolves implicitly. For long-running agents on their own machine. | v1.13.0-rc11 |
 | Agent identity | Agent key doctor | `dop doctor` reports SE vs file-key counts, flags unsigned-build downgrades loudly. | v1.11 |
-| Approval UX | QR + Cloudflared tunnel | Admin's machine stands up an HTTPS tunnel per claim; TUI prints a QR with the URL. | v1.9 |
-| Approval UX | Phone-based approval | Any phone camera opens the URL; the mobile form asks for the approval passphrase. No app to install. | v1.9 |
+| Approval UX | Native dialog first | A local claim on the admin's machine raises the approval card as a macOS dialog; the page below is the fallback when no dialog answers. | v1.21 |
+| Approval UX | QR + Cloudflared tunnel (fallback) | The agent's machine stands up an HTTPS tunnel per claim and prints a QR with the URL — for agents on machines that are neither the admin's nor a Server install. | v1.9 |
+| Approval UX | Phone-based approval (fallback) | Any phone camera opens the URL; the page is the approval card and asks for the approval passphrase. No app to install. | v1.9 |
 | Approval UX | 5-minute pending-claim window | Comfortable scan + unlock + type, bounded attacker window. | v1.0 |
 | Approval UX | Rate limiting | 8 attempts shared across web + CLI (attacker can't bypass web counters from CLI). | v1.6.3 |
 | Approval UX | SAS verification code | 6-digit code admin + approver verify out-of-band; defends against DNS/BGP tunnel hijack. | v1.0 |

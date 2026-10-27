@@ -82,6 +82,11 @@ First, shared workspaces where people and agents work in the same rooms, like
 [Berd](https://berd.xyz/). Also Claude Code, Codex, Cursor and plain terminal
 windows.
 
+**Your servers too.** Install DOP on a server as a plain copy of the vault, no
+admin key there. An agent on it claims its pass through the vault, and when it
+needs one of your portable passes it asks for a time-boxed lease: the same window
+appears on your Mac, you pick 10 minutes, 30 minutes or an hour.
+
 **Prefer typing commands?** Every action on screen is also a `dop` command, for
 scripts and servers.
 

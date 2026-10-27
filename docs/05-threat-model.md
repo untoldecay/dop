@@ -1,6 +1,6 @@
 # Threat model
 
-DOP's one-line boundary: **a compromised agent host must not be able to mint or elevate credentials, and a leaked bearer in a chat log must be worthless without a second-factor dance from an admin's phone.** Everything else in this document falls out of that boundary — what it buys you, and what it quietly leaves on the table.
+DOP's one-line boundary: **a compromised agent host must not be able to mint or elevate credentials, and a leaked bearer in a chat log must be worthless without the admin typing the approval passphrase somewhere the agent cannot read — the DOP dialog on the admin's Mac, or the phone page.** Everything else in this document falls out of that boundary — what it buys you, and what it quietly leaves on the table.
 
 ## The posture
 
@@ -12,7 +12,7 @@ The trust unit is the OS user account. If something runs as your uid, it inherit
 
 **Scoped, revocable per-agent credentials.** The raw PAT stays in the sops-encrypted vault. Each agent gets a bearer that resolves to a slice of scopes — `notion.read`, not "the whole Notion token." Revoke the bearer, the agent's next `dop exec` fails cleanly. Rotate the raw PAT in the vault, every agent holding a grant on it picks up the new value on next exec; no agent redeploy.
 
-**Bearers in chat logs are worthless on their own.** Pairing requires a PIN delivered over a Cloudflare quick tunnel, approved via QR on an admin's phone, gated by a second passphrase (argon2id, RFC-9106 params, 10-char min). Eight wrong attempts auto-rejects the claim — shared counter across CLI and web, so an attacker can't get 8 tries on each path. The approval passphrase is distinct from the admin passphrase so a phished approval page doesn't hand over vault access.
+**Bearers in chat logs are worthless on their own.** Pairing requires a PIN and an approval the agent cannot give itself: the DOP dialog on the admin's Mac (local claims, and remote claims and leases staged in the vault repo), or the phone page reached over a Cloudflare quick tunnel when the agent runs elsewhere — every path gated by a second passphrase (argon2id, RFC-9106 params, 10-char min). Eight wrong attempts auto-rejects the claim — shared counter across CLI and web, so an attacker can't get 8 tries on each path. The approval passphrase is distinct from the admin passphrase so a phished approval page doesn't hand over vault access.
 
 **Every use is auditable.** Issue, claim, approve, deny, exec, env, revoke, protect, bypass-attempt — all land in append-only JSONL at `~/.dop/logs/audit.jsonl` with the actor and the lookup id. `dop watch` tails it live; macOS gets notifications for the events that matter. The log never contains bearers, PINs, or passphrases — only fingerprints and metadata.
 
@@ -44,7 +44,7 @@ The trust unit is the OS user account. If something runs as your uid, it inherit
 
 **Protected credentials against direct SOPS edits.** `--protected` enforces at the DOP write path. An admin who holds a sops-age key and edits `vault.yaml` with their editor can mutate anything. Every admin on the vault has decrypt rights by definition — protection is a convention + loud audit trail, not a cryptographic barrier. The contract spells this out: *"Any admin can decrypt the SOPS vault with their key and commit a hand-edited yaml outside DOP."*
 
-**Phone approval failure modes.** The Cloudflare quick tunnel is a public URL for ~90 seconds. Anyone who sees your screen during pairing sees the QR. Anyone who intercepts the tunnel URL during that window can submit the approval form — but the approval passphrase is still required, and 8 wrong attempts aborts the claim. The practical attack: shoulder-surfing the QR AND the passphrase simultaneously. Mitigation is operational — don't demo pairing on a shared screen without masking the passphrase entry.
+**Phone approval failure modes (the fallback path).** The Cloudflare quick tunnel is a public URL for ~90 seconds. Anyone who sees your screen during pairing sees the QR. Anyone who intercepts the tunnel URL during that window can submit the approval form — but the approval passphrase is still required, and 8 wrong attempts aborts the claim. The practical attack: shoulder-surfing the QR AND the passphrase simultaneously. Mitigation is operational — don't demo pairing on a shared screen without masking the passphrase entry.
 
 **Admin recovery when the laptop dies.** The admin key is wrapped under your admin passphrase and lives on one machine. There is no server-side escrow. If your laptop is bricked and you never ran `dop team invite` to add a second admin, the vault is readable (sops still works with the age identity) but no new admin sessions can mint capabilities under your name. Two-admin bootstrap is the recovery story — set it up before you need it.
 

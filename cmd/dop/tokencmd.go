@@ -1077,9 +1077,17 @@ func activeBySubject(v *vault.Vault, subject string) (string, error) {
 
 // --- daemon-mediated helpers ---
 
+// errNoAdminKey is what every admin command says on a Server / agent
+// install. rc11 smoke: an agent that wanted its grants ran
+// `dop token list`, read "run dop admin login", and tried that.
+const errNoAdminKey = "no admin key on this host — admin commands run on the admin's machine. To see what your bearer unlocks: `dop whoami`; to use it: `dop exec --agent-name <you> -- <cmd>`"
+
 func requireAdminSession(paths *config.Paths) (*admin.Client, error) {
 	client := admin.NewClient(admin.SockPath(paths))
 	if !client.SessionActive() {
+		if !admin.KeyFileExists(paths) {
+			return nil, errors.New(errNoAdminKey)
+		}
 		return nil, fmt.Errorf("no active admin session — run `dop admin login` first")
 	}
 	warnStaleDaemon(client)
@@ -1129,6 +1137,9 @@ func requireAdminSessionOrUnlock(paths *config.Paths, titleHint string) (*admin.
 	client := admin.NewClient(admin.SockPath(paths))
 	if client.SessionActive() {
 		return client, nil
+	}
+	if !admin.KeyFileExists(paths) {
+		return nil, errors.New(errNoAdminKey)
 	}
 	// Opt-out: DOP_NO_AUTO_UNLOCK=1 keeps the old behavior for scripts.
 	if os.Getenv("DOP_NO_AUTO_UNLOCK") != "" {

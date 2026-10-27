@@ -480,7 +480,7 @@ func (s *Session) opApprovalPopup(payload []byte) Response {
 		body, _ := json.Marshal(ApprovalPopupResp{Decision: "unsupported", Reason: "DOP_NO_POPUP=1"})
 		return okResp(body)
 	}
-	title := approvalcard.Card{Kind: approvalcard.PrintKind(req.Kind), Subject: req.Subject}.Title()
+	title := approvalcard.Card{Kind: approvalcard.KindOf(req.Kind), Subject: req.Subject}.Title()
 	body := req.PromptText
 	if body == "" {
 		body = fmt.Sprintf("Approve %s for %q?", req.Kind, req.Subject)

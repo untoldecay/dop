@@ -14,7 +14,7 @@ WORKROOT=$(mktemp -d /tmp/dop-v15-XXXX)
 trap 'rm -rf "$WORKROOT"' EXIT
 export HOME="$WORKROOT/home"
 mkdir -p "$HOME"
-export DOP_NO_TUI=1
+export DOP_NO_TUI=1 DOP_NO_POPUP=1
 export DOP_NO_KEYCHAIN=1
 export DOP_NO_NOTIFY=1
 

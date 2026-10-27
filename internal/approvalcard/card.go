@@ -162,6 +162,16 @@ func LeaseOptions() []Option {
 	return out
 }
 
+// KindOf resolves what a popup caller named: a card kind as is, a
+// print guard surface through PrintKind.
+func KindOf(s string) Kind {
+	switch k := Kind(s); k {
+	case KindClaim, KindRemoteClaim, KindLease, KindProtectedGrant, KindPrintBearer, KindPrintKeys:
+		return k
+	}
+	return PrintKind(s)
+}
+
 // PrintKind maps a print guard surface ("print_use", "print_issue",
 // "print_claim", "print_env") to the card kind: printing scoped env is
 // the keys themselves, everything else prints a bearer.

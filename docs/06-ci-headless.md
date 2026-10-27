@@ -15,7 +15,7 @@ dop token issue --grants notion.read \
                 --expires 30d
 # → prints bearer (tok_1<hex>) and PIN
 
-# Agent runs the claim on the SAME trusted machine (admin approves on phone):
+# Agent runs the claim on the SAME trusted machine (admin approves in the dialog, or on the phone):
 DOP_TOKEN=tok_1... dop claim XX-XX-XX
 # → materialises ~/.config/dop/agent-keys/<lookup_id>.key, 0600, raw 64 bytes
 

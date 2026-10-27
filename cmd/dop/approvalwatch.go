@@ -37,11 +37,11 @@ type approvalWatcher struct {
 	// touches names the grants of a subject (what the lease / claim
 	// reaches); nil or "" when the vault can't be read right now.
 	touches func(subject string) string
-	seen   map[string]bool      // settled: approved, or denied by the operator
-	asked  map[string]time.Time // last time the dialog was shown for an id
-	reask  time.Duration        // a dialog nobody answered comes back after this
-	report func(string)         // what `dop admin status` shows for the watcher
-	tally  struct {
+	seen    map[string]bool      // settled: approved, or denied by the operator
+	asked   map[string]time.Time // last time the dialog was shown for an id
+	reask   time.Duration        // a dialog nobody answered comes back after this
+	report  func(string)         // what `dop admin status` shows for the watcher
+	tally   struct {
 		asked int
 		last  string
 	}

@@ -48,6 +48,7 @@ import (
 
 	"github.com/fray/dop/internal/admin"
 	"github.com/fray/dop/internal/agentkey"
+	"github.com/fray/dop/internal/approvalcard"
 	"github.com/fray/dop/internal/approvalserver"
 	"github.com/fray/dop/internal/audit"
 	"github.com/fray/dop/internal/capability"
@@ -56,6 +57,7 @@ import (
 	"github.com/fray/dop/internal/pendingclaim"
 	"github.com/fray/dop/internal/remoteclaim"
 	"github.com/fray/dop/internal/tunnel"
+	"github.com/fray/dop/internal/userprefs"
 	"github.com/fray/dop/internal/vault"
 )
 
@@ -243,7 +245,7 @@ func runClaim(args []string) int {
 
 	// Passphrase-gated approval (v1.6). Skippable for unattended flows.
 	if !*skipApproval {
-		if err := awaitApproval(paths, lookupID, hex.EncodeToString(hdr.CapabilityID[:]), env.Subject, pubHex, *noTunnel, *bindAddr, *asJSON); err != nil {
+		if err := awaitApproval(paths, client, lookupID, hex.EncodeToString(hdr.CapabilityID[:]), env.Subject, pubHex, *noTunnel, *bindAddr, *asJSON); err != nil {
 			if *asJSON {
 				emitJSON(map[string]any{"event": "result", "state": "aborted", "error": err.Error()})
 			} else {
@@ -697,7 +699,39 @@ func gitCommitPushRemoteClaim(paths *config.Paths, lookupID string) error {
 // writes the pending-claim file for `dop pending` / `dop approve <SAS>`
 // CLI compatibility, then blocks until the human decides on the web
 // page OR the CLI approve command lands OR TTL expires.
-func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex string, noTunnel bool, bindAddr string, asJSON bool) error {
+// approveViaDialog asks the session daemon to raise the approval card
+// for a local claim. done=true means the claim is decided (approved,
+// or rejected with err); done=false means fall back to the page: no
+// dialog, timeout, or a wrong passphrase (counted on the shared limiter).
+func approveViaDialog(paths *config.Paths, client *admin.Client, rec pendingclaim.Record) (done bool, err error) {
+	card := approvalcard.Card{Kind: approvalcard.KindClaim, Subject: rec.Subject, Who: "agent key " + short(rec.Pubkey),
+		Code: rec.SAS, Expires: rec.ExpiresAt}
+	body := card.Body() + "\n\n" + approvalcard.Passphrase + ":"
+	decision, reason, perr := client.ApprovalPopup(string(approvalcard.KindClaim), rec.Subject, body, userprefs.Load(paths).ApprovalTimeout())
+	switch {
+	case perr != nil || decision == "unsupported" || decision == "timeout":
+		fmt.Fprintln(os.Stderr, "dop claim: no dialog answered — the approval page follows (dop approve <SAS> works too).")
+		return false, nil
+	case decision == "approved":
+		if serr := pendingclaim.SetState(paths, rec.LookupID, pendingclaim.StateApproved); serr != nil {
+			return true, serr
+		}
+		audit.Append(paths, audit.Event{Kind: audit.EventClaimApproved, Subject: rec.Subject, LookupID: rec.LookupID,
+			Extra: map[string]string{"sas": pendingclaim.NormalizeSAS(rec.SAS), "surface": "dialog"}})
+		return true, nil
+	case reason == "wrong_passphrase":
+		_, _, _ = pendingclaim.BumpFailure(paths, rec.LookupID)
+		fmt.Fprintln(os.Stderr, "dop claim: wrong passphrase in the dialog — the approval page follows.")
+		return false, nil
+	default: // Deny
+		_ = pendingclaim.SetState(paths, rec.LookupID, pendingclaim.StateRejected)
+		audit.Append(paths, audit.Event{Kind: audit.EventClaimDenied, Subject: rec.Subject, LookupID: rec.LookupID,
+			Extra: map[string]string{"reason": "rejected", "surface": "dialog"}})
+		return true, errors.New("claim rejected in the dialog")
+	}
+}
+
+func awaitApproval(paths *config.Paths, client *admin.Client, lookupID, capIDHex, subject, pubHex string, noTunnel bool, bindAddr string, asJSON bool) error {
 	sas, err := pendingclaim.NewSAS()
 	if err != nil {
 		return fmt.Errorf("SAS gen: %w", err)
@@ -721,6 +755,15 @@ func awaitApproval(paths *config.Paths, lookupID, capIDHex, subject, pubHex stri
 		return err
 	}
 	defer pendingclaim.Delete(paths, lookupID)
+
+	// v1.21 rc12 — on the admin's own machine the approval is the native
+	// dialog (the same card as everywhere else); the tunnel + QR page is
+	// the fallback when no dialog can be shown or nobody answers it.
+	if client != nil && os.Getenv("DOP_NO_POPUP") != "1" {
+		if done, err := approveViaDialog(paths, client, rec); done {
+			return err
+		}
+	}
 
 	// Bind an ephemeral port on bindAddr.
 	listener, err := net.Listen("tcp", bindAddr+":0")
