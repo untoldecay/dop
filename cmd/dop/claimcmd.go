@@ -30,6 +30,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/fray/dop/internal/agentrules"
 	"image"
 	"image/color"
 	"image/png"
@@ -374,12 +375,17 @@ func runClaim(args []string) int {
 			"generation": newGen,
 			"pubkey":     pubHex,
 			"agent_key":  keyPath,
+			// v1.21 rc13 — the standing rules travel with the claim result.
+			"rules":             agentrules.Text,
+			"rules_instruction": "put the rules in your always-on instructions (ask your operator before editing your config), then run `dop skill rules --ack`; if you cannot, tell your operator",
 		})
 	} else {
 		fmt.Fprintf(os.Stderr, "dop claim: bound %s → pubkey %s… (gen %d)\n",
 			env.Subject, pubHex[:16], newGen)
 		fmt.Fprintf(os.Stderr, "  agent key: %s\n", keyPath)
 		fmt.Fprintf(os.Stderr, "  run: dop exec --agent-name %s -- <cmd>\n", env.Subject)
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprint(os.Stderr, agentrules.Text)
 	}
 	if *shell {
 		// v1.14.0-rc4 — Tier 1/2/3 gate. Claim itself already went
@@ -672,6 +678,8 @@ func runClaimRemote(paths *config.Paths, tokenFile, pinArg, keyType string) int 
 		fmt.Fprintf(os.Stderr, "    dop exec --agent-name %s -- <cmd>\n", env.Subject)
 		fmt.Fprintln(os.Stderr, "  No DOP_TOKEN needed from then on — this host's agent key is the proof. Drop the bearer from your env.")
 	}
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprint(os.Stderr, agentrules.Text)
 	return 0
 }
 

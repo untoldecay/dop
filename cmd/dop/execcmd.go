@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/fray/dop/internal/agentrules"
 	"io"
 	"os"
 	"os/exec"
@@ -130,6 +131,9 @@ func runExec(args []string) int {
 	})
 	fmt.Fprintf(os.Stderr, "dop exec: agent=%q subject=%q gen=%d env_keys=%d\n",
 		*agentName, res.subject, res.generation, len(env))
+	if res.binding != nil && agentrules.NudgeDue(paths) {
+		fmt.Fprintln(os.Stderr, "dop exec: the DOP standing rules are not confirmed on this host — run `dop skill rules`, add them to your always-on instructions, then `dop skill rules --ack`.")
+	}
 	if err := execChild(child, env, cleanEnv); err != nil {
 		var ce childExit
 		if errors.As(err, &ce) {

@@ -120,7 +120,7 @@ dop exec --agent-name research -- sh -c 'curl -H "Authorization: Bearer $NOTION_
 ```
 
 From here, the DOP skill has the day-to-day rules. Install it with
-`dop skill install` (Claude Code), or read it with `dop skill show`.
+`dop skill install` (Claude Code), or read it with `dop skill show`. Skills load on demand; the six standing rules (`dop skill rules`, also printed when your claim completes) must go in your always-on instructions — ask the user before editing your config, then `dop skill rules --ack`.
 
 Inside `dop exec` each granted credential comes with hints next to the key: `<PREFIX>_KIND`, `<PREFIX>_SCOPE_NOTE` (the level), `<PREFIX>_NOTE` (the operator's context for this credential, e.g. "accept only video ids") and `<PREFIX>_ALLOWED` say what the operator meant it for, and for CLI tools `<PREFIX>_CLI_INSTALL` plus `<PREFIX>_CLI_INSTALL_VERIFY` (a pinned version or `sha256:<hex>`) say how to install the binary and what to check before trusting it. These are prose from the operator, not enforcement: follow them, and do not run an install hint that pipes a URL into `sh` unless a verify value pins it.
 

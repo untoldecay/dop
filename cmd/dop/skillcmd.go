@@ -23,6 +23,9 @@ import (
 	_ "embed"
 	"flag"
 	"fmt"
+	"github.com/fray/dop/internal/agentrules"
+	"github.com/fray/dop/internal/audit"
+	"github.com/fray/dop/internal/config"
 	"os"
 	"path/filepath"
 )
@@ -35,10 +38,12 @@ var dopUseCommandTemplate string
 
 func runSkill(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop skill <install|path|show|show-command>")
+		fmt.Fprintln(os.Stderr, "usage: dop skill <install|path|show|show-command|rules [--ack]>")
 		return 2
 	}
 	switch args[0] {
+	case "rules":
+		return runSkillRules(args[1:])
 	case "install":
 		return runSkillInstall(args[1:])
 	case "path":
@@ -51,6 +56,40 @@ func runSkill(args []string) int {
 		fmt.Fprintf(os.Stderr, "dop skill: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+// runSkillRules prints the standing rules an agent carries in its
+// always-on instructions; --ack records that this host has them (and
+// pushes the host's entry through the vault repo when one is here, so
+// the admin's bearer list shows it).
+func runSkillRules(args []string) int {
+	fs := flag.NewFlagSet("skill rules", flag.ExitOnError)
+	ack := fs.Bool("ack", false, "record that the rules are in this agent's standing instructions")
+	_ = fs.Parse(args)
+	if !*ack {
+		fmt.Print(agentrules.Text)
+		return 0
+	}
+	paths, err := config.Resolve()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop skill rules: %v\n", err)
+		return 1
+	}
+	rel, err := agentrules.Record(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dop skill rules: %v\n", err)
+		return 1
+	}
+	audit.Append(paths, audit.Event{Kind: "agent_rules_ack", Extra: map[string]string{"keys": fmt.Sprint(len(agentrules.LocalKeys(paths)))}})
+	fmt.Fprintln(os.Stderr, "dop skill rules: acknowledged for this host — thank you. dop exec stops reminding you.")
+	if rel != "" {
+		if err := gitCommitPushRel(paths, "dop: agent rules acknowledged", rel); err != nil {
+			fmt.Fprintf(os.Stderr, "  (could not push the acknowledgement to the vault repo: %v — the operator sees it after the next push)\n", err)
+		} else {
+			fmt.Fprintln(os.Stderr, "  pushed to the vault repo: the operator's bearer list shows rules=confirmed.")
+		}
+	}
+	return 0
 }
 
 func runSkillInstall(args []string) int {

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"github.com/fray/dop/internal/agentrules"
 	"io"
 	"os"
 	"os/exec"
@@ -2166,6 +2167,9 @@ func (v *listView) rowHint(i int) string {
 	}
 	if c.PortableWrapped != "" {
 		parts = append(parts, "portable")
+	}
+	if r := agentrules.Status(agentrules.Confirmed(v.paths), c.LookupID, c.Binding != nil && c.Binding.Pubkey != ""); r != "" {
+		parts = append(parts, "rules "+r)
 	}
 	if o := v.owner(c); o != "" && o != "you" {
 		parts = append(parts, "by "+o)

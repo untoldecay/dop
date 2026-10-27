@@ -20,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/fray/dop/internal/agentrules"
 	"io"
 	"os"
 	"path/filepath"
@@ -669,6 +670,7 @@ func runTokenList(args []string) int {
 	}
 	sort.Strings(names)
 	shown, hidden := 0, 0
+	confirmed := agentrules.Confirmed(paths)
 	for _, id := range names {
 		c := v.Capabilities[id]
 		if !*all && !c.Live() {
@@ -679,9 +681,13 @@ func runTokenList(args []string) int {
 		if c.Expired() {
 			status = "expired"
 		}
-		fmt.Printf("- %s  subject=%s  grants=%v  gen=%d  status=%s  expires=%s\n",
+		rules := ""
+		if r := agentrules.Status(confirmed, c.LookupID, c.Binding != nil && c.Binding.Pubkey != ""); r != "" {
+			rules = "  rules=" + r
+		}
+		fmt.Printf("- %s  subject=%s  grants=%v  gen=%d  status=%s  expires=%s%s\n",
 			id[:12], c.Subject, c.Grants, c.Generation, status,
-			tokenExpiryDisplay(c.ExpiresAt))
+			tokenExpiryDisplay(c.ExpiresAt), rules)
 		shown++
 	}
 	if shown == 0 && hidden > 0 {

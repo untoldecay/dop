@@ -1,6 +1,6 @@
 ---
 name: dop-credential-access
-description: Use when needing to call a service whose credentials live in the DOP vault (Notion, Boiler, GitHub, Linear, custom APIs) — for reading data, writing changes, or admin operations
+description: Use when needing to call a service whose credentials live in the DOP vault (Notion, Boiler, GitHub, Linear, custom APIs) — for reading data, writing changes, or admin operations — and whenever dop, a bearer, DOP_TOKEN, grants, a claim or an approval come up
 ---
 
 # DOP Credential Access
@@ -123,6 +123,10 @@ The bearer value is in the transcript. Treat it as leaked. Ask the user to:
 2. `dop token issue --name <subject> --grants ... --portable` (fresh bearer, same scope)
 
 Then rerun your task with `eval "$(dop use <subject>)"`.
+
+## Standing rules
+
+Six rules must live in your always-on instructions, not only here: `dop skill rules` prints them (dop also prints them when a claim completes). Ask your operator before editing your config, add them, then `dop skill rules --ack`. Until then every `dop exec` reminds you once an hour and the operator's bearer list shows `rules unconfirmed`.
 
 ## Do NOT
 

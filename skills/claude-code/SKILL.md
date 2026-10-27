@@ -1,6 +1,6 @@
 ---
 name: dop-credential-access
-description: Use when needing to call a service whose credentials live in the DOP vault (Notion, Boiler, GitHub, Linear, custom APIs) — for reading data, writing changes, or admin operations
+description: Use when needing to call a service whose credentials live in the DOP vault (Notion, Boiler, GitHub, Linear, custom APIs) — for reading data, writing changes, or admin operations — and whenever dop, a bearer, DOP_TOKEN, grants, a claim or an approval come up
 ---
 
 # DOP Credential Access
@@ -101,6 +101,10 @@ dop exec --agent-name <specific-task-name> -- <your command>
 | Strip inherited env from the child | add `--clean-env` |
 | Read the limits the operator set | `<PREFIX>_SCOPE_NOTE` (the level), `<PREFIX>_NOTE` (context for this credential, e.g. "accept only video ids") and `<PREFIX>_ALLOWED` inside the child: prose from the operator, follow it |
 | Install a CLI an integration points at | `<PREFIX>_CLI_INSTALL` is the hint; `<PREFIX>_CLI_INSTALL_VERIFY` is the version or `sha256:` to check after installing |
+
+## Standing rules
+
+Six rules must live in your always-on instructions, not only here: `dop skill rules` prints them (dop also prints them when a claim completes). Ask your operator before editing your config, add them, then `dop skill rules --ack`. Until then every `dop exec` reminds you once an hour and the operator's bearer list shows `rules unconfirmed`.
 
 ## Do NOT
 

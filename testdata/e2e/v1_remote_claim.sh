@@ -132,6 +132,13 @@ echo "$out" | grep -q "S_TOKEN=xoxb_remote" || { echo "$out"; fail "add-grant no
 echo "$out" | grep -q "N_TOKEN=ntn_remote" || { echo "$out"; fail "lost notion after add-grant"; }
 pass "remote-claimed P-256 agent sees add-grant directly"
 
+echo "=== [B5b] agent acknowledges the standing rules; admin sees it on the bearer"
+HOME="$MACHINE_B" "$DOP" skill rules | grep -q "standing rules" || fail "dop skill rules prints nothing"
+HOME="$MACHINE_B" "$DOP" skill rules --ack >/dev/null 2>&1 || fail "skill rules --ack failed"
+HOME="$MACHINE_A" "$DOP" pull >/dev/null 2>&1 || true
+HOME="$MACHINE_A" "$DOP" token list 2>/dev/null | grep -q "rules=confirmed" || { HOME="$MACHINE_A" "$DOP" token list; fail "admin list lacks rules=confirmed"; }
+pass "rules ack reaches the admin's bearer list"
+
 echo "=== [A8/B6] second bearer: claim --remote then admin --reject"
 issue=$(HOME="$MACHINE_A" "$DOP" token issue --grants notion.read --name reject-bot 2>&1)
 BEARER2=$(echo "$issue" | grep -E '^tok_1' | head -1)
