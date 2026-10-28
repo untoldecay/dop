@@ -6,6 +6,7 @@
 package approvalprompt
 
 import (
+	"context"
 	"errors"
 	"time"
 )
@@ -20,6 +21,17 @@ type Result struct {
 }
 
 var ErrUnsupported = errors.New("approvalprompt: native dialog unsupported on this platform")
+
+// ErrClosed — the dialog was closed by its caller; never returned off darwin.
+var ErrClosed = errors.New("approvalprompt: dialog closed by caller")
+
+func AskCtx(context.Context, string, string, time.Duration) (Result, error) {
+	return Result{}, ErrUnsupported
+}
+
+func AskLeaseCtx(context.Context, string, string, []string, int, time.Duration) (Result, error) {
+	return Result{}, ErrUnsupported
+}
 
 func Ask(title, body string, timeout time.Duration) (Result, error) {
 	return Result{}, ErrUnsupported

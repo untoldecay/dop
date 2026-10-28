@@ -16,6 +16,7 @@ package approvalprompt
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -47,7 +48,22 @@ var ErrUnsupported = errors.New("approvalprompt: native dialog unsupported on th
 // The timeout is enforced via osascript's `giving up after` clause —
 // no goroutine races, no process-kill cleanup.
 func Ask(title, body string, timeout time.Duration) (Result, error) {
-	return run(title, body, "", timeout)
+	return run(context.Background(), title, body, "", timeout)
+}
+
+// ErrClosed — the dialog was closed by its caller (ctx cancelled): the
+// question was answered elsewhere, on another device or in the TUI.
+var ErrClosed = errors.New("approvalprompt: dialog closed by caller")
+
+// AskCtx is Ask that the caller can close: cancelling ctx dismisses the
+// dialog and returns ErrClosed.
+func AskCtx(ctx context.Context, title, body string, timeout time.Duration) (Result, error) {
+	return run(ctx, title, body, "", timeout)
+}
+
+// AskLeaseCtx is AskLease that the caller can close.
+func AskLeaseCtx(ctx context.Context, title, body string, durations []string, start int, timeout time.Duration) (Result, error) {
+	return askLease(ctx, title, body, durations, start, timeout)
 }
 
 // AskLease is the three-button variant for a remote lease request:
@@ -57,12 +73,16 @@ func Ask(title, body string, timeout time.Duration) (Result, error) {
 // Approve submits the duration shown. Returns the picked duration in
 // Result.Choice. Escape and timeout deny.
 func AskLease(title, body string, durations []string, start int, timeout time.Duration) (Result, error) {
+	return askLease(context.Background(), title, body, durations, start, timeout)
+}
+
+func askLease(ctx context.Context, title, body string, durations []string, start int, timeout time.Duration) (Result, error) {
 	if len(durations) == 0 {
-		return Ask(title, body, timeout)
+		return run(ctx, title, body, "", timeout)
 	}
 	i := start % len(durations)
 	for {
-		res, err := run(title, body, durations[i]+" ▸", timeout)
+		res, err := run(ctx, title, body, durations[i]+" ▸", timeout)
 		if err != nil {
 			return res, err
 		}
@@ -78,7 +98,7 @@ func AskLease(title, body string, durations []string, start int, timeout time.Du
 // run shows the dialog once. middle is the optional third button. The
 // passphrase comes back on osascript's stdout, read by this process
 // only, parsed from a fixed three-line shape (no comma splitting).
-func run(title, body, middle string, timeout time.Duration) (Result, error) {
+func run(ctx context.Context, title, body, middle string, timeout time.Duration) (Result, error) {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
@@ -98,10 +118,15 @@ func run(title, body, middle string, timeout time.Duration) (Result, error) {
 		escape(body), escape(title), buttons, int(timeout.Seconds()))
 	// Fixed shape: gave-up flag, button, then the text on its own line.
 	report := `return ((gave up of r) as text) & linefeed & (button returned of r) & linefeed & (text returned of r)`
-	cmd := exec.Command("osascript", "-e", dialog, "-e", report)
+	// Killing osascript takes its dialog down with it: that is how a
+	// question answered on another device disappears here.
+	cmd := exec.CommandContext(ctx, "osascript", "-e", dialog, "-e", report)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return Result{}, ErrClosed
+		}
 		se := stderr.String()
 		if strings.Contains(se, "User canceled") || strings.Contains(se, "User cancelled") || strings.Contains(se, "-128") {
 			return Result{Denied: true}, nil

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -31,7 +32,7 @@ func TestApprovalWatcherLeaseFlow(t *testing.T) {
 	var ran [][]string
 	var stdins []string
 	w := &approvalWatcher{paths: paths, seen: map[string]bool{}, pull: func() {}, reask: time.Hour}
-	w.prompt = func(c approvalcard.Card, lease bool) (approvalprompt.Result, error) {
+	w.prompt = func(_ context.Context, c approvalcard.Card, lease bool) (approvalprompt.Result, error) {
 		prompted = append(prompted, c)
 		if !lease {
 			t.Fatal("lease request must use the lease dialog")
@@ -69,7 +70,7 @@ func TestApprovalWatcherLeaseFlow(t *testing.T) {
 	// Denied requests are asked once.
 	must(remoteuse.WriteRequest(paths, remoteuse.Request{RequestID: "cccc3333", Subject: "other", Host: "vps",
 		Recipient: "age1x", RequestedAt: time.Now(), ExpiresAt: time.Now().Add(remoteuse.TTL), Nonce: "n"}))
-	w.prompt = func(c approvalcard.Card, lease bool) (approvalprompt.Result, error) {
+	w.prompt = func(_ context.Context, c approvalcard.Card, lease bool) (approvalprompt.Result, error) {
 		prompted = append(prompted, c)
 		return approvalprompt.Result{Denied: true}, nil
 	}
@@ -81,7 +82,7 @@ func TestApprovalWatcherLeaseFlow(t *testing.T) {
 	// Unanswered (timeout / Escape) comes back once the cooldown passed.
 	must(remoteuse.WriteRequest(paths, remoteuse.Request{RequestID: "dddd4444", Subject: "away", Host: "vps",
 		Recipient: "age1x", RequestedAt: time.Now(), ExpiresAt: time.Now().Add(remoteuse.TTL), Nonce: "n"}))
-	w.prompt = func(c approvalcard.Card, lease bool) (approvalprompt.Result, error) {
+	w.prompt = func(_ context.Context, c approvalcard.Card, lease bool) (approvalprompt.Result, error) {
 		prompted = append(prompted, c)
 		return approvalprompt.Result{Timeout: true}, nil
 	}
@@ -95,6 +96,29 @@ func TestApprovalWatcherLeaseFlow(t *testing.T) {
 	if len(prompted) != 5 || prompted[4].Subject != "away" {
 		t.Fatalf("unanswered should be asked again after the cooldown: prompted=%d", len(prompted))
 	}
+	// Answered elsewhere while the dialog is up: the dialog is closed
+	// (ErrClosed), the question is settled here, nothing runs.
+	must(remoteuse.WriteRequest(paths, remoteuse.Request{RequestID: "eeee5555", Subject: "shared", Host: "vps",
+		Recipient: "age1x", RequestedAt: time.Now(), ExpiresAt: time.Now().Add(remoteuse.TTL), Nonce: "n"}))
+	w.closeEvery, w.reask = 5*time.Millisecond, time.Hour // dddd4444 was asked a moment ago: not again
+	pulls := 0
+	w.pull = func() {
+		pulls++
+		if pulls == 2 { // the other device's approval arrives
+			must(remoteuse.WriteLease(paths, remoteuse.Lease{RequestID: "eeee5555", LeaseSubject: "shared@vps", ExpiresAt: time.Now().Add(time.Hour)}))
+		}
+	}
+	w.prompt = func(ctx context.Context, c approvalcard.Card, lease bool) (approvalprompt.Result, error) {
+		prompted = append(prompted, c)
+		<-ctx.Done()
+		return approvalprompt.Result{}, approvalprompt.ErrClosed
+	}
+	ranBefore := len(ran)
+	w.tick()
+	if len(prompted) != 6 || len(ran) != ranBefore || !w.seen["lease:eeee5555"] {
+		t.Fatalf("answered elsewhere: prompted=%d ran=%d seen=%v", len(prompted), len(ran), w.seen["lease:eeee5555"])
+	}
+	w.pull = func() {}
 	// The expired request never reached the dialog.
 	for _, c := range prompted {
 		if c.Subject == "old" {

@@ -12,6 +12,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,16 +34,17 @@ type approvalWatcher struct {
 	timeout time.Duration
 	// seams for tests
 	pull   func()
-	prompt func(card approvalcard.Card, lease bool) (approvalprompt.Result, error)
+	prompt func(ctx context.Context, card approvalcard.Card, lease bool) (approvalprompt.Result, error)
 	run    func(args []string, stdin string) error
 	// touches names the grants of a subject (what the lease / claim
 	// reaches); nil or "" when the vault can't be read right now.
-	touches func(subject string) string
-	seen    map[string]bool      // settled: approved, or denied by the operator
-	asked   map[string]time.Time // last time the dialog was shown for an id
-	reask   time.Duration        // a dialog nobody answered comes back after this
-	report  func(string)         // what `dop admin status` shows for the watcher
-	tally   struct {
+	touches    func(subject string) string
+	seen       map[string]bool      // settled: approved, or denied by the operator
+	asked      map[string]time.Time // last time the dialog was shown for an id
+	reask      time.Duration        // a dialog nobody answered comes back after this
+	closeEvery time.Duration        // while a dialog is up, how often to check it was answered elsewhere
+	report     func(string)         // what `dop admin status` shows for the watcher
+	tally      struct {
 		asked int
 		last  string
 	}
@@ -49,22 +52,22 @@ type approvalWatcher struct {
 
 func newApprovalWatcher(paths *config.Paths) *approvalWatcher {
 	w := &approvalWatcher{paths: paths, timeout: userprefs.Load(paths).ApprovalTimeout(), seen: map[string]bool{},
-		reask: envDuration("DOP_WATCH_REASK", 3*time.Minute)}
+		reask: envDuration("DOP_WATCH_REASK", 3*time.Minute), closeEvery: envDuration("DOP_WATCH_CLOSE_CHECK", 5*time.Second)}
 	w.pull = func() {
 		if autoPullAndMerge(paths) == nil {
 			touchPullMarker(paths) // the TUI's freshness window sees this pull
 		}
 	}
-	w.prompt = func(card approvalcard.Card, lease bool) (approvalprompt.Result, error) {
+	w.prompt = func(ctx context.Context, card approvalcard.Card, lease bool) (approvalprompt.Result, error) {
 		body := card.Body()
 		if f := card.Footer(); f != "" {
 			body += "\n\n" + f
 		}
 		body += "\n\n" + approvalcard.Passphrase + ":"
 		if lease {
-			return approvalprompt.AskLease(card.Title(), body, approvalcard.LeaseDurations, card.Default, w.timeout)
+			return approvalprompt.AskLeaseCtx(ctx, card.Title(), body, approvalcard.LeaseDurations, card.Default, w.timeout)
 		}
-		return approvalprompt.Ask(card.Title(), body, w.timeout)
+		return approvalprompt.AskCtx(ctx, card.Title(), body, w.timeout)
 	}
 	w.touches = func(subject string) string {
 		client, err := requireAdminSession(paths)
@@ -193,7 +196,17 @@ func (w *approvalWatcher) tick() {
 		}
 		w.asked[q.id] = time.Now()
 		w.tally.asked++
-		res, err := w.prompt(q.card, q.lease)
+		// While the dialog is up, another device or the TUI may answer
+		// the same question; then this dialog closes by itself.
+		ctx, cancel := context.WithCancel(context.Background())
+		go w.closeWhenAnswered(ctx, cancel, q.id)
+		res, err := w.prompt(ctx, q.card, q.lease)
+		cancel()
+		if errors.Is(err, approvalprompt.ErrClosed) {
+			w.seen[q.id] = true
+			w.note(q, "closed: answered elsewhere")
+			continue
+		}
 		if err != nil {
 			w.note(q, "no dialog: "+err.Error())
 			return // no GUI right now; the TUI still has it
@@ -219,6 +232,39 @@ func (w *approvalWatcher) tick() {
 		}
 		return // one dialog per tick keeps the screen calm
 	}
+}
+
+// closeWhenAnswered pulls on a short cadence while a dialog is open and
+// cancels it as soon as the question is no longer pending.
+func (w *approvalWatcher) closeWhenAnswered(ctx context.Context, cancel context.CancelFunc, id string) {
+	every := w.closeEvery
+	if every <= 0 {
+		every = 5 * time.Second
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			w.pull()
+			if !w.open(id) {
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+// open says whether the question with this id is still pending.
+func (w *approvalWatcher) open(id string) bool {
+	for _, q := range w.scan() {
+		if q.id == id {
+			return true
+		}
+	}
+	return false
 }
 
 // note records one dialog outcome in the audit log (`dop watch --filter
