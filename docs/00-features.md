@@ -1,6 +1,6 @@
 # DOP — Feature Sheet
 
-Every DOP feature as of **v1.13.0**, in one scannable table. Grouped by surface, not by the version each landed in.
+Every DOP feature as of **v1.21.0**, in one scannable table. Grouped by surface, not by the version each landed in.
 
 | Area | Feature | What it does | Since |
 |---|---|---|---|
