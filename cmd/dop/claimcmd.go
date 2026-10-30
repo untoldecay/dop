@@ -315,6 +315,20 @@ func runClaim(args []string) int {
 		ClaimedAt: claimedAt,
 	}
 	rec := vaultCapability2Record(crec, capIDHex)
+	// v1.21.1 — seal the env to the agent's P-256 key now, as the remote
+	// approval does, so bearer-free exec works from the first call. Until
+	// now only the TUI's issue screen did it (auto-reseal while it stayed
+	// open); a claim approved from the dialog left the agent asking for
+	// `dop token reseal`.
+	if keyType == vault.KeyTypeP256 {
+		wrapped, err := sealEnvWrapped(v, &rec)
+		if err != nil {
+			os.Remove(newBundlePath)
+			fmt.Fprintf(os.Stderr, "dop claim: seal env: %v\n", err)
+			return 1
+		}
+		rec.EnvWrapped = wrapped
+	}
 	if err := signRecordViaDaemon(client, &rec); err != nil {
 		os.Remove(newBundlePath)
 		fmt.Fprintf(os.Stderr, "dop claim: sign: %v\n", err)

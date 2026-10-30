@@ -66,6 +66,9 @@ pass "approval unblocks claim"
 echo "=== [4] agent key present, exec works"
 DOP_TOKEN="$BEARER" "$DOP" exec --agent-name a -- env 2>/dev/null | grep -q "NOTION_TOKEN=" || fail "exec broke"
 pass "post-approval exec works"
+# v1.21.1 — the claim sealed the env to the agent key: bearer-free exec works at once, no reseal.
+"$DOP" exec --agent-name sasagent -- env 2>"$WORKROOT/bf.err" | grep -q "NOTION_TOKEN=" || { cat "$WORKROOT/bf.err"; fail "bearer-free exec needs a reseal after a local claim"; }
+pass "bearer-free exec works right after the claim"
 
 echo "=== [5] reject path — claim in background, reject aborts"
 issue2=$("$DOP" token issue --grants notion.read --name sasR 2>&1)
