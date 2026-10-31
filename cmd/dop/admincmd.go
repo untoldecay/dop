@@ -46,6 +46,9 @@ func runAdmin(args []string) int {
 	case "__session-daemon":
 		// Internal: fork target from `dop admin login`. Not shown in help.
 		return runAdminSessionDaemon(args[1:])
+	case "__approver":
+		// v1.22 — helper process behind the DOP approval window.
+		return runApprover(args[1:])
 	case "__gui-unlock":
 		// rc7h — hidden entrypoint. Called by the TUI when it detects a
 		// locked admin session mid-flow. Pops the osascript passphrase

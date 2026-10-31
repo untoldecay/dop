@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>DOP</title>
+<style>
+:root{--bg:#f6f4f1;--fg:#2b2730;--muted:#7a7480;--card:#ffffff;--line:#e6e2dd;--orange:#ee7f3b;--ink:#3a3239;--ok:#2b2730;--no:#d64545;--amber:#c48a1f}
+@media(prefers-color-scheme:dark){:root{--bg:#151417;--fg:#f0ecea;--muted:#9a949e;--card:#1f1d22;--line:#2d2a31}}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:15px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;-webkit-user-select:none;user-select:none;overflow:hidden}
+main{display:grid;grid-template-columns:1fr 280px;height:100vh}
+section{padding:26px 28px 22px 30px;display:flex;flex-direction:column;min-width:0}
+h1{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 14px;font-weight:600}
+.effect{font-size:20px;line-height:1.3;margin:0 0 16px;font-weight:600;letter-spacing:-.01em}
+dl{margin:0 0 12px;display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:14px}
+dt{color:var(--muted)}dd{margin:0;word-break:break-word}
+.body{white-space:pre-wrap;color:var(--fg);font-size:14px;margin:0 0 10px}
+.foot{color:var(--muted);font-size:13px;margin:0 0 auto}
+label{display:block;color:var(--muted);font-size:12px;margin:14px 0 6px}
+input{width:100%;box-sizing:border-box;padding:11px 12px;font-size:15px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--fg);outline:none;-webkit-user-select:text;user-select:text}
+input:focus{border-color:var(--orange);box-shadow:0 0 0 3px rgba(238,127,59,.18)}
+.row{display:flex;gap:8px;margin-top:12px;align-items:center}
+button{min-height:38px;padding:0 16px;font-size:14px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--fg);cursor:pointer;font-weight:500}
+button.approve{background:var(--ink);border-color:var(--ink);color:#fff;margin-left:auto}
+button.deny{color:var(--no)}
+button.cycle{color:var(--muted)}
+.red button.approve{background:var(--card);color:var(--fg);border-color:var(--line)}
+.red button.deny{background:var(--no);border-color:var(--no);color:#fff}
+.err{color:var(--no);font-size:13px;min-height:1.2em;margin-top:8px}
+.left{color:var(--muted);font-size:12px;margin-left:8px}
+aside{position:relative;background:var(--card);border-left:1px solid var(--line);overflow:hidden}
+aside .stage{position:absolute;inset:0;display:flex;align-items:flex-end;justify-content:center}
+svg{width:260px;height:260px;margin-bottom:-70px;overflow:visible}
+.amber #blob{fill:var(--amber)}.red #blob{fill:var(--no)}
+#face{stroke:var(--ink);stroke-width:7;stroke-linecap:round;fill:none}
+.red #face,.amber #face{stroke:#2b2730}
+.ex{opacity:0;transition:opacity .18s ease}
+.ex.on{opacity:1}
+@keyframes breathe{0%,100%{transform:translateY(0) scale(1,1)}50%{transform:translateY(-3px) scale(1.012,1.03)}}
+#body{transform-origin:50% 100%;animation:breathe 3.6s ease-in-out infinite}
+@keyframes nod{0%{transform:translateY(0)}35%{transform:translateY(7px)}100%{transform:translateY(0)}}
+@keyframes wiggle{0%{transform:rotate(0)}25%{transform:rotate(-3deg)}75%{transform:rotate(3deg)}100%{transform:rotate(0)}}
+@keyframes bounce{0%{transform:translateY(0) scale(1)}40%{transform:translateY(-14px) scale(.98,1.04)}100%{transform:translateY(0) scale(1)}}
+#react{transform-origin:50% 100%}
+#react.nod{animation:nod .42s ease-out}#react.wiggle{animation:wiggle .5s ease-in-out}#react.bounce{animation:bounce .55s ease-out}
+#eyes{transform-origin:50% 50%}
+#eyes.blink{animation:blink .14s ease-in-out}
+@keyframes blink{50%{transform:scaleY(.08)}}
+</style></head>
+<body>
+<main id="main">
+  <section>
+    <h1 id="title"></h1>
+    <p class="effect" id="effect"></p>
+    <dl id="rows"></dl>
+    <p class="body" id="body" hidden></p>
+    <p class="foot" id="foot"></p>
+    <label for="p" id="plabel">Approval passphrase</label>
+    <input id="p" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="err" id="err"></div>
+    <div class="row">
+      <button class="deny" id="deny">Deny</button>
+      <button class="cycle" id="cycle" hidden></button>
+      <span class="left" id="left"></span>
+      <button class="approve" id="approve">Approve</button>
+    </div>
+  </section>
+  <aside><div class="stage">
+    <svg viewBox="0 0 260 260" aria-hidden="true">
+      <g id="react"><g id="body">
+        <circle id="blob" cx="130" cy="150" r="118" fill="#ee7f3b"/>
+        <g id="face">
+          <g id="eyes">
+            <!-- calm: closed, content arcs (the reference) -->
+            <g class="ex eyes-calm on"><path d="M78 108 q17 18 34 0"/><path d="M148 108 q17 18 34 0"/></g>
+            <!-- attentive: open, looking at you -->
+            <g class="ex eyes-open"><circle cx="95" cy="110" r="6" fill="#3a3239" stroke="none"/><circle cx="165" cy="110" r="6" fill="#3a3239" stroke="none"/></g>
+            <!-- warning: narrowed -->
+            <g class="ex eyes-flat"><path d="M80 112 h30"/><path d="M150 112 h30"/></g>
+            <!-- sad: tilted -->
+            <g class="ex eyes-sad"><path d="M80 104 l30 10"/><path d="M180 104 l-30 10"/></g>
+          </g>
+          <g id="mouth">
+            <path class="ex mouth-smile on" d="M88 140 q42 44 84 0"/>
+            <path class="ex mouth-small" d="M110 146 q20 14 40 0"/>
+            <path class="ex mouth-flat" d="M100 150 h60"/>
+            <path class="ex mouth-big" d="M80 136 q50 62 100 0"/>
+            <path class="ex mouth-frown" d="M96 160 q34 -30 68 0"/>
+            <path class="ex mouth-o" d="M130 140 m-9 0 a9 11 0 1 0 18 0 a9 11 0 1 0 -18 0"/>
+          </g>
+        </g>
+      </g></g>
+    </svg>
+  </div></aside>
+</main>
+<script>
+const D = /*DOP_DATA*/null;
+const $ = id => document.getElementById(id);
+// ---- character: a small state machine with independent layers (Rive-style) ----
+// layers: breathe (CSS loop) · blink (timer, only when eyes are open) · expression (eyes+mouth set) · reaction (one-shot)
+const character = (() => {
+  const EXPR = {
+    calm:      {eyes:'eyes-calm', mouth:'mouth-smile'},
+    attentive: {eyes:'eyes-open', mouth:'mouth-small'},
+    listening: {eyes:'eyes-open', mouth:'mouth-o'},
+    warning:   {eyes:'eyes-flat', mouth:'mouth-flat'},
+    happy:     {eyes:'eyes-calm', mouth:'mouth-big'},
+    sad:       {eyes:'eyes-sad',  mouth:'mouth-frown'},
+  };
+  let state = 'calm', blinkTimer = null;
+  function show(group, cls){ group.querySelectorAll('.ex').forEach(e => e.classList.toggle('on', e.classList.contains(cls))); }
+  function set(next){
+    if (!EXPR[next] || next === state) return;
+    state = next;
+    show($('eyes'), EXPR[next].eyes); show($('mouth'), EXPR[next].mouth);
+    scheduleBlink();
+  }
+  function scheduleBlink(){
+    clearTimeout(blinkTimer);
+    if (EXPR[state].eyes !== 'eyes-open') return;      // closed eyes do not blink
+    blinkTimer = setTimeout(() => { $('eyes').classList.remove('blink'); void $('eyes').offsetWidth; $('eyes').classList.add('blink'); scheduleBlink(); }, 2600 + Math.random()*2800);
+  }
+  function react(name){ const r = $('react'); r.classList.remove('nod','wiggle','bounce'); void r.offsetWidth; r.classList.add(name); }
+  return {set, react, get state(){ return state; }};
+})();
+// ---- card ----
+$('title').textContent = D.title;
+$('effect').textContent = D.effect;
+for (const [k,v] of D.rows || []) { const dt=document.createElement('dt'); dt.textContent=k; const dd=document.createElement('dd'); dd.textContent=v; $('rows').append(dt, dd); }
+if (D.body) { $('body').hidden = false; $('body').textContent = D.body; }
+$('foot').textContent = D.footer || '';
+$('main').classList.add(D.mood);
+let choice = 0;
+if (D.lease && D.options && D.options.length) {
+  choice = D.default || 0;
+  $('cycle').hidden = false;
+  const paint = () => $('cycle').textContent = D.options[choice].label + ' ▸';
+  paint();
+  $('cycle').onclick = () => { choice = (choice+1) % D.options.length; paint(); character.react('wiggle'); };
+}
+// ---- mood → character ----
+const baseline = D.mood === 'red' ? 'warning' : 'calm';
+character.set(baseline);
+setTimeout(() => character.react('bounce'), 250);          // hello
+$('p').addEventListener('focus', () => character.set(D.mood === 'red' ? 'warning' : 'attentive'));
+$('p').addEventListener('blur',  () => { if ($('p').value === '') character.set(baseline); });
+let typeTick = 0;
+$('p').addEventListener('input', () => { character.set(D.mood === 'red' ? 'warning' : 'listening'); if (++typeTick % 3 === 0) character.react('nod'); });
+// ---- decision ----
+let decided = false;
+function decide(button){
+  if (decided) return;
+  if (button === 'Approve' && $('p').value === '') { $('err').textContent = 'Type the approval passphrase, or Deny.'; $('p').focus(); character.react('wiggle'); return; }
+  decided = true;
+  character.set(button === 'Approve' ? 'happy' : 'sad');
+  character.react(button === 'Approve' ? 'bounce' : 'nod');
+  const pass = $('p').value; $('p').value = '';
+  const opt = (D.lease && D.options && D.options.length) ? D.options[choice].value : '';
+  setTimeout(() => { if (D.demo) { decided = false; character.set(baseline); return; } window.decide(button, opt, pass); }, button === 'Approve' ? 520 : 380);
+}
+$('approve').onclick = () => decide('Approve');
+$('deny').onclick = () => decide('Deny');
+document.addEventListener('keydown', e => { if (e.key === 'Enter') decide('Approve'); if (e.key === 'Escape') decide('Deny'); });
+// ---- time left ----
+if (D.timeoutMs && !D.demo) {
+  const end = Date.now() + D.timeoutMs;
+  const tick = () => { const s = Math.max(0, Math.round((end - Date.now())/1000)); $('left').textContent = s + ' s'; if (s > 0) setTimeout(tick, 1000); };
+  tick();
+}
+if (D.demo) { $('left').textContent = 'demo'; }
+setTimeout(() => $('p').focus(), 350);
+</script>
+</body></html>

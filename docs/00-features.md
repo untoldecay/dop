@@ -45,6 +45,7 @@ Every DOP feature as of **v1.21.0**, in one scannable table. Grouped by surface,
 | Agent identity | Direct availability | Grant edits + bearer rotation take effect on the agent's next exec without re-claim. ECDH re-wrap over the admin daemon. | v1.12 |
 | Agent identity | Way B (bearer-free exec) | `dop exec` without `$DOP_TOKEN` scans local agent-keys and resolves implicitly. For long-running agents on their own machine. | v1.13.0-rc11 |
 | Agent identity | Agent key doctor | `dop doctor` reports SE vs file-key counts, flags unsigned-build downgrades loudly. | v1.11 |
+| Approval UX | DOP approval window (opt-in) | `DOP_APPROVER=window`: the approval card in dop's own window with the DOP character — an orange face whose eyes and mouth follow the mood (calm · attentive · listening · warning · happy · sad), breathing, blinking, nodding as you type. Helper process `dop admin __approver`; `--demo` to look at it. System alert stays the fallback. | v1.22 |
 | Approval UX | Native dialog first | A local claim on the admin's machine raises the approval card as a macOS dialog; the page below is the fallback when no dialog answers. | v1.21 |
 | Approval UX | QR + Cloudflared tunnel (fallback) | The agent's machine stands up an HTTPS tunnel per claim and prints a QR with the URL — for agents on machines that are neither the admin's nor a Server install. | v1.9 |
 | Approval UX | Phone-based approval (fallback) | Any phone camera opens the URL; the page is the approval card and asks for the approval passphrase. No app to install. | v1.9 |

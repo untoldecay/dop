@@ -59,15 +59,8 @@ func newApprovalWatcher(paths *config.Paths) *approvalWatcher {
 		}
 	}
 	w.prompt = func(ctx context.Context, card approvalcard.Card, lease bool) (approvalprompt.Result, error) {
-		body := card.Body()
-		if f := card.Footer(); f != "" {
-			body += "\n\n" + f
-		}
-		body += "\n\n" + approvalcard.Passphrase + ":"
-		if lease {
-			return approvalprompt.AskLeaseCtx(ctx, card.Title(), body, approvalcard.LeaseDurations, card.Default, w.timeout)
-		}
-		return approvalprompt.AskCtx(ctx, card.Title(), body, w.timeout)
+		// dop's own window when DOP_APPROVER=window, else the system alert.
+		return approvalprompt.AskCard(ctx, approvalprompt.Question{Card: card, Lease: lease, Timeout: w.timeout})
 	}
 	w.touches = func(subject string) string {
 		client, err := requireAdminSession(paths)
