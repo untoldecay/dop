@@ -1,5 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'">
 <title>DOP</title>
 <style>
 :root{--bg:#f6f4f1;--fg:#2b2730;--muted:#7a7480;--card:#ffffff;--line:#e6e2dd;--orange:#ee7f3b;--ink:#3a3239;--ok:#2b2730;--no:#d64545;--amber:#c48a1f}
@@ -53,7 +54,7 @@ svg{width:260px;height:260px;margin-bottom:-70px;overflow:visible}
     <p class="body" id="body" hidden></p>
     <p class="foot" id="foot"></p>
     <label for="p" id="plabel">Approval passphrase</label>
-    <input id="p" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <input id="p" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false">
     <div class="err" id="err"></div>
     <div class="row">
       <button class="deny" id="deny">Deny</button>
