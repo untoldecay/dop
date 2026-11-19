@@ -767,6 +767,8 @@ Fingerprint, subject, generation, expiry, binding.
 dop whoami
 ```
 
+With no `DOP_TOKEN` / `DOP_TOKEN_FILE`, it lists the claimed agent keys on this host instead (`claimed on this host`), each with the `dop exec --agent-name <subject> -- <cmd>` line to use it. A claimed agent drops its bearer on purpose, so this is how it confirms its access. Nothing is decrypted. With neither a bearer nor a claimed key it exits 1 with `no DOP access here`.
+
 ### `dop env`
 
 Shell-eval-able `export KEY='value'` lines for the current bearer's scoped env. Same binding check as `exec`.
