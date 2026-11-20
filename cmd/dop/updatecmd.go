@@ -31,6 +31,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -423,6 +424,11 @@ func performUpdate(rel *release) error {
 	if migrateHint != "" {
 		fmt.Fprintln(os.Stderr, migrateHint)
 	}
+	// dop-153 — the new binary carries the new skill: let it rewrite
+	// the skill files dop installed and nobody edited since.
+	refresh := exec.Command(targetBin, "skill", "refresh")
+	refresh.Stdout, refresh.Stderr = os.Stderr, os.Stderr
+	_ = refresh.Run()
 	fmt.Fprintln(os.Stderr, "  Re-run any `dop` command to use the new version.")
 	return nil
 }

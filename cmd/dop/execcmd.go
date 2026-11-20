@@ -150,6 +150,7 @@ func runExec(args []string) int {
 	if !admin.KeyFileExists(paths) && agentrules.NudgeDue(paths) {
 		fmt.Fprintln(os.Stderr, "dop exec: the DOP standing rules are not confirmed on this host — run `dop skill rules`, add them to your always-on instructions, then `dop skill rules --ack`.")
 	}
+	hintStaleSkill("dop exec")
 	if err := execChild(child, env, cleanEnv); err != nil {
 		var ce childExit
 		if errors.As(err, &ce) {
@@ -263,6 +264,7 @@ func runWhoami(args []string) int {
 	}
 	fmt.Printf("bearer: %s\n", bearerFingerprint(bearer))
 	printWhoamiRecord(res)
+	hintStaleSkill("dop whoami")
 	return 0
 }
 
@@ -290,6 +292,7 @@ func whoamiAgentKeys(bearerErr error) int {
 		})
 		fmt.Printf("use:        dop exec --agent-name %s -- <cmd>\n", c.rec.Subject)
 	}
+	hintStaleSkill("dop whoami")
 	return 0
 }
 

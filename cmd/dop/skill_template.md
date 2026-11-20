@@ -9,6 +9,8 @@ description: Use when needing to call a service whose credentials live in the DO
 
 DOP holds service credentials in a per-agent scoped vault. Always invoke the target command through `dop exec` — never handle bearers directly.
 
+**Is this copy current?** The `dop-skill:` line under the header names the dop that wrote it. If `dop skill check` prints a different `sha:`, or dop says your skill is from an older version, this text is outdated: follow `dop skill show` instead, and tell the operator so they can run `dop skill install --force`.
+
 ## If you don't normally use DOP (short rule for unfamiliar agents)
 
 **Use `DOP_TOKEN` if it's in your environment, or this host's claimed agent key if `dop whoami` shows one. Otherwise behave as if DOP isn't installed.**
@@ -22,7 +24,7 @@ DOP holds service credentials in a per-agent scoped vault. Always invoke the tar
 **Why:** every DOP command that prints a secret requires a native approval popup the operator sees. An agent that invokes `dop use` on its own triggers an unexpected popup — the operator will likely deny (because they didn't ask for this), and your task fails anyway. Announcing your intent (either by using what's in env OR declining the task cleanly) is strictly better than guessing.
 
 **Do NOT invoke on your own:** `dop use`, `dop token issue`, `dop env`, `dop claim`.
-**Safe commands (no popup, no mutation):** `dop whoami`, `dop version`, `dop help`, `dop exec --agent-name <X> -- <cmd>` (uses `DOP_TOKEN` if set, else this host's claimed agent key; refuses otherwise, with no popup).
+**Safe commands (no popup, no mutation):** `dop whoami`, `dop version`, `dop help`, `dop skill check`, `dop skill show`, `dop exec --agent-name <X> -- <cmd>` (uses `DOP_TOKEN` if set, else this host's claimed agent key; refuses otherwise, with no popup).
 
 ## When to Use
 

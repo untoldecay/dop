@@ -92,7 +92,7 @@ func installPlugin(force bool) error {
 		// Skill: plugins/<name>/skills/<skill-slug>/SKILL.md. The slug
 		// matches the frontmatter `name:` in skill_template.md so Claude
 		// Code's namespacing lands it at /dop:dop-credential-access.
-		{filepath.Join(pluginDir, "skills", "dop-credential-access", "SKILL.md"), skillTemplate, "plugin:skill"},
+		{filepath.Join(pluginDir, "skills", "dop-credential-access", "SKILL.md"), renderedSkill(), "plugin:skill"},
 		// Slash command: plugins/<name>/commands/<cmd>.md → /dop:dop-use.
 		{filepath.Join(pluginDir, "commands", "dop-use.md"), dopUseCommandTemplate, "plugin:command"},
 	}

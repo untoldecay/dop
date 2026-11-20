@@ -38,7 +38,7 @@ var dopUseCommandTemplate string
 
 func runSkill(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: dop skill <install|path|show|show-command|rules [--ack]>")
+		fmt.Fprintln(os.Stderr, "usage: dop skill <install|path|show|show-command|check|refresh|rules [--ack]>")
 		return 2
 	}
 	switch args[0] {
@@ -52,6 +52,10 @@ func runSkill(args []string) int {
 		return runSkillShow(args[1:])
 	case "show-command":
 		return runSkillShowCommand(args[1:])
+	case "check":
+		return runSkillCheck(args[1:])
+	case "refresh":
+		return runSkillRefresh(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "dop skill: unknown subcommand %q\n", args[0])
 		return 2
@@ -114,7 +118,7 @@ func runSkillInstall(args []string) int {
 		}
 		target = filepath.Join(dir, "SKILL.md")
 	}
-	if err := installFile(target, skillTemplate, "skill", *force); err != nil {
+	if err := installFile(target, renderedSkill(), "skill", *force); err != nil {
 		fmt.Fprintf(os.Stderr, "dop skill install: %v\n", err)
 		return 1
 	}
@@ -144,7 +148,7 @@ func runSkillInstall(args []string) int {
 		// returns nil; loose files above are the reliable fallback.
 		_ = installPlugin(*force)
 	}
-	fmt.Fprintln(os.Stderr, "  Re-run `dop skill install` after upgrading dop to pick up any changes.")
+	fmt.Fprintln(os.Stderr, "  `dop update` refreshes these files; `dop exec` says so if one falls behind.")
 	fmt.Fprintln(os.Stderr, "  For non-Claude agents: pass `--path <where-your-agent-reads-skills>` OR")
 	fmt.Fprintln(os.Stderr, "  invoke `dop skill show` / `dop skill show-command` and let the agent install itself.")
 	return 0
@@ -165,6 +169,7 @@ func installFile(target, content, kind string, force bool) error {
 	if existing, rerr := os.ReadFile(target); rerr == nil {
 		if string(existing) == content {
 			fmt.Fprintf(os.Stderr, "dop skill install: %s is already up-to-date (%s)\n", target, kind)
+			recordSkillInstall(target, kind, content)
 			return nil
 		}
 		if !force {
@@ -174,6 +179,7 @@ func installFile(target, content, kind string, force bool) error {
 	if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", target, err)
 	}
+	recordSkillInstall(target, kind, content)
 	return nil
 }
 
@@ -188,7 +194,7 @@ func runSkillPath(args []string) int {
 }
 
 func runSkillShow(args []string) int {
-	_, err := os.Stdout.WriteString(skillTemplate)
+	_, err := os.Stdout.WriteString(renderedSkill())
 	if err != nil {
 		return 1
 	}
