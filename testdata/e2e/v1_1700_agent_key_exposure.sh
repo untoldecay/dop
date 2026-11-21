@@ -91,4 +91,11 @@ set -e
 echo "$use_out" | grep -q "dop exec --agent-name honey" || { echo "$use_out"; fail "dop use did not point to dop exec"; }
 pass "dop use → exec hint"
 
+echo "=== [5b] a refused dop use stops the eval chain (no fallback exec)"
+set +e
+( eval "$("$DOP" use honey </dev/null 2>/dev/null)" && echo CHAIN_RAN ) > "$WORKROOT/chain.out" 2>&1
+set -e
+grep -q CHAIN_RAN "$WORKROOT/chain.out" && fail "eval \"\$(dop use …)\" && … ran after a refusal"
+pass "refused use → eval fails, the && step never runs"
+
 echo "V1.18 agent-key-exposure e2e: PASS"
