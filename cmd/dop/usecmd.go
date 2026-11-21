@@ -33,6 +33,7 @@ import (
 	"github.com/fray/dop/internal/cli/printguard"
 	"github.com/fray/dop/internal/config"
 	"github.com/fray/dop/internal/vault"
+	"golang.org/x/term"
 )
 
 // defaultTokenFileTTL is how long a `--token-file` is considered
@@ -301,3 +302,19 @@ var (
 	_ = errors.New
 	_ = fmt.Errorf
 )
+
+// useExit makes a failed `dop use` stop the shell line it sits in. The
+// documented form is `eval "$(dop use X)" && dop exec …`, and eval of
+// empty output succeeds — so a refused or failed use went on to run
+// dop exec without the bearer, which then fell back to whatever agent
+// key lives here (2026-11-21). On failure, print `false` for eval to run.
+func useExit(rc int) int {
+	if rc == 0 {
+		return 0
+	}
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		fmt.Println("false")
+	}
+	fmt.Fprintln(os.Stderr, "dop use: no access — stop here and tell the operator what dop said. Don't run the task another way.")
+	return rc
+}

@@ -140,7 +140,7 @@ func main() {
 	case "token":
 		os.Exit(runToken(os.Args[2:]))
 	case "use":
-		os.Exit(runUse(os.Args[2:]))
+		os.Exit(useExit(runUse(os.Args[2:])))
 	case "integration":
 		os.Exit(runIntegration(os.Args[2:]))
 	case "grant":
