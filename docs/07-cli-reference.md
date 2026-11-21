@@ -774,13 +774,13 @@ dop skill rules --ack
 
 ### `dop whoami`
 
-Fingerprint, subject, generation, expiry, binding.
+Fingerprint, subject, generation, expiry, binding, the grants, and the variable names a `dop exec` child gets (names only — values are never printed).
 
 ```
 dop whoami
 ```
 
-With no `DOP_TOKEN` / `DOP_TOKEN_FILE`, it lists the claimed agent keys on this host instead (`claimed on this host`), each with the `dop exec --agent-name <subject> -- <cmd>` line to use it. A claimed agent drops its bearer on purpose, so this is how it confirms its access. Nothing is decrypted. With neither a bearer nor a claimed key it exits 1 with `no DOP access here`.
+With no `DOP_TOKEN` / `DOP_TOKEN_FILE`, it lists the claimed agent keys on this host instead (`claimed on this host`), each with its grants, its variable names and the `dop exec --agent-name <subject> -- <cmd>` line to use it. A claimed agent drops its bearer on purpose, so this is how it confirms its access. The names come from the sealed env, which only this host's agent key opens; values are never printed. With neither a bearer nor a claimed key it exits 1 with `no DOP access here`.
 
 ### `dop env`
 
