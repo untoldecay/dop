@@ -36,6 +36,7 @@ type approvalWatcher struct {
 	pull   func()
 	prompt func(ctx context.Context, card approvalcard.Card, lease bool) (approvalprompt.Result, error)
 	run    func(args []string, stdin string) error
+	notify func(title, body string)
 	// touches names the grants of a subject (what the lease / claim
 	// reaches); nil or "" when the vault can't be read right now.
 	touches    func(subject string) string
@@ -51,7 +52,7 @@ type approvalWatcher struct {
 }
 
 func newApprovalWatcher(paths *config.Paths) *approvalWatcher {
-	w := &approvalWatcher{paths: paths, timeout: userprefs.Load(paths).ApprovalTimeout(), seen: map[string]bool{},
+	w := &approvalWatcher{paths: paths, timeout: remoteApprovalTimeout(userprefs.Load(paths).ApprovalTimeout()), seen: map[string]bool{},
 		reask: envDuration("DOP_WATCH_REASK", 3*time.Minute), closeEvery: envDuration("DOP_WATCH_CLOSE_CHECK", 5*time.Second)}
 	w.pull = func() {
 		if autoPullAndMerge(paths) == nil {
@@ -59,16 +60,10 @@ func newApprovalWatcher(paths *config.Paths) *approvalWatcher {
 		}
 	}
 	w.prompt = func(ctx context.Context, card approvalcard.Card, lease bool) (approvalprompt.Result, error) {
-		body := card.Body()
-		if f := card.Footer(); f != "" {
-			body += "\n\n" + f
-		}
-		body += "\n\n" + approvalcard.Passphrase + ":"
-		if lease {
-			return approvalprompt.AskLeaseCtx(ctx, card.Title(), body, approvalcard.LeaseDurations, card.Default, w.timeout)
-		}
-		return approvalprompt.AskCtx(ctx, card.Title(), body, w.timeout)
+		// dop's own window when DOP_APPROVER=window, else the system alert.
+		return approvalprompt.AskCard(ctx, approvalprompt.Question{Card: card, Lease: lease, Timeout: w.timeout})
 	}
+	w.notify = approvalprompt.Notify
 	w.touches = func(subject string) string {
 		client, err := requireAdminSession(paths)
 		if err != nil {
@@ -99,6 +94,16 @@ func newApprovalWatcher(paths *config.Paths) *approvalWatcher {
 		return nil
 	}
 	return w
+}
+
+// remoteApprovalTimeout: a question from another machine waits at least
+// two minutes — the operator wasn't expecting it, unlike a local prompt
+// they just triggered. The preference still applies when it is longer.
+func remoteApprovalTimeout(pref time.Duration) time.Duration {
+	if pref < 2*time.Minute {
+		return 2 * time.Minute
+	}
+	return pref
 }
 
 // loop runs until the process ends (the daemon exits with the session).
@@ -194,8 +199,18 @@ func (w *approvalWatcher) tick() {
 		if t, ok := w.asked[q.id]; ok && time.Since(t) < w.reask {
 			continue
 		}
+		_, askedBefore := w.asked[q.id]
 		w.asked[q.id] = time.Now()
 		w.tally.asked++
+		// First time this question comes up: a notification too, in case
+		// the dialog lands where the operator isn't looking.
+		if !askedBefore && w.notify != nil {
+			what := strings.TrimPrefix(q.card.Title(), "DOP — ") + ": " + q.card.Subject
+			if q.card.Where != "" {
+				what += " from " + q.card.Where
+			}
+			w.notify(what, "Waiting for your approval — the dialog is open")
+		}
 		// While the dialog is up, another device or the TUI may answer
 		// the same question; then this dialog closes by itself.
 		ctx, cancel := context.WithCancel(context.Background())

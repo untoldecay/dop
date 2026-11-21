@@ -13,6 +13,7 @@ require (
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/muesli/termenv v0.16.0
+	github.com/webview/webview_go v0.0.0-20240831120633-6173450d4dd6
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0

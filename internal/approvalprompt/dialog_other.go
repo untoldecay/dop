@@ -41,3 +41,6 @@ func Ask(title, body string, timeout time.Duration) (Result, error) {
 func AskLease(title, body string, durations []string, start int, timeout time.Duration) (Result, error) {
 	return Result{}, ErrUnsupported
 }
+
+// Notify is a no-op off macOS.
+func Notify(title, body string) {}

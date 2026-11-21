@@ -480,13 +480,13 @@ func (s *Session) opApprovalPopup(payload []byte) Response {
 		body, _ := json.Marshal(ApprovalPopupResp{Decision: "unsupported", Reason: "DOP_NO_POPUP=1"})
 		return okResp(body)
 	}
-	title := approvalcard.Card{Kind: approvalcard.KindOf(req.Kind), Subject: req.Subject}.Title()
+	card := approvalcard.Card{Kind: approvalcard.KindOf(req.Kind), Subject: req.Subject}
 	body := req.PromptText
 	if body == "" {
 		body = fmt.Sprintf("Approve %s for %q?", req.Kind, req.Subject)
 	}
 	timeout := time.Duration(req.TimeoutMs) * time.Millisecond
-	res, err := approvalprompt.Ask(title, body, timeout)
+	res, err := approvalprompt.AskCard(context.Background(), approvalprompt.Question{Card: card, Body: body, Timeout: timeout})
 	if err != nil {
 		if errors.Is(err, approvalprompt.ErrUnsupported) {
 			out, _ := json.Marshal(ApprovalPopupResp{Decision: "unsupported", Reason: err.Error()})

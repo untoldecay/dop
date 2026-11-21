@@ -141,3 +141,30 @@ func TestLeaseCardWording(t *testing.T) {
 		t.Fatal("moods")
 	}
 }
+
+// A remote question also posts a notification, once — not on every
+// re-ask of an unanswered dialog — and waits at least two minutes.
+func TestApprovalWatcherNotifiesOnceAndWaitsLonger(t *testing.T) {
+	paths := &config.Paths{Vault: t.TempDir()}
+	if err := remoteuse.WriteRequest(paths, remoteuse.Request{RequestID: "ffff6666", Subject: "cam-shell", Host: "vps",
+		Recipient: "age1x", RequestedAt: time.Now(), ExpiresAt: time.Now().Add(remoteuse.TTL), Nonce: "n"}); err != nil {
+		t.Fatal(err)
+	}
+	var notes []string
+	w := &approvalWatcher{paths: paths, seen: map[string]bool{}, pull: func() {}, reask: 0}
+	w.notify = func(title, body string) { notes = append(notes, title) }
+	w.prompt = func(context.Context, approvalcard.Card, bool) (approvalprompt.Result, error) {
+		return approvalprompt.Result{Timeout: true}, nil
+	}
+	w.tick()
+	w.tick()
+	if len(notes) != 1 || !strings.Contains(notes[0], "cam-shell") {
+		t.Fatalf("want one notification naming the subject, got %q", notes)
+	}
+	if got := remoteApprovalTimeout(60 * time.Second); got != 2*time.Minute {
+		t.Fatalf("60s preference → %v, want 2m", got)
+	}
+	if got := remoteApprovalTimeout(5 * time.Minute); got != 5*time.Minute {
+		t.Fatalf("a longer preference must win, got %v", got)
+	}
+}

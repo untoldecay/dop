@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -120,7 +121,10 @@ func run(ctx context.Context, title, body, middle string, timeout time.Duration)
 	report := `return ((gave up of r) as text) & linefeed & (button returned of r) & linefeed & (text returned of r)`
 	// Killing osascript takes its dialog down with it: that is how a
 	// question answered on another device disappears here.
-	cmd := exec.CommandContext(ctx, "osascript", "-e", dialog, "-e", report)
+	// `activate` first: osascript runs from the background session
+	// daemon, and without it the dialog opens behind the front app
+	// (remote leases timed out unseen, 2026-11-21).
+	cmd := exec.CommandContext(ctx, "osascript", "-e", "activate", "-e", dialog, "-e", report)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
@@ -182,4 +186,17 @@ func parseReport(out, middle string) (Result, error) {
 		}
 		return Result{}, errors.New("osascript: unexpected button")
 	}
+}
+
+// Notify posts a macOS notification: a remote question arriving while
+// the operator looks elsewhere. Best-effort; DOP_NO_NOTIFY turns it off.
+func Notify(title, body string) {
+	if os.Getenv("DOP_NO_NOTIFY") != "" {
+		return
+	}
+	esc := func(s string) string {
+		return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`)
+	}
+	_ = exec.Command("osascript", "-e",
+		fmt.Sprintf(`display notification "%s" with title "DOP" subtitle "%s" sound name "Glass"`, esc(body), esc(title))).Run()
 }
