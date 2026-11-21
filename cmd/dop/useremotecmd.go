@@ -240,5 +240,5 @@ func gitCommitPushRel(paths *config.Paths, msg string, rel ...string) error {
 	if err := runGitAllowExit(io.Discard, paths.Vault, []int{0, 1}, "commit", "-m", msg); err != nil {
 		return err
 	}
-	return runGit(io.Discard, paths.Vault, "push")
+	return pushOrPullAndRetry(paths)
 }

@@ -357,7 +357,19 @@ func runPull(args []string) int {
 		return 1
 	}
 
-	// Step 4: real 3-way merge on the decrypted plaintext.
+	// Step 4: no admin key here (server, agent host): this side only
+	// adds its own files, so combine them without decrypting.
+	if !admin.KeyFileExists(paths) {
+		if err := mergeWithoutAdminKey(paths, team); err != nil {
+			fmt.Fprintf(os.Stderr, "dop pull: can't combine your changes with the team's here: %v.\n", err)
+			fmt.Fprintln(os.Stderr, "  `dop pull --keep-team` takes the team's version (your unpushed changes are dropped).")
+			return 1
+		}
+		fmt.Fprintln(os.Stderr, "dop pull: your changes are on top of the team's now. `dop push` shares them.")
+		return 0
+	}
+
+	// Step 5: real 3-way merge on the decrypted plaintext.
 	return pullSmartMerge(paths, ours, theirs)
 }
 
@@ -555,6 +567,97 @@ func saveMergedVault(client *admin.Client, paths *config.Paths, v *vault.Vault) 
 // team didn't touch it → ours stays; we didn't touch it → the team's
 // version (or its deletion) lands; both changed → ours stays and the
 // path is returned so the caller can say so.
+// mergeWithoutAdminKey combines a diverged clone with the team's on a
+// host without the admin key (a server, an agent machine). Such a host
+// never edits vault.yaml — it adds its own files: staged claims, lease
+// requests, rules acks — so no decryption is needed: take the team's
+// tree, put this side's changed files back on top, commit. It refuses
+// when this side changed vault.yaml or a file the team changed too.
+// (2026-11-21: a claim committed on an old branch, its push was
+// rejected, and `dop pull` then wanted an admin key to merge.)
+func mergeWithoutAdminKey(paths *config.Paths, team string) error {
+	dir := paths.Vault
+	base, err := gitMergeBase(dir, "HEAD", team)
+	if err != nil {
+		return fmt.Errorf("no shared history with the team's vault")
+	}
+	b, err := gitLsTree(dir, base)
+	if err != nil {
+		return err
+	}
+	o, err := gitLsTree(dir, "HEAD")
+	if err != nil {
+		return err
+	}
+	t, err := gitLsTree(dir, team)
+	if err != nil {
+		return err
+	}
+	type change struct {
+		path string
+		blob []byte // nil: removed on this side
+	}
+	var mine []change
+	seen := map[string]bool{}
+	for _, m := range []map[string]string{b, o} {
+		for p := range m {
+			if seen[p] || o[p] == b[p] {
+				continue
+			}
+			seen[p] = true
+			if p == "vault.yaml" {
+				return fmt.Errorf("this host changed vault.yaml; only an admin can merge that")
+			}
+			if t[p] != b[p] && t[p] != o[p] {
+				return fmt.Errorf("%s changed here and on the team's side", p)
+			}
+			c := change{path: p}
+			if o[p] != "" {
+				if c.blob, err = gitShow(dir, "HEAD", p); err != nil {
+					return err
+				}
+			}
+			mine = append(mine, c)
+		}
+	}
+	if err := runGit(io.Discard, dir, "reset", "--hard", team); err != nil {
+		return err
+	}
+	for _, c := range mine {
+		full := filepath.Join(dir, filepath.FromSlash(c.path))
+		if c.blob == nil {
+			_ = os.Remove(full)
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(full, c.blob, 0o600); err != nil {
+			return err
+		}
+	}
+	if len(mine) == 0 {
+		return nil
+	}
+	if err := runGit(io.Discard, dir, "add", "-A", "."); err != nil {
+		return err
+	}
+	return runGitAllowExit(io.Discard, dir, []int{0, 1}, "commit", "-m", "dop: this host's changes on top of the team's vault")
+}
+
+// pushOrPullAndRetry pushes; when the push is refused (the team moved
+// since our pull), it pulls and pushes once more.
+func pushOrPullAndRetry(paths *config.Paths) error {
+	err := runGit(io.Discard, paths.Vault, "push")
+	if err == nil {
+		return nil
+	}
+	if perr := autoPullAndMerge(paths); perr != nil {
+		return fmt.Errorf("%v; pulling to retry: %v", err, perr)
+	}
+	return runGit(io.Discard, paths.Vault, "push")
+}
+
 func mergeTeamFiles(paths *config.Paths, base, team string) (kept []string) {
 	dir := paths.Vault
 	b, _ := gitLsTree(dir, base)

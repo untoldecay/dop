@@ -1449,7 +1449,11 @@ func autoPullAndMerge(paths *config.Paths) error {
 	if theirs == 0 {
 		return nil // ahead only; nothing to pull
 	}
-	// Diverged — do the real merge quietly.
+	// Diverged. No admin key here: this host only adds its own files.
+	if !admin.KeyFileExists(paths) {
+		return mergeWithoutAdminKey(paths, team)
+	}
+	// Do the real merge quietly.
 	client, err := requireAdminSession(paths)
 	if err != nil {
 		return fmt.Errorf("admin session needed to merge encrypted vaults")
