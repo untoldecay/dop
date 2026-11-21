@@ -44,6 +44,9 @@ type Prefs struct {
 	// 15min matches admin.DefaultIdleTTL. 0 (unset) → use default.
 	// -1 → never time out (operator must manually `dop admin logout`).
 	AdminIdleTTLSeconds int `yaml:"admin_idle_ttl_seconds,omitempty"`
+	// ListGroupBy — how a TUI list groups its rows, keyed by list
+	// ("grants", "integrations"): "project" or "tag"; absent = by name.
+	ListGroupBy map[string]string `yaml:"list_group_by,omitempty"`
 }
 
 // Admin-idle-TTL presets. "never" is encoded as the sentinel

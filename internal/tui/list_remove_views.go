@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"slices"
 	"sort"
 	"strings"
 
@@ -45,6 +44,7 @@ const (
 	integModeOwners             = 12 // v1.21 — who may act on a protected integration
 	integModeOwnersPass         = 13
 	integModeTokenEditNote      = 14 // v1.21 — free context for the agent
+	integModeMove               = 15 // `m`: pick the group an integration moves to
 )
 
 type integrationListView struct {
@@ -104,10 +104,34 @@ type integrationListView struct {
 	ownerWas     map[string]bool
 	ownerPrimary string // team name of the protector (cannot be unpicked)
 	ownerPass    textinput.Model
+
+	// grouping: g cycles name / project / tag; rows is what the cursor
+	// walks (one row per name by name, one per name and group otherwise).
+	groupBy   groupBy
+	rows      []groupRow
+	move      movePicker
+	keepGroup string
+	moveFlash string
 }
 
 func newIntegrationListView(c *admin.Client, p *config.Paths) *integrationListView {
-	return &integrationListView{client: c, paths: p, list: newNameList(), ownerPass: newFormInput(true)}
+	return &integrationListView{client: c, paths: p, list: newNameList(), ownerPass: newFormInput(true), groupBy: loadGroupBy(p, "integrations")}
+}
+
+// groupValues is what an integration is grouped by now.
+func (v *integrationListView) groupValues(name string) []string {
+	if v.groupBy == groupByTag {
+		return v.items[name].Tags
+	}
+	return v.items[name].Projects
+}
+
+func (v *integrationListView) rebuildRows(name, group string) {
+	v.rows = buildGroupRows(v.names, v.groupBy, v.groupValues)
+	if i := groupRowIndex(v.rows, name, group); i >= 0 {
+		v.cursor = i
+	}
+	v.cursor = max(min(v.cursor, len(v.rows)-1), 0)
 }
 
 func (v *integrationListView) Init() tea.Cmd { return v.load }
@@ -149,10 +173,10 @@ func (v *integrationListView) load() tea.Msg {
 }
 
 func (v *integrationListView) selectedName() string {
-	if v.cursor < 0 || v.cursor >= len(v.names) {
+	if v.cursor < 0 || v.cursor >= len(v.rows) {
 		return ""
 	}
-	return v.names[v.cursor]
+	return v.rows[v.cursor].id
 }
 
 func (v *integrationListView) referrers(name string) []string {
@@ -213,13 +237,8 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.names = append(v.names, n)
 		}
 		sort.Strings(v.names)
-		for i, n := range v.names {
-			if n == v.keep {
-				v.cursor = i
-			}
-		}
-		v.keep = ""
-		v.cursor = max(min(v.cursor, len(v.names)-1), 0)
+		v.rebuildRows(v.keep, v.keepGroup)
+		v.keep, v.keepGroup = "", ""
 		items := make([]list.Item, len(v.names))
 		for i, n := range v.names {
 			items[i] = nameItem{n, v.items[n].Description}
@@ -229,6 +248,16 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		v.width, v.height = mm.Width, mm.Height
 	case integActionMsg:
+		if v.pending == "move" {
+			// A move stays on the list: a flash, or the error on the status line.
+			v.mode, v.pending = integModeList, ""
+			if mm.err != "" {
+				v.err = "Move failed: " + cliErr(mm.err)
+				return v, nil
+			}
+			v.flash = v.moveFlash
+			return v, v.load
+		}
 		if mm.err != "" {
 			// Errors stay on the screen that caused them, in plain words.
 			v.err = map[string]string{"remove": "Remove", "scope": "Scope note", "rotate": "Rotate",
@@ -296,6 +325,8 @@ func (v *integrationListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateOwners(mm)
 		case integModeOwnersPass:
 			return v.updateOwnersPass(mm)
+		case integModeMove:
+			return v.updateMove(mm)
 		}
 	}
 	return v, nil
@@ -320,9 +351,9 @@ func (v *integrationListView) updateList(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "ctrl+c", "q":
 		v.done = true
 	case "up", "k":
-		stepCursor(&v.cursor, len(v.names), -1)
+		stepCursor(&v.cursor, len(v.rows), -1)
 	case "down", "j":
-		stepCursor(&v.cursor, len(v.names), 1)
+		stepCursor(&v.cursor, len(v.rows), 1)
 	case "enter":
 		if len(v.names) > 0 {
 			v.refreshTokens()
@@ -332,8 +363,56 @@ func (v *integrationListView) updateList(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(v.names) > 0 {
 			return v.runInfoAction(mm.String())
 		}
+	case "g":
+		r := groupRow{}
+		if v.cursor < len(v.rows) {
+			r = v.rows[v.cursor]
+		}
+		v.groupBy = v.groupBy.next()
+		saveGroupBy(v.paths, "integrations", v.groupBy)
+		v.rebuildRows(r.id, r.group)
+	case "m":
+		switch {
+		case len(v.rows) == 0:
+		case v.groupBy == groupByName:
+			v.flash = "Group the list first (g), then move an integration between groups."
+		default:
+			r := v.rows[v.cursor]
+			v.move = newMovePicker(r.id, r.group, allGroupValues(v.names, v.groupValues))
+			v.mode = integModeMove
+		}
 	}
 	return v, nil
+}
+
+// updateMove runs the move picker; a pick saves right away.
+func (v *integrationListView) updateMove(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	v.err = ""
+	done, ok, to := v.move.key(mm)
+	if !done {
+		return v, nil
+	}
+	if !ok {
+		v.mode = integModeList
+		return v, nil
+	}
+	// Locked: the unlock replays this enter here, on the same pick.
+	if cmd := v.locked(mm, &v.err); cmd != nil {
+		return v, cmd
+	}
+	name, from := v.move.id, v.move.from
+	args := integMoveArgs(name, v.items[name], v.groupBy, from, to)
+	where := to
+	if where == "" {
+		where = v.groupBy.noneLabel()
+	}
+	v.moveFlash = "Moved " + name + " to " + where + "."
+	v.keep, v.keepGroup = name, to
+	v.pending, v.mode = "move", integModeRun
+	return v, func() tea.Msg {
+		_, err := runDop("", args...)
+		return integActionMsg{err: err}
+	}
 }
 
 // refreshTokens reloads the credential names of the integration under
@@ -685,6 +764,8 @@ func (v *integrationListView) View() string {
 		return v.viewTokenRename(width, height)
 	case integModeOwners, integModeOwnersPass:
 		return v.viewOwners(width, height)
+	case integModeMove:
+		return frame(width, height, "Move integration", nil, "by "+v.groupBy.label(), v.move.rows(v.groupBy), "", footer(width, hint("enter", "move here"), keyBack))
 	}
 
 	km := integListKeys
@@ -698,11 +779,19 @@ func (v *integrationListView) View() string {
 		if v.help {
 			rows -= len(km.helpLines(width)) + 1
 		}
-		body = nameListBody(&v.list, "description", v.cursor, width, rows)
+		if v.groupBy == groupByName {
+			body = nameListBody(&v.list, "description", v.cursor, width, rows)
+		} else {
+			body = groupedBody(v.rows, v.groupBy, v.cursor, "description", func(n string) string { return v.items[n].Description }, width, rows)
+		}
 		st.setHint(v.rowHint(v.selectedName()))
 	}
 	body = km.overlay(body, width, frameRows(height), v.help)
-	return frame(width, height, "Integrations", nil, fmt.Sprintf("%d total", len(v.names)), body, st.String(), km.footerLine(width, v.help))
+	ctx := fmt.Sprintf("%d total", len(v.names))
+	if v.groupBy != groupByName {
+		ctx += " · by " + v.groupBy.label()
+	}
+	return frame(width, height, "Integrations", nil, ctx, body, st.String(), km.footerLine(width, v.help))
 }
 
 // rowHint is the status line for an integration row: full name when
@@ -724,7 +813,7 @@ var integListKeys = keyMap{
 	short: []key.Binding{keyOpen, keyBack},
 	full: [][]key.Binding{
 		{keyMove, hint("enter", "open integration"), hint("e", "edit"), hint("r", "remove")},
-		{keyBack, keyQuit},
+		{hint("g", "group by name / project / tag"), hint("m", "move to another group"), keyBack, keyQuit},
 	},
 }
 
@@ -898,6 +987,8 @@ func (v *integrationListView) viewRun(width, height int) string {
 		title = "Saving integration…"
 	case "rename-cred":
 		title = "Renaming credential…"
+	case "move":
+		title = "Moving " + v.move.id + "…"
 	}
 	return frame(width, height, title, nil, "", nil, "", "")
 }
@@ -1784,6 +1875,7 @@ const (
 	grantModeEdit    = 5
 	grantModeReview  = 6
 	grantModeRename  = 7
+	grantModeMove    = 8 // `m`: pick the group a grant moves to
 )
 
 type grantListView struct {
@@ -1817,10 +1909,35 @@ type grantListView struct {
 	renameIn, renamePass textinput.Model
 	renameAt             int    // 1: the passphrase input has the caret
 	keep                 string // id the cursor lands on after the next load
+	keepGroup            string // and the group it lands under
+
+	// grouping: g cycles name / project / tag; rows is what the cursor
+	// walks (one row per id by name, one per id and group otherwise).
+	groupBy groupBy
+	rows    []groupRow
+	move    movePicker
 }
 
 func newGrantListView(c *admin.Client, p *config.Paths) *grantListView {
-	return &grantListView{client: c, paths: p, list: newNameList()}
+	return &grantListView{client: c, paths: p, list: newNameList(), groupBy: loadGroupBy(p, "grants")}
+}
+
+// groupValues is what a grant is grouped by under the current grouping.
+func (v *grantListView) groupValues(id string) []string {
+	if v.groupBy == groupByTag {
+		return v.items[id].Tags
+	}
+	return v.items[id].Projects
+}
+
+// rebuildRows lays the rows out for the grouping and puts the cursor on
+// (id, group) when it is still there.
+func (v *grantListView) rebuildRows(id, group string) {
+	v.rows = buildGroupRows(v.ids, v.groupBy, v.groupValues)
+	if i := groupRowIndex(v.rows, id, group); i >= 0 {
+		v.cursor = i
+	}
+	v.cursor = max(min(v.cursor, len(v.rows)-1), 0)
 }
 func (v *grantListView) Init() tea.Cmd { return v.load }
 
@@ -1839,8 +1956,9 @@ type grantListLoadedMsg struct {
 }
 
 type grantActionMsg struct {
-	err  string
-	kind string // "remove" or "edit"
+	err   string
+	kind  string // "remove", "edit", "rename" or "move"
+	flash string // move: what moved where
 }
 
 func (v *grantListView) load() tea.Msg {
@@ -1858,10 +1976,10 @@ func (v *grantListView) load() tea.Msg {
 }
 
 func (v *grantListView) selectedID() string {
-	if v.cursor < 0 || v.cursor >= len(v.ids) {
+	if v.cursor < 0 || v.cursor >= len(v.rows) {
 		return ""
 	}
-	return v.ids[v.cursor]
+	return v.rows[v.cursor].id
 }
 
 var grantActions = []listAction{
@@ -1903,17 +2021,24 @@ func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.ids = append(v.ids, id)
 		}
 		sort.Strings(v.ids)
-		if i := slices.Index(v.ids, v.keep); i >= 0 {
-			v.cursor = i
-		}
-		v.keep = ""
-		v.cursor = max(min(v.cursor, len(v.ids)-1), 0)
+		v.rebuildRows(v.keep, v.keepGroup)
+		v.keep, v.keepGroup = "", ""
 		items := make([]list.Item, len(v.ids))
 		for i, id := range v.ids {
 			items[i] = nameItem{id, v.items[id].Integration}
 		}
 		v.list.SetItems(items)
 	case grantActionMsg:
+		if mm.kind == "move" {
+			// A move stays on the list: a flash, or the error on the status line.
+			v.mode, v.pending = grantModeList, ""
+			if mm.err != "" {
+				v.err = "Move failed: " + cliErr(mm.err)
+				return v, nil
+			}
+			v.flash = mm.flash
+			return v, v.load
+		}
 		if mm.err != "" {
 			// Errors stay on the screen that caused them, in plain words.
 			switch mm.kind {
@@ -1950,6 +2075,8 @@ func (v *grantListView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v.updateConfirm(mm)
 		case grantModeRename:
 			return v.updateRename(mm)
+		case grantModeMove:
+			return v.updateMove(mm)
 		case grantModeEdit, grantModeReview:
 			if !v.editForm.typing() && toggleHelp(&v.help, mm) {
 				return v, nil
@@ -1979,9 +2106,9 @@ func (v *grantListView) updateList(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "ctrl+c", "q":
 		v.done = true
 	case "up", "k":
-		stepCursor(&v.cursor, len(v.ids), -1)
+		stepCursor(&v.cursor, len(v.rows), -1)
 	case "down", "j":
-		stepCursor(&v.cursor, len(v.ids), 1)
+		stepCursor(&v.cursor, len(v.rows), 1)
 	case "enter":
 		if len(v.ids) > 0 {
 			v.mode, v.actionCursor = grantModeDetail, 0
@@ -1990,8 +2117,63 @@ func (v *grantListView) updateList(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(v.ids) > 0 {
 			return v.runAction(k)
 		}
+	case "g":
+		r := groupRow{}
+		if v.cursor < len(v.rows) {
+			r = v.rows[v.cursor]
+		}
+		v.groupBy = v.groupBy.next()
+		saveGroupBy(v.paths, "grants", v.groupBy)
+		v.rebuildRows(r.id, r.group)
+	case "m":
+		switch {
+		case len(v.rows) == 0:
+		case v.groupBy == groupByName:
+			v.flash = "Group the list first (g), then move a grant between groups."
+		default:
+			r := v.rows[v.cursor]
+			v.move = newMovePicker(r.id, r.group, allGroupValues(v.ids, v.groupValues))
+			v.mode = grantModeMove
+		}
 	}
 	return v, nil
+}
+
+// updateMove runs the move picker; a pick saves right away.
+func (v *grantListView) updateMove(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
+	v.err = ""
+	done, ok, to := v.move.key(mm)
+	if !done {
+		return v, nil
+	}
+	if !ok {
+		v.mode = grantModeList
+		return v, nil
+	}
+	// Locked: the unlock replays this enter here, on the same pick.
+	if cmd := v.locked(mm, &v.err); cmd != nil {
+		return v, cmd
+	}
+	v.mode, v.pending = grantModeRun, "move"
+	v.keep, v.keepGroup = v.move.id, to
+	return v, v.doMove(v.move.id, v.move.from, to)
+}
+
+// doMove saves one grant with the group it sits under replaced. `grant
+// add` rewrites projects, tags and env prefix together, so the other
+// dimension and a custom prefix ride along unchanged; protection is
+// kept when no --protected flag is given.
+func (v *grantListView) doMove(id, from, to string) tea.Cmd {
+	args := grantMoveArgs(id, v.items[id], v.groupBy, from, to)
+	where := to
+	if where == "" {
+		where = v.groupBy.noneLabel()
+	}
+	flash := "Moved " + id + " to " + where + "."
+	return func() tea.Msg {
+		_, err := runDop("", args...)
+		return grantActionMsg{kind: "move", err: err, flash: flash}
+	}
 }
 
 func (v *grantListView) updateDetail(mm tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2206,11 +2388,38 @@ func (v *grantListView) doEdit() tea.Cmd {
 	}
 }
 
+// grantMoveArgs is the `dop grant add` call that moves grant id from
+// one group to another under grouping by.
+func grantMoveArgs(id string, g vault.Grant, by groupBy, from, to string) []string {
+	projects, tags := g.Projects, g.Tags
+	if by == groupByTag {
+		tags = movedValues(tags, from, to)
+	} else {
+		projects = movedValues(projects, from, to)
+	}
+	args := []string{"grant", "add", "--id", id, "--integration", g.Integration, "--token", g.Token,
+		"--projects", strings.Join(projects, ","), "--tags", strings.Join(tags, ",")}
+	if g.EnvPrefix != "" {
+		args = append(args, "--env-prefix", g.EnvPrefix)
+	}
+	return args
+}
+
+// integMoveArgs is the `dop integration add` call that moves an
+// integration: the CLI merges, so only the moved dimension is sent.
+func integMoveArgs(name string, it vault.Integration, by groupBy, from, to string) []string {
+	flag, vals := "--projects", movedValues(it.Projects, from, to)
+	if by == groupByTag {
+		flag, vals = "--tags", movedValues(it.Tags, from, to)
+	}
+	return []string{"integration", "add", "--name", name, flag, strings.Join(vals, ",")}
+}
+
 var grantListKeys = keyMap{
 	short: []key.Binding{keyOpen, keyBack},
 	full: [][]key.Binding{
 		{keyMove, hint("enter", "open grant"), hint("e", "edit"), hint("n", "rename"), hint("r", "remove")},
-		{keyBack, keyQuit},
+		{hint("g", "group by name / project / tag"), hint("m", "move to another group"), keyBack, keyQuit},
 	},
 	notes: []string{"Projects and tags group grants; they are not permissions."},
 }
@@ -2245,7 +2454,7 @@ func (v *grantListView) View() string {
 		body = append(body, mutedSt.Render("  Bearers holding it fail on their next exec."))
 		return frame(width, height, "Remove "+id+"?", nil, "", body, "", confirmFoot("remove"))
 	case grantModeRun:
-		title := map[string]string{"edit": "Saving grant…", "rename": "Renaming grant…"}[v.pending]
+		title := map[string]string{"edit": "Saving grant…", "rename": "Renaming grant…", "move": "Moving " + v.move.id + "…"}[v.pending]
 		if title == "" {
 			title = "Removing " + id + "…"
 		}
@@ -2262,6 +2471,8 @@ func (v *grantListView) View() string {
 		return v.viewEdit(width, height)
 	case grantModeRename:
 		return v.viewRename(width, height)
+	case grantModeMove:
+		return frame(width, height, "Move grant", nil, "by "+v.groupBy.label(), v.move.rows(v.groupBy), "", footer(width, hint("enter", "move here"), keyBack))
 	}
 
 	km := grantListKeys
@@ -2275,11 +2486,19 @@ func (v *grantListView) View() string {
 		if v.help {
 			rows -= len(km.helpLines(width)) + 1
 		}
-		body = nameListBody(&v.list, "integration", v.cursor, width, rows)
+		if v.groupBy == groupByName {
+			body = nameListBody(&v.list, "integration", v.cursor, width, rows)
+		} else {
+			body = groupedBody(v.rows, v.groupBy, v.cursor, "integration", func(id string) string { return v.items[id].Integration }, width, rows)
+		}
 		st.setHint(grantHint(id, g))
 	}
+	ctx := fmt.Sprintf("%d total", len(v.ids))
+	if v.groupBy != groupByName {
+		ctx += " · by " + v.groupBy.label()
+	}
 	body = km.overlay(body, width, frameRows(height), v.help)
-	return frame(width, height, "Grants", nil, fmt.Sprintf("%d total", len(v.ids)), body, st.String(), km.footerLine(width, v.help))
+	return frame(width, height, "Grants", nil, ctx, body, st.String(), km.footerLine(width, v.help))
 }
 
 // viewDetail is the grant detail with its actions merged in.
