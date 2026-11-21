@@ -709,7 +709,7 @@ func gitCommitPushRemoteClaim(paths *config.Paths, lookupID string) error {
 		fmt.Sprintf("dop: remote claim %s (unapproved)", lookupID[:12])); err != nil {
 		return err
 	}
-	return runGit(io.Discard, dir, "push")
+	return pushOrPullAndRetry(paths)
 }
 
 // awaitApproval spins up:
