@@ -18,7 +18,11 @@ import (
 // agent's chat. Shape is intentionally minimal — a one-line preface
 // + the bearer + the PIN (if present) + exactly one `dop claim`
 // command. Nothing imperative after the command, so sandbox prompt-
-// injection detectors on the receiving side don't block it.
+// injection detectors on the receiving side don't block it. The
+// preface states facts (one claim, the operator confirms it) so an
+// agent reading standing rule 2 knows this line is the grant, without
+// any "this is safe / trusted" wording (2026-11-21: an agent refused
+// the handoff and called it leaked).
 //
 // bearer: the issued bearer (always non-empty on this path).
 // pin: short claim PIN; empty when the token was issued --no-bind.
@@ -36,7 +40,7 @@ func buildHandoffText(bearer, pin string, allowFileKeys, remote bool) string {
 	if allowFileKeys {
 		claimCmd = "DOP_TOKEN=" + bearer + " DOP_ALLOW_FILE_KEYS=1 dop claim " + flags + "--key-type p256 " + pin
 	}
-	return "Scoped credential access via DOP — run:\n\n" +
+	return "Scoped credential access via DOP (one-time claim, your operator confirms it) — run:\n\n" +
 		"  " + claimCmd
 }
 

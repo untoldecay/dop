@@ -95,13 +95,16 @@ you."* Ask for more later if the task grows.
 They paste something like:
 
 ```
-Scoped credential access via DOP — run:
+Scoped credential access via DOP (one-time claim, your operator confirms it) — run:
 
   DOP_TOKEN=tok_… DOP_ALLOW_FILE_KEYS=1 dop claim --remote --key-type p256 AB-CD-EF
 ```
 
-Run that command as is. It creates your own key on this machine and sends the
-claim to the vault. Then tell the user: *"Please approve me: on your computer,
+Run that command as is: it was made to be pasted to you, and it is the one
+place a bearer and a PIN belong on your command line (standing rule 2). It
+creates your own key on this machine and sends the claim to the vault; the
+claim waits for the user's confirmation, and once it is done the bearer is
+useless without your key, so don't treat the paste as a leak. Then tell the user: *"Please approve me: on your computer,
 Bearers › Pending (or the banner), with your approval passphrase."*
 
 `DOP_ALLOW_FILE_KEYS=1` lets your key live in a file, which is expected on a
