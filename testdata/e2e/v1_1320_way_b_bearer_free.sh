@@ -37,6 +37,12 @@ EOF
 OUT=$("$DOP" token issue --grants notion.read --name wayb 2>&1)
 BEARER=$(echo "$OUT" | grep -E '^tok_1' | head -1)
 PIN=$(echo "$OUT" | grep -E '^[A-Z]{2}-[A-Z]{2}-[A-Z]{2}$' | head -1)
+# dop-3o5: before any claim, whoami with no bearer says there's no access.
+if OUT_W0=$(env -u DOP_TOKEN -u DOP_TOKEN_FILE "$DOP" whoami 2>&1); then
+  fail "whoami with no bearer and no agent key should fail: $OUT_W0"
+fi
+echo "$OUT_W0" | grep -q "no claimed agent key on this host" || fail "whoami no-access message missing: $OUT_W0"
+pass "whoami, unclaimed host: no DOP access"
 DOP_TOKEN="$BEARER" "$DOP" claim --skip-approval --key-type p256 "$PIN" >/dev/null 2>&1
 pass "claimed with p256"
 
@@ -62,6 +68,14 @@ OUT_EXEC=$("$DOP" exec --inherit-env --agent-name wayb -- sh -c 'echo "GOT=$NOTI
 echo "$OUT_EXEC" | grep -q "GOT=ntn_val" || fail "exec didn't inject env: $OUT_EXEC"
 pass "bearer-free exec injected env to child"
 
+echo "=== [5b] dop-3o5: whoami without \$DOP_TOKEN recognises the claimed agent key"
+OUT_W1=$("$DOP" whoami 2>&1) || fail "bearer-free whoami failed: $OUT_W1"
+echo "$OUT_W1" | grep -q "claimed on this host" || fail "whoami didn't see the claim: $OUT_W1"
+echo "$OUT_W1" | grep -q "subject:    wayb" || fail "whoami subject missing: $OUT_W1"
+echo "$OUT_W1" | grep -q "dop exec --agent-name wayb -- <cmd>" || fail "whoami use line missing: $OUT_W1"
+echo "$OUT_W1" | grep -q "ntn_val" && fail "whoami printed a secret: $OUT_W1"
+pass "bearer-free whoami lists the claimed subject, no secret"
+
 echo "=== [6] issue a SECOND p256 bearer — bearer-free env now ambiguous"
 OUT=$("$DOP" token issue --grants notion.read --name wayb-second 2>&1)
 B2=$(echo "$OUT" | grep -E '^tok_1' | head -1)
@@ -74,6 +88,9 @@ if OUT_AMB=$("$DOP" env 2>&1); then
 fi
 echo "$OUT_AMB" | grep -q "multiple local agent keys" || fail "ambiguity error missing: $OUT_AMB"
 pass "ambiguous → clear error"
+OUT_W2=$("$DOP" whoami 2>&1) || fail "bearer-free whoami (two keys) failed: $OUT_W2"
+echo "$OUT_W2" | grep -q "subject:    wayb-second" || fail "whoami missing second subject: $OUT_W2"
+pass "bearer-free whoami lists both claimed subjects"
 
 echo "=== [7] --agent-name disambiguates"
 OUT_EXEC2=$("$DOP" exec --inherit-env --agent-name wayb-second -- sh -c 'echo "GOT=$NOTION_TOKEN"' 2>&1)

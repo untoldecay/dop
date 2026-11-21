@@ -9,19 +9,22 @@ description: Use when needing to call a service whose credentials live in the DO
 
 DOP holds service credentials in a per-agent scoped vault. Always invoke the target command through `dop exec` — never handle bearers directly.
 
+**Is this copy current?** The `dop-skill:` line under the header names the dop that wrote it. If `dop skill check` prints a different `sha:`, or dop says your skill is from an older version, this text is outdated: follow `dop skill show` instead, and tell the operator so they can run `dop skill install --force`.
+
 ## If you don't normally use DOP (short rule for unfamiliar agents)
 
-**Use `DOP_TOKEN` if it's already in your environment. Otherwise behave as if DOP isn't installed.**
+**Use `DOP_TOKEN` if it's in your environment, or this host's claimed agent key if `dop whoami` shows one. Otherwise behave as if DOP isn't installed.**
 
 | Environment state | What you do |
 |---|---|
 | `DOP_TOKEN` is set | The operator already approved your access by running `eval "$(dop use <subject>)"` before invoking you. Use the token. Prefer `dop exec --agent-name <task> -- <cmd>` for scoped env; otherwise pass `$DOP_TOKEN` as a bearer in your HTTP calls. |
-| `DOP_TOKEN` is unset | The operator did not grant you DOP access. Do NOT invoke `dop use`, `dop token issue`, `dop env`, or `dop claim` yourself. Fall back to whatever credential path you'd use otherwise (hardcoded env, OAuth, user prompt). If none exists, tell the operator you can't do the task without credentials. |
+| `DOP_TOKEN` is unset, `dop whoami` says `claimed on this host` | You were claimed: the agent key is your access, and dropping `DOP_TOKEN` after the claim was correct. Run `dop exec --agent-name <subject> -- <cmd>` with the subject `dop whoami` shows. |
+| `DOP_TOKEN` is unset, `dop whoami` says `no DOP access here` | Unless the operator handed you a subject to use (portable, below), they did not grant you DOP access. Do NOT invoke `dop use`, `dop token issue`, `dop env`, or `dop claim` yourself. Fall back to whatever credential path you'd use otherwise (hardcoded env, OAuth, user prompt). If none exists, tell the operator you can't do the task without credentials. |
 
 **Why:** every DOP command that prints a secret requires a native approval popup the operator sees. An agent that invokes `dop use` on its own triggers an unexpected popup — the operator will likely deny (because they didn't ask for this), and your task fails anyway. Announcing your intent (either by using what's in env OR declining the task cleanly) is strictly better than guessing.
 
 **Do NOT invoke on your own:** `dop use`, `dop token issue`, `dop env`, `dop claim`.
-**Safe commands (no popup, no mutation):** `dop whoami`, `dop version`, `dop help`, `dop exec --agent-name <X> -- <cmd>` (uses an existing `DOP_TOKEN` if set; refuses otherwise, with no popup).
+**Safe commands (no popup, no mutation):** `dop whoami`, `dop version`, `dop help`, `dop skill check`, `dop skill show`, `dop exec --agent-name <X> -- <cmd>` (uses `DOP_TOKEN` if set, else this host's claimed agent key; refuses otherwise, with no popup).
 
 ## When to Use
 

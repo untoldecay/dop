@@ -150,6 +150,7 @@ func runExec(args []string) int {
 	if !admin.KeyFileExists(paths) && agentrules.NudgeDue(paths) {
 		fmt.Fprintln(os.Stderr, "dop exec: the DOP standing rules are not confirmed on this host — run `dop skill rules`, add them to your always-on instructions, then `dop skill rules --ack`.")
 	}
+	hintStaleSkill("dop exec")
 	if err := execChild(child, env, cleanEnv); err != nil {
 		var ce childExit
 		if errors.As(err, &ce) {
@@ -249,10 +250,12 @@ func verifyBinding(bearer string, res resolveResult) error {
 }
 
 func runWhoami(args []string) int {
-	bearer, err := readBearer("")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dop whoami: %v\n", err)
-		return 1
+	bearer, bearerErr := readBearer("")
+	if bearerErr != nil {
+		// A claimed agent drops DOP_TOKEN on purpose: its agent key is
+		// the proof. Answering "no bearer" here told it it had no access
+		// (dop-3o5), so list the claimed keys bearer-free exec can use.
+		return whoamiAgentKeys(bearerErr)
 	}
 	_, res, err := resolveBearer(bearer)
 	if err != nil {
@@ -260,6 +263,40 @@ func runWhoami(args []string) int {
 		return 1
 	}
 	fmt.Printf("bearer: %s\n", bearerFingerprint(bearer))
+	printWhoamiRecord(res)
+	hintStaleSkill("dop whoami")
+	return 0
+}
+
+// whoamiAgentKeys answers whoami without a bearer: the claimed agent
+// keys on this host, and the one command each needs. Read-only — it
+// never opens the sealed env.
+func whoamiAgentKeys(bearerErr error) int {
+	paths, err := config.Resolve()
+	var candidates []agentKeyCandidate
+	if err == nil {
+		candidates, _ = agentKeyCandidates(paths)
+	}
+	if len(candidates) == 0 {
+		fmt.Fprintf(os.Stderr, "dop whoami: %v, and no claimed agent key on this host — no DOP access here\n", bearerErr)
+		return 1
+	}
+	fmt.Println("claimed on this host: no DOP_TOKEN needed, the agent key is the proof")
+	for _, c := range candidates {
+		fmt.Println()
+		printWhoamiRecord(resolveResult{
+			subject:    c.rec.Subject,
+			generation: c.rec.Generation,
+			expiresAt:  c.rec.ExpiresAt,
+			binding:    envelopeBindingOf(c.rec.Binding),
+		})
+		fmt.Printf("use:        dop exec --agent-name %s -- <cmd>\n", c.rec.Subject)
+	}
+	hintStaleSkill("dop whoami")
+	return 0
+}
+
+func printWhoamiRecord(res resolveResult) {
 	fmt.Printf("subject:    %s\n", res.subject)
 	fmt.Printf("generation: %d\n", res.generation)
 	// v1.13.0-rc7 — Fizz: pre-rc7, --expires=never surfaced here as
@@ -281,7 +318,14 @@ func runWhoami(args []string) int {
 			fmt.Println()
 		}
 	}
-	return 0
+}
+
+// envelopeBindingOf is the whoami view of a record's binding.
+func envelopeBindingOf(b *capability.RecordBinding) *capability.EnvelopeBinding {
+	if b == nil {
+		return nil
+	}
+	return &capability.EnvelopeBinding{Kind: b.Kind, Pubkey: b.Pubkey, KeyType: b.KeyType}
 }
 
 func runEnv(args []string) int {
@@ -780,16 +824,71 @@ func resolveViaAgentKey(agentName string) (map[string]string, resolveResult, err
 	if err != nil {
 		return nil, resolveResult{}, err
 	}
-	type candidate struct {
-		lookupID string
-		rec      *capability.Record
+	candidates, err := agentKeyCandidates(paths)
+	if err != nil {
+		return nil, resolveResult{}, err
 	}
-	var candidates []candidate
+	if len(candidates) == 0 {
+		return nil, resolveResult{}, errors.New(
+			"no bearer supplied and no local agent key has sealed env to open.\n" +
+				"  Supply $DOP_TOKEN / --token-file, OR run `dop token reseal <subject>` on the admin\n" +
+				"  to generate EnvWrapped for an existing P-256-bound bearer.")
+	}
+	// Filter by subject if --agent-name was passed.
+	if agentName != "" {
+		filtered := candidates[:0]
+		for _, c := range candidates {
+			if c.rec.Subject == agentName {
+				filtered = append(filtered, c)
+			}
+		}
+		candidates = append([]agentKeyCandidate(nil), filtered...)
+		if len(candidates) == 0 {
+			return nil, resolveResult{}, fmt.Errorf("no local agent key for subject %q with sealed env", agentName)
+		}
+	}
+	if len(candidates) > 1 {
+		var names []string
+		for _, c := range candidates {
+			names = append(names, c.rec.Subject)
+		}
+		return nil, resolveResult{}, fmt.Errorf(
+			"multiple local agent keys with sealed env — pass --agent-name <X> to pick one: %s",
+			strings.Join(names, ", "))
+	}
+	// Single candidate: open EnvWrapped.
+	c := candidates[0]
+	env, err := openEnvWrapped(paths, c.rec)
+	if err != nil {
+		return nil, resolveResult{}, fmt.Errorf("agent-key resolution: %w", err)
+	}
+	return env, resolveResult{
+		subject:    c.rec.Subject,
+		generation: c.rec.Generation,
+		expiresAt:  c.rec.ExpiresAt,
+		capID:      c.rec.CapabilityID,
+		lookupID:   c.lookupID,
+	}, nil
+}
+
+// agentKeyCandidate is a local P-256 agent key whose record is active
+// and carries sealed env: what bearer-free exec can open.
+type agentKeyCandidate struct {
+	lookupID string
+	rec      *capability.Record
+}
+
+// agentKeyCandidates scans the local agent-keys directory for keys
+// bearer-free exec can use. Shared by exec/env (which open one) and
+// whoami (which only lists them, so a claimed agent isn't told it has
+// "no bearer").
+func agentKeyCandidates(paths *config.Paths) ([]agentKeyCandidate, error) {
+	var candidates []agentKeyCandidate
 	// Enumerate local agent keys (P-256 only — ed25519 can't decrypt EnvWrapped).
 	dir := filepath.Join(paths.Root, "agent-keys")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, resolveResult{}, fmt.Errorf("no bearer and no agent keys on this machine (%w)", err)
+		return nil, fmt.Errorf("no bearer and no agent keys on this machine (%w)", err)
 	}
 	for _, e := range entries {
 		name := e.Name()
@@ -837,49 +936,9 @@ func resolveViaAgentKey(agentName string) (map[string]string, resolveResult, err
 		if rec.EnvWrapped == nil {
 			continue
 		}
-		candidates = append(candidates, candidate{lookupID: lookupID, rec: &rec})
+		candidates = append(candidates, agentKeyCandidate{lookupID: lookupID, rec: &rec})
 	}
-	if len(candidates) == 0 {
-		return nil, resolveResult{}, errors.New(
-			"no bearer supplied and no local agent key has sealed env to open.\n" +
-				"  Supply $DOP_TOKEN / --token-file, OR run `dop token reseal <subject>` on the admin\n" +
-				"  to generate EnvWrapped for an existing P-256-bound bearer.")
-	}
-	// Filter by subject if --agent-name was passed.
-	if agentName != "" {
-		filtered := candidates[:0]
-		for _, c := range candidates {
-			if c.rec.Subject == agentName {
-				filtered = append(filtered, c)
-			}
-		}
-		candidates = append([]candidate(nil), filtered...)
-		if len(candidates) == 0 {
-			return nil, resolveResult{}, fmt.Errorf("no local agent key for subject %q with sealed env", agentName)
-		}
-	}
-	if len(candidates) > 1 {
-		var names []string
-		for _, c := range candidates {
-			names = append(names, c.rec.Subject)
-		}
-		return nil, resolveResult{}, fmt.Errorf(
-			"multiple local agent keys with sealed env — pass --agent-name <X> to pick one: %s",
-			strings.Join(names, ", "))
-	}
-	// Single candidate: open EnvWrapped.
-	c := candidates[0]
-	env, err := openEnvWrapped(paths, c.rec)
-	if err != nil {
-		return nil, resolveResult{}, fmt.Errorf("agent-key resolution: %w", err)
-	}
-	return env, resolveResult{
-		subject:    c.rec.Subject,
-		generation: c.rec.Generation,
-		expiresAt:  c.rec.ExpiresAt,
-		capID:      c.rec.CapabilityID,
-		lookupID:   c.lookupID,
-	}, nil
+	return candidates, nil
 }
 
 func openEnvWrapped(paths *config.Paths, rec *capability.Record) (map[string]string, error) {
