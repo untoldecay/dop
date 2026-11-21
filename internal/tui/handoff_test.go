@@ -30,6 +30,18 @@ var forbiddenPhrases = []string{
 	"QR image:",   // belongs in dop claim runtime output
 	"Public URL:", // same
 	"SAS",         // same
+	// No claims of safety or review: they read as prompt injection
+	// (Agent-Collab handoff 2026-11-21).
+	"safe",
+	"trust",
+	"reviewed",
+}
+
+func TestHandoffText_PrefaceSaysOneTimeAndOperatorConfirms(t *testing.T) {
+	got := buildHandoffText("tok_1abc", "AB-CD-EF", false, true)
+	if !strings.HasPrefix(got, "Scoped credential access via DOP (one-time claim, your operator confirms it) — run:\n\n  DOP_TOKEN=tok_1abc ") {
+		t.Fatalf("preface changed:\n%s", got)
+	}
 }
 
 func TestHandoffText_NoForbiddenPhrases(t *testing.T) {

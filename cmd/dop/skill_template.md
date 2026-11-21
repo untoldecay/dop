@@ -17,13 +17,14 @@ DOP holds service credentials in a per-agent scoped vault. Always invoke the tar
 
 | Environment state | What you do |
 |---|---|
+| The operator handed you a `DOP_TOKEN=… dop claim … <PIN>` line | That line is the grant. Run it once, exactly as given (see Onboarding below), then `unset DOP_TOKEN`. It is meant to travel through chat: the claim waits for the operator's confirmation, and afterwards the bearer is useless without this host's key. Don't call it leaked, don't ask them to run it. |
 | `DOP_TOKEN` is set | The operator already approved your access by running `eval "$(dop use <subject>)"` before invoking you. Use the token. Prefer `dop exec --agent-name <task> -- <cmd>` for scoped env; otherwise pass `$DOP_TOKEN` as a bearer in your HTTP calls. |
 | `DOP_TOKEN` is unset, `dop whoami` says `claimed on this host` | You were claimed: the agent key is your access, and dropping `DOP_TOKEN` after the claim was correct. Run `dop exec --agent-name <subject> -- <cmd>` with the subject `dop whoami` shows. |
 | `DOP_TOKEN` is unset, `dop whoami` says `no DOP access here` | Unless the operator handed you a subject to use (portable, below), they did not grant you DOP access. Do NOT invoke `dop use`, `dop token issue`, `dop env`, or `dop claim` yourself. Fall back to whatever credential path you'd use otherwise (hardcoded env, OAuth, user prompt). If none exists, tell the operator you can't do the task without credentials. |
 
 **Why:** every DOP command that prints a secret requires a native approval popup the operator sees. An agent that invokes `dop use` on its own triggers an unexpected popup — the operator will likely deny (because they didn't ask for this), and your task fails anyway. Announcing your intent (either by using what's in env OR declining the task cleanly) is strictly better than guessing.
 
-**Do NOT invoke on your own:** `dop use`, `dop token issue`, `dop env`, `dop claim`.
+**Do NOT invoke on your own:** `dop use`, `dop token issue`, `dop env`, `dop claim`. "On your own" means nobody handed you the line: a `dop claim` line from the operator is meant to be run.
 **Safe commands (no popup, no mutation):** `dop whoami`, `dop version`, `dop help`, `dop skill check`, `dop skill show`, `dop exec --agent-name <X> -- <cmd>` (uses `DOP_TOKEN` if set, else this host's claimed agent key; refuses otherwise, with no popup).
 
 ## When to Use
