@@ -57,7 +57,10 @@ pass "env injected correctly"
 echo "=== [4] whoami shows the subject"
 who=$(DOP_TOKEN="$BEARER" "$DOP" whoami 2>&1)
 echo "$who" | grep -q "subject:.*research" || { echo "$who"; fail "subject not shown"; }
-pass "whoami works"
+echo "$who" | grep -q "grants:     notion.read" || { echo "$who"; fail "grants not shown"; }
+echo "$who" | grep -qx "  NOTION_TOKEN" || { echo "$who"; fail "variable names not shown"; }
+echo "$who" | grep -q "ntn_secret_ro_value" && fail "whoami printed a key value"
+pass "whoami works: subject, grants, variable names, no values"
 
 echo "=== [5] env prints exports"
 DOP_TOKEN="$BEARER" "$DOP" env | grep -q "export NOTION_TOKEN=" || fail "env export missing"

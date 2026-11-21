@@ -134,9 +134,9 @@ whoami` says `claimed on this host`). If it says the claim isn't approved yet
 right after the user approved, run `dop pull` and retry.
 
 The tool's key reaches only `<command>`, as an environment variable (e.g.
-`$NOTION_TOKEN`). To see the names you got, run `dop exec --agent-name <you> --
-printenv`: every key value prints as `‹NAME›`, so this is safe. Reference a key
-by name inside the command, never by value:
+`$NOTION_TOKEN`). `dop whoami` lists your grants and the variable names you get
+(names only, never values). Reference a key by name inside the command, never by
+value:
 
 ```bash
 dop exec --agent-name research -- sh -c 'curl -H "Authorization: Bearer $NOTION_TOKEN" https://api.notion.com/v1/users/me'

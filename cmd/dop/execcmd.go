@@ -258,13 +258,14 @@ func runWhoami(args []string) int {
 		// (dop-3o5), so list the claimed keys bearer-free exec can use.
 		return whoamiAgentKeys(bearerErr)
 	}
-	_, res, err := resolveBearer(bearer)
+	env, res, err := resolveBearer(bearer)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dop whoami: %v\n", err)
 		return 1
 	}
 	fmt.Printf("bearer: %s\n", bearerFingerprint(bearer))
 	printWhoamiRecord(res)
+	printWhoamiAccess(res.grants, env)
 	hintStaleSkill("dop whoami")
 	return 0
 }
@@ -291,6 +292,13 @@ func whoamiAgentKeys(bearerErr error) int {
 			expiresAt:  c.rec.ExpiresAt,
 			binding:    envelopeBindingOf(c.rec.Binding),
 		})
+		// Opening the sealed env needs this host's agent key: only the
+		// claimed agent itself gets the names. Values are never printed.
+		env, oerr := openEnvWrapped(paths, c.rec)
+		if oerr != nil {
+			env = nil
+		}
+		printWhoamiAccess(c.rec.Grants, env)
 		fmt.Printf("use:        dop exec --agent-name %s -- <cmd>\n", c.rec.Subject)
 	}
 	hintStaleSkill("dop whoami")
@@ -318,6 +326,28 @@ func printWhoamiRecord(res resolveResult) {
 		default:
 			fmt.Println()
 		}
+	}
+}
+
+// printWhoamiAccess lists the grants and the variable names they put
+// in a dop exec child — names only, never a value.
+func printWhoamiAccess(grants []string, env map[string]string) {
+	if len(grants) > 0 {
+		fmt.Printf("grants:     %s\n", strings.Join(grants, ", "))
+	} else {
+		fmt.Println("grants:     none")
+	}
+	if len(env) == 0 {
+		return
+	}
+	names := make([]string, 0, len(env))
+	for k := range env {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	fmt.Println("variables:  (names only; values reach only the dop exec child)")
+	for _, n := range names {
+		fmt.Printf("  %s\n", n)
 	}
 }
 
@@ -516,6 +546,7 @@ type resolveResult struct {
 	capID      string
 	lookupID   string
 	binding    *capability.EnvelopeBinding
+	grants     []string // grant ids on the signed record (whoami)
 }
 
 // resolveBearer: hash bearer to lookup id, read bundle file, decrypt,
@@ -620,6 +651,7 @@ func resolveBearer(bearer string) (map[string]string, resolveResult, error) {
 		capID:      hex.EncodeToString(hdr.CapabilityID[:]),
 		lookupID:   lookupID,
 		binding:    env.Binding,
+		grants:     rec.Grants,
 	}, nil
 }
 

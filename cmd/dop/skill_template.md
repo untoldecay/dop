@@ -89,7 +89,7 @@ dop exec --agent-name <specific-task-name> -- <your command>
 | Task | Command |
 |---|---|
 | Discover what your token unlocks | `dop whoami` |
-| Preview env var names the token injects | `dop exec --agent-name X -- printenv` (key values print as `‹NAME›`; `dop env` is refused for claimed bearers) |
+| Preview env var names the token injects | `dop whoami` (names only, never values; `dop env` is refused for claimed bearers) |
 | Run a command with scoped env | `dop exec --agent-name X -- CMD` |
 | Strip inherited env from the child | add `--clean-env` |
 | Read the limits the operator set | `<PREFIX>_SCOPE_NOTE` (the level), `<PREFIX>_NOTE` (context for this credential, e.g. "accept only video ids") and `<PREFIX>_ALLOWED` inside the child: prose from the operator, follow it |

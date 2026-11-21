@@ -79,6 +79,8 @@ echo "$OUT_W1" | grep -q "claimed on this host" || fail "whoami didn't see the c
 echo "$OUT_W1" | grep -q "subject:    wayb" || fail "whoami subject missing: $OUT_W1"
 echo "$OUT_W1" | grep -q "dop exec --agent-name wayb -- <cmd>" || fail "whoami use line missing: $OUT_W1"
 echo "$OUT_W1" | grep -q "ntn_val" && fail "whoami printed a secret: $OUT_W1"
+echo "$OUT_W1" | grep -q "grants:     notion.read" || fail "whoami doesn't list the grants: $OUT_W1"
+echo "$OUT_W1" | grep -qx "  NOTION_TOKEN" || fail "whoami doesn't list the variable names: $OUT_W1"
 pass "bearer-free whoami lists the claimed subject, no secret"
 
 echo "=== [6] issue a SECOND p256 bearer — bearer-free env now ambiguous"
