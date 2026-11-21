@@ -750,6 +750,17 @@ Bearer-free mode: with no bearer supplied, DOP scans local P-256 agent keys and 
 
 **Masked output.** Every injected key value is replaced by `‹NAME›` before it reaches the screen — so `printenv`, `curl -v` or an error dump can't put a key in an agent transcript. This holds for pipes (Claude Code) **and terminals**: agent harnesses such as Cursor or VS Code run commands in a pseudo-terminal and send what it shows to the model, so a terminal doesn't mean a person is reading. In a terminal, DOP gives the command its own pseudo-terminal and relays it through the mask — interactive tools, colours, window size, `ctrl+c`, `ctrl+z` / `fg` and `/dev/tty` keep working. Pipes stay plain pipes (stdout and stderr separate, bytes untouched apart from exact key values), so stdio protocols like MCP aren't disturbed. The child itself gets the real values; metadata (`*_KIND`, URLs, CLI hints) stays readable. This stops accidents, not a child that transforms or sends a key on purpose. Write commands so the shell expands the key, never the model: `dop exec -- sh -c 'curl -H "Authorization: Bearer $NOTION_TOKEN" …'`.
 
+### `dop skill check` / `dop skill refresh`
+
+The skill carries a stamp under its header, `dop-skill: <version> sha:<id>`; the id changes only when the text does. `dop skill install` records every file it writes (in `skill-installs.json` under the dop root). `dop skill check` prints the current stamp and each recorded file as `current`, `outdated (<version>)`, `edited by hand` or `missing`. Read-only.
+
+When a recorded file is older than this dop's skill, `dop exec` and `dop whoami` say so on stderr, at most once an hour, and point the agent at `dop skill show` until the operator reinstalls. `dop update` runs the new binary's `dop skill refresh`, which rewrites every outdated file nobody edited since dop wrote it, and leaves an edited one alone with a notice. Files an older dop wrote at the default locations without a record are adopted on first sight; refresh keeps their old text beside them as `<file>.before-refresh`.
+
+```
+dop skill check
+dop skill refresh
+```
+
 ### `dop skill rules`
 
 Print the six standing rules an agent carries in its always-on instructions (agent config, CLAUDE.md, AGENTS.md): no admin commands, no bearer on a command line, `dop whoami` / `dop exec` only, wait for approvals, reference keys by name, report refusals. `dop claim` prints them when it completes. `--ack` records that this host has them, stops the hourly `dop exec` reminder, and pushes the host's entry to the vault repo when one is present so `dop token list` and the TUI show `rules=confirmed` on that agent's bearers.
@@ -766,6 +777,8 @@ Fingerprint, subject, generation, expiry, binding.
 ```
 dop whoami
 ```
+
+With no `DOP_TOKEN` / `DOP_TOKEN_FILE`, it lists the claimed agent keys on this host instead (`claimed on this host`), each with the `dop exec --agent-name <subject> -- <cmd>` line to use it. A claimed agent drops its bearer on purpose, so this is how it confirms its access. Nothing is decrypted. With neither a bearer nor a claimed key it exits 1 with `no DOP access here`.
 
 ### `dop env`
 
