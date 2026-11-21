@@ -68,6 +68,11 @@ OUT_EXEC=$("$DOP" exec --inherit-env --agent-name wayb -- sh -c 'echo "GOT=$NOTI
 echo "$OUT_EXEC" | grep -q "GOT=ntn_val" || fail "exec didn't inject env: $OUT_EXEC"
 pass "bearer-free exec injected env to child"
 
+echo "=== [5a] a free-text --agent-name works with one claimed key (it's the audit label)"
+OUT_FT=$("$DOP" exec --inherit-env --agent-name research -- sh -c 'echo "GOT=$NOTION_TOKEN"' 2>&1)
+echo "$OUT_FT" | grep -q "GOT=ntn_val" || fail "free-text agent name refused: $OUT_FT"
+pass "--agent-name research ran with the only claimed key"
+
 echo "=== [5b] dop-3o5: whoami without \$DOP_TOKEN recognises the claimed agent key"
 OUT_W1=$("$DOP" whoami 2>&1) || fail "bearer-free whoami failed: $OUT_W1"
 echo "$OUT_W1" | grep -q "claimed on this host" || fail "whoami didn't see the claim: $OUT_W1"
@@ -96,6 +101,11 @@ echo "=== [7] --agent-name disambiguates"
 OUT_EXEC2=$("$DOP" exec --inherit-env --agent-name wayb-second -- sh -c 'echo "GOT=$NOTION_TOKEN"' 2>&1)
 echo "$OUT_EXEC2" | grep -q "GOT=ntn_val" || fail "disambiguation failed: $OUT_EXEC2"
 pass "--agent-name narrows to one"
+
+echo "=== [8] with two keys, an unknown --agent-name names the choices"
+if OUT_UK=$("$DOP" exec --agent-name research -- true 2>&1); then fail "unknown name should be refused with two keys"; fi
+echo "$OUT_UK" | grep -q "one of: " || fail "choice list missing: $OUT_UK"
+pass "two keys + unknown name → choices listed"
 
 echo
 echo "V1.13 Way B e2e: ALL PASS"

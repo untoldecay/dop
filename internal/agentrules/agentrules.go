@@ -21,7 +21,7 @@ var Text string
 
 // Version changes when the rules change; an older ack still counts
 // (the point is that the agent carries the block, not its wording).
-const Version = 2 // v2: dop use / dop exec --use allowed where the operator asked; token files dop wrote are fine
+const Version = 3 // v2: dop use / dop exec --use allowed where the operator asked; token files dop wrote are fine. v3: rule 7, a blocked install goes back to the operator
 
 // Ack is what an agent host records: when, which agent keys live here.
 type Ack struct {

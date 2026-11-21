@@ -104,7 +104,7 @@ dop exec --agent-name <specific-task-name> -- <your command>
 
 ## Standing rules
 
-Six rules must live in your always-on instructions, not only here: `dop skill rules` prints them (dop also prints them when a claim completes). Ask your operator before editing your config, add them, then `dop skill rules --ack`. Until then every `dop exec` reminds you once an hour and the operator's bearer list shows `rules unconfirmed`.
+Seven rules must live in your always-on instructions, not only here: `dop skill rules` prints them (dop also prints them when a claim completes). Ask your operator before editing your config, add them, then `dop skill rules --ack`. Until then every `dop exec` reminds you once an hour and the operator's bearer list shows `rules unconfirmed`.
 
 ## Do NOT
 

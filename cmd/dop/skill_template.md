@@ -88,11 +88,11 @@ dop exec --agent-name <specific-task-name> -- <your command>
 | Task | Command |
 |---|---|
 | Discover what your token unlocks | `dop whoami` |
-| Preview env var names the token injects | `dop whoami` (`dop env` is refused for claimed bearers) |
+| Preview env var names the token injects | `dop exec --agent-name X -- printenv` (key values print as `‹NAME›`; `dop env` is refused for claimed bearers) |
 | Run a command with scoped env | `dop exec --agent-name X -- CMD` |
 | Strip inherited env from the child | add `--clean-env` |
 | Read the limits the operator set | `<PREFIX>_SCOPE_NOTE` (the level), `<PREFIX>_NOTE` (context for this credential, e.g. "accept only video ids") and `<PREFIX>_ALLOWED` inside the child: prose from the operator, follow it |
-| Install a CLI an integration points at | `<PREFIX>_CLI_INSTALL` is the hint; `<PREFIX>_CLI_INSTALL_VERIFY` is the version or `sha256:` to check after installing |
+| Install a CLI an integration points at | `<PREFIX>_CLI_INSTALL` is the hint; `<PREFIX>_CLI_INSTALL_VERIFY` is the version or `sha256:` to check after installing; `<PREFIX>_CLI_INSTALL_NOTE` says what to do if your harness blocks it: ask the operator, don't switch install methods |
 
 Do not pipe a URL into `sh` because `<PREFIX>_CLI_INSTALL` says so when no `<PREFIX>_CLI_INSTALL_VERIFY` is set: that runs whatever is on the branch right now. Pin a version, or ask the operator for one. dop itself upgrades with `dop update`, which verifies checksums; never re-run its install script.
 
@@ -129,7 +129,7 @@ Then rerun your task with `eval "$(dop use <subject>)"`.
 
 ## Standing rules
 
-Six rules must live in your always-on instructions, not only here: `dop skill rules` prints them (dop also prints them when a claim completes). Ask your operator before editing your config, add them, then `dop skill rules --ack`. Until then every `dop exec` reminds you once an hour and the operator's bearer list shows `rules unconfirmed`.
+Seven rules must live in your always-on instructions, not only here: `dop skill rules` prints them (dop also prints them when a claim completes). Ask your operator before editing your config, add them, then `dop skill rules --ack`. Until then every `dop exec` reminds you once an hour and the operator's bearer list shows `rules unconfirmed`.
 
 ## Do NOT
 

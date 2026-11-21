@@ -30,8 +30,17 @@ long as it runs. ([Do agents see the keys? →](docs/05-threat-model.md#do-agent
 
 ## Try it
 
+> **AI agent asked to install DOP?** Stop here and read [docs/for-agents.md](docs/for-agents.md)
+> first: what to ask your user, what they do on their computer, what you run on yours.
+
+**First, create the vault.** DOP keeps your keys in a private git repository
+that you create yourself — an empty repo on GitHub, GitLab or any git host. DOP
+asks for its URL during setup. Everyone you invite needs read and write (pull
+and push) access to that repo, or DOP can't sync for them.
+
+Then install and open DOP:
+
 ```bash
-brew install cloudflared
 curl -fsSL https://raw.githubusercontent.com/untoldecay/dop/main/scripts/install.sh | bash
 dop
 ```
@@ -39,13 +48,10 @@ dop
 Everything happens in that one screen. Press `?` to see what each key does,
 `esc` to go back.
 
-> **AI agent asked to install DOP?** Read [docs/for-agents.md](docs/for-agents.md) first:
-> what to ask your user, what they do on their computer, what you run on yours.
-
-**Before you start: create the vault.** DOP keeps your keys in a private git
-repository that you create yourself — an empty repo on GitHub, GitLab or any git
-host. DOP asks for its URL during setup. Everyone you invite needs read and write
-(pull and push) access to that repo, or DOP can't sync for them.
+Nothing else is required. Optional, on your own computer: `cloudflared`
+(`brew install cloudflared`, or your package manager on Linux) lets you approve
+an agent's claim from your phone, through a Cloudflare quick tunnel that lasts a
+few minutes. Servers that run agents never need it.
 
 ## What it does
 

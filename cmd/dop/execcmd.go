@@ -151,6 +151,7 @@ func runExec(args []string) int {
 		fmt.Fprintln(os.Stderr, "dop exec: the DOP standing rules are not confirmed on this host — run `dop skill rules`, add them to your always-on instructions, then `dop skill rules --ack`.")
 	}
 	hintStaleSkill("dop exec")
+	addInstallNotes(env)
 	if err := execChild(child, env, cleanEnv); err != nil {
 		var ce childExit
 		if errors.As(err, &ce) {
@@ -834,18 +835,24 @@ func resolveViaAgentKey(agentName string) (map[string]string, resolveResult, err
 				"  Supply $DOP_TOKEN / --token-file, OR run `dop token reseal <subject>` on the admin\n" +
 				"  to generate EnvWrapped for an existing P-256-bound bearer.")
 	}
-	// Filter by subject if --agent-name was passed.
-	if agentName != "" {
-		filtered := candidates[:0]
+	// --agent-name is the audit label; it picks a key only when several
+	// live here. With one key any label works, as documented (docs
+	// review 2026-10-13: `--agent-name research` failed on a claimed host).
+	if agentName != "" && len(candidates) > 1 {
+		var filtered []agentKeyCandidate
+		var names []string
 		for _, c := range candidates {
+			names = append(names, c.rec.Subject)
 			if c.rec.Subject == agentName {
 				filtered = append(filtered, c)
 			}
 		}
-		candidates = append([]agentKeyCandidate(nil), filtered...)
-		if len(candidates) == 0 {
-			return nil, resolveResult{}, fmt.Errorf("no local agent key for subject %q with sealed env", agentName)
+		if len(filtered) == 0 {
+			return nil, resolveResult{}, fmt.Errorf(
+				"several agent keys live here and none is for %q — pass --agent-name <subject>, one of: %s",
+				agentName, strings.Join(names, ", "))
 		}
+		candidates = filtered
 	}
 	if len(candidates) > 1 {
 		var names []string
@@ -1404,5 +1411,29 @@ func touchPullMarker(paths *config.Paths) {
 	}
 	if f, err := os.Create(marker); err == nil {
 		f.Close()
+	}
+}
+
+// installNoteText is dop's own line next to every install hint: an
+// agent whose harness blocks the command hands it back to the operator
+// instead of finding another way in. It never claims the command was
+// reviewed — tool output can't grant permission (Agent-Collab handoff,
+// 2026-11-21).
+const installNoteText = "If your harness blocks this install command, stop and ask the operator to run it or to allow it. Don't switch to another install method."
+
+// addInstallNotes sets <PREFIX>_CLI_INSTALL_NOTE beside each
+// <PREFIX>_CLI_INSTALL, with a ready-to-paste Claude Code allow rule
+// for the operator. Added at exec time so bearers sealed before this
+// change get it too; the _NOTE suffix keeps it readable in output.
+func addInstallNotes(env map[string]string) {
+	for k, cmd := range env {
+		if !strings.HasSuffix(k, "_CLI_INSTALL") || strings.TrimSpace(cmd) == "" {
+			continue
+		}
+		note := installNoteText + " The operator decides; for Claude Code they can add `Bash(" + cmd + ")` to permissions.allow."
+		if env[k+"_VERIFY"] == "" {
+			note += " No " + k + "_VERIFY is set: ask them for a pinned version before piping a script into a shell."
+		}
+		env[k+"_NOTE"] = note
 	}
 }

@@ -250,6 +250,8 @@ dop integration add --name <N> --token NAME=VALUE[:SCOPE_NOTE] [...]
 | `--cli-auth-env` | "" | cli — `KEY=VAL;KEY=VAL` template; substitutes `$TOKEN`, `$SERVER_ROOT`, `$BASE_URL`. |
 | `--cli-install` | "" | cli — install hint for the binary. |
 | `--cli-install-verify` | "" | cli — pinned version or `sha256:<hex>` the agent checks after installing (`<PREFIX>_CLI_INSTALL_VERIFY`). |
+
+Next to every `<PREFIX>_CLI_INSTALL`, `dop exec` adds `<PREFIX>_CLI_INSTALL_NOTE` in dop's own words: if the agent's harness blocks the command, it stops and asks you to run it or to allow it (with a ready-to-paste Claude Code `Bash(<command>)` allow rule), and it asks for a pinned version when no `_VERIFY` is set. dop never applies a rule and never claims a command was reviewed.
 | `--cli-help` | "" | cli — command the agent runs to self-discover the CLI. |
 | `--mcp-url` | "" | mcp — HTTP URL for the MCP server. |
 | `--mcp-cmd` | "" | mcp — stdio launcher command. |
@@ -763,7 +765,7 @@ dop skill refresh
 
 ### `dop skill rules`
 
-Print the six standing rules an agent carries in its always-on instructions (agent config, CLAUDE.md, AGENTS.md): no admin commands, no bearer on a command line, `dop whoami` / `dop exec` only, wait for approvals, reference keys by name, report refusals. `dop claim` prints them when it completes. `--ack` records that this host has them, stops the hourly `dop exec` reminder, and pushes the host's entry to the vault repo when one is present so `dop token list` and the TUI show `rules=confirmed` on that agent's bearers.
+Print the seven standing rules an agent carries in its always-on instructions (agent config, CLAUDE.md, AGENTS.md): no admin commands, no bearer on a command line, `dop whoami` / `dop exec` only, wait for approvals, reference keys by name, report refusals, hand a blocked install back to the operator. `dop claim` prints them when it completes. `--ack` records that this host has them, stops the hourly `dop exec` reminder, and pushes the host's entry to the vault repo when one is present so `dop token list` and the TUI show `rules=confirmed` on that agent's bearers.
 
 ```
 dop skill rules

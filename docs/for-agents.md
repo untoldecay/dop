@@ -86,8 +86,11 @@ user added to their account.
 
 ## 4. Wait for the handoff
 
-Tell the user: *"DOP is installed. On your computer, open `dop`, Issue a bearer
-for me with the tools I need, and paste me the text it gives you."*
+Propose the access you need yourself, smallest first: the user may not know
+which tools or levels your task takes. For example: *"DOP is installed. On your
+computer, open `dop` and Issue a bearer for me with read access to Notion and
+write access to Linear, expiring in 3 days. Then paste me the text it gives
+you."* Ask for more later if the task grows.
 
 They paste something like:
 
@@ -101,6 +104,15 @@ Run that command as is. It creates your own key on this machine and sends the
 claim to the vault. Then tell the user: *"Please approve me: on your computer,
 Bearers › Pending (or the banner), with your approval passphrase."*
 
+`DOP_ALLOW_FILE_KEYS=1` lets your key live in a file, which is expected on a
+server with no secure chip. `dop doctor` then warns that the key is
+**EXTRACTABLE** (no Secure Enclave). That warning is not an error here: don't
+try to fix it, and don't stop.
+
+**If the claim prints a URL and a QR code**, send the user the URL and attach
+the QR image first, then the short code (SAS) it shows. With only the code they
+have nowhere to approve.
+
 ## 5. Use it
 
 Once approved:
@@ -109,18 +121,26 @@ Once approved:
 dop exec --agent-name <your-name> -- <command>
 ```
 
-No `DOP_TOKEN` needed any more: your key on this machine is the proof. If it
-says the claim isn't approved yet right after the user approved, run `dop pull`
-and retry. The
-tool's key reaches only `<command>`, as an environment variable (e.g.
-`$NOTION_TOKEN`). Reference it by name inside the command, never by value:
+`--agent-name` is free text: a label for the audit log, so make it say what the
+task is (`notion-migration-check`). It does not have to match the bearer's name.
+Only when several agents' keys live on this machine does it pick one; then use
+the subject `dop whoami` lists.
+
+No `DOP_TOKEN` needed any more: your key on this machine is the proof (`dop
+whoami` says `claimed on this host`). If it says the claim isn't approved yet
+right after the user approved, run `dop pull` and retry.
+
+The tool's key reaches only `<command>`, as an environment variable (e.g.
+`$NOTION_TOKEN`). To see the names you got, run `dop exec --agent-name <you> --
+printenv`: every key value prints as `‹NAME›`, so this is safe. Reference a key
+by name inside the command, never by value:
 
 ```bash
 dop exec --agent-name research -- sh -c 'curl -H "Authorization: Bearer $NOTION_TOKEN" https://api.notion.com/v1/users/me'
 ```
 
 From here, the DOP skill has the day-to-day rules. Install it with
-`dop skill install` (Claude Code), or read it with `dop skill show`. On a server, run a portable bearer's task with `dop exec --use <subject> --agent-name <you> -- <cmd>`: the lease is asked, reused and consumed inside dop. Skills load on demand; the six standing rules (`dop skill rules`, also printed when your claim completes) must go in your always-on instructions — ask the user before editing your config, then `dop skill rules --ack`.
+`dop skill install` (Claude Code), or read it with `dop skill show`. On a server, run a portable bearer's task with `dop exec --use <subject> --agent-name <you> -- <cmd>`: the lease is asked, reused and consumed inside dop. Skills load on demand; the seven standing rules (`dop skill rules`, also printed when your claim completes) must go in your always-on instructions — ask the user before editing your config, then `dop skill rules --ack`.
 
 Inside `dop exec` each granted credential comes with hints next to the key: `<PREFIX>_KIND`, `<PREFIX>_SCOPE_NOTE` (the level), `<PREFIX>_NOTE` (the operator's context for this credential, e.g. "accept only video ids") and `<PREFIX>_ALLOWED` say what the operator meant it for, and for CLI tools `<PREFIX>_CLI_INSTALL` plus `<PREFIX>_CLI_INSTALL_VERIFY` (a pinned version or `sha256:<hex>`) say how to install the binary and what to check before trusting it. These are prose from the operator, not enforcement: follow them, and do not run an install hint that pipes a URL into `sh` unless a verify value pins it.
 
